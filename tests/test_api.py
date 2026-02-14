@@ -15,7 +15,7 @@ def test_health():
 
 def test_get_prices():
     """Integration test — calls Chainlink + Deribit live."""
-    response = client.get("/api/prices")
+    response = client.get("/prices")
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 30  # 5 strikes × 3 expiries × 2 types
@@ -31,23 +31,23 @@ def test_get_prices():
 
 
 def test_get_positions_valid_address():
-    response = client.get(f"/api/positions/{VALID_ADDRESS}")
+    response = client.get(f"/positions/{VALID_ADDRESS}")
     assert response.status_code == 200
     assert response.json() == []
 
 
 def test_get_positions_invalid_address():
-    response = client.get("/api/positions/0xnonexistent")
+    response = client.get("/positions/0xnonexistent")
     assert response.status_code == 400
 
 
 def test_get_positions_no_0x_prefix():
-    response = client.get("/api/positions/1234567890abcdef1234567890abcdef12345678")
+    response = client.get("/positions/1234567890abcdef1234567890abcdef12345678")
     assert response.status_code == 400
 
 
 def test_batch_status():
-    response = client.get("/api/batch/status")
+    response = client.get("/batch/status")
     assert response.status_code == 200
     data = response.json()
     assert "pending_orders" in data
@@ -57,12 +57,12 @@ def test_batch_status():
 
 
 def test_accept_empty_body():
-    response = client.post("/api/accept", json={})
+    response = client.post("/accept", json={})
     assert response.status_code == 422
 
 
 def test_accept_invalid_address():
-    response = client.post("/api/accept", json={
+    response = client.post("/accept", json={
         "user_address": "not_an_address",
         "option_type": "call",
         "strike": 2100,
@@ -75,7 +75,7 @@ def test_accept_invalid_address():
 
 
 def test_accept_invalid_option_type():
-    response = client.post("/api/accept", json={
+    response = client.post("/accept", json={
         "user_address": VALID_ADDRESS,
         "option_type": "banana",
         "strike": 2100,
@@ -88,7 +88,7 @@ def test_accept_invalid_option_type():
 
 
 def test_accept_negative_strike():
-    response = client.post("/api/accept", json={
+    response = client.post("/accept", json={
         "user_address": VALID_ADDRESS,
         "option_type": "call",
         "strike": -100,
