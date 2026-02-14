@@ -13,3 +13,4 @@ class PriceResponse(BaseModel):
     spot: float
     ttl: int
     expires_at: float
+    available_amount: float  # max notional available at this price

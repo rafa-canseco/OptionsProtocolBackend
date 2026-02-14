@@ -1,42 +1,42 @@
-import time
+import re
 
 from fastapi import APIRouter, HTTPException
 
 from src.config import settings
 from src.db.database import get_client
-from src.models.order import AcceptOrderRequest, Order, OrderStatus
+from src.models.order import AcceptOrderRequest, OrderStatus
 from src.models.price import PriceResponse
-from src.pricing.black_scholes import OptionType
 from src.pricing.chainlink import get_eth_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.pricing.deribit import get_eth_iv
 from src.pricing.price_sheet import generate_price_sheet
 
+ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
 router = APIRouter()
+
+# Default available amount per quote (MVP: fixed per strike)
+DEFAULT_AVAILABLE_AMOUNT = 10.0  # 10 ETH
 
 
 @router.get("/prices", response_model=list[PriceResponse])
 async def get_prices():
     """Get current price menu for ETH options."""
-    # Check circuit breaker
     if circuit_breaker.is_paused:
         raise HTTPException(
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
 
-    # Get live data
     eth_price, _ = get_eth_price()
     iv = await get_eth_iv()
 
-    # Check circuit breaker against live price
     if circuit_breaker.check(eth_price):
         raise HTTPException(
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
 
-    # Update reference price on successful quote
     circuit_breaker.update_reference(eth_price)
 
     quotes = generate_price_sheet(spot=eth_price, iv=iv)
@@ -52,6 +52,7 @@ async def get_prices():
             spot=q.spot,
             ttl=q.ttl,
             expires_at=q.expires_at,
+            available_amount=DEFAULT_AVAILABLE_AMOUNT,
         )
         for q in quotes
     ]
@@ -63,11 +64,9 @@ async def accept_order(req: AcceptOrderRequest):
     if circuit_breaker.is_paused:
         raise HTTPException(status_code=503, detail="Pricing is paused")
 
-    # Verify the premium is still valid by recalculating
     eth_price, _ = get_eth_price()
     iv = await get_eth_iv()
 
-    # Check that spot hasn't moved too much since the quote
     spot_drift = abs(eth_price - req.spot_at_lock) / req.spot_at_lock
     if spot_drift > 0.005:  # 0.5% tolerance
         raise HTTPException(
@@ -75,7 +74,6 @@ async def accept_order(req: AcceptOrderRequest):
             detail=f"Price moved {spot_drift:.2%} since quote. Please refresh.",
         )
 
-    # Store order in Supabase
     client = get_client()
     result = (
         client.table("orders")
@@ -101,6 +99,9 @@ async def accept_order(req: AcceptOrderRequest):
 @router.get("/positions/{address}")
 async def get_positions(address: str):
     """Get all orders for a user address."""
+    if not ETH_ADDRESS_RE.match(address):
+        raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
     client = get_client()
     result = (
         client.table("orders")
@@ -117,7 +118,6 @@ async def batch_status():
     """Get next batch countdown and pending orders count."""
     client = get_client()
 
-    # Count pending orders
     pending = (
         client.table("orders")
         .select("id", count="exact")
@@ -125,7 +125,6 @@ async def batch_status():
         .execute()
     )
 
-    # Get the latest batch
     latest_batch = (
         client.table("batches")
         .select("*")
@@ -139,7 +138,7 @@ async def batch_status():
         last_batch_time = latest_batch.data[0]["created_at"]
 
     return {
-        "pending_orders": pending.count,
+        "pending_orders": pending.count or 0,
         "batch_interval_minutes": settings.batch_interval_minutes,
         "last_batch_at": last_batch_time,
         "circuit_breaker": circuit_breaker.status,
