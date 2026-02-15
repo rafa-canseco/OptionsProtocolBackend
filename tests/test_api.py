@@ -46,55 +46,13 @@ def test_get_positions_no_0x_prefix():
     assert response.status_code == 400
 
 
-def test_batch_status():
-    response = client.get("/batch/status")
-    assert response.status_code == 200
-    data = response.json()
-    assert "pending_orders" in data
-    assert isinstance(data["pending_orders"], int)
-    assert "batch_interval_minutes" in data
-    assert "circuit_breaker" in data
-
-
-def test_accept_empty_body():
+def test_accept_removed():
+    """POST /accept no longer exists — orders are on-chain."""
     response = client.post("/accept", json={})
-    assert response.status_code == 422
+    assert response.status_code in (404, 405)
 
 
-def test_accept_invalid_address():
-    response = client.post("/accept", json={
-        "user_address": "not_an_address",
-        "option_type": "call",
-        "strike": 2100,
-        "expiry_days": 7,
-        "premium": 50.0,
-        "spot_at_lock": 2086.0,
-        "iv_at_lock": 0.40,
-    })
-    assert response.status_code == 422
-
-
-def test_accept_invalid_option_type():
-    response = client.post("/accept", json={
-        "user_address": VALID_ADDRESS,
-        "option_type": "banana",
-        "strike": 2100,
-        "expiry_days": 7,
-        "premium": 50.0,
-        "spot_at_lock": 2086.0,
-        "iv_at_lock": 0.40,
-    })
-    assert response.status_code == 422
-
-
-def test_accept_negative_strike():
-    response = client.post("/accept", json={
-        "user_address": VALID_ADDRESS,
-        "option_type": "call",
-        "strike": -100,
-        "expiry_days": 7,
-        "premium": 50.0,
-        "spot_at_lock": 2086.0,
-        "iv_at_lock": 0.40,
-    })
-    assert response.status_code == 422
+def test_batch_status_removed():
+    """GET /batch/status no longer exists."""
+    response = client.get("/batch/status")
+    assert response.status_code == 404

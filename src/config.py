@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     # Pricing defaults
     risk_free_rate: float = 0.05  # 5% annualized
     price_ttl_seconds: int = 30  # how long a quoted price is valid
-    batch_interval_minutes: int = 30  # TODO: remove when /batch/status is deleted
 
     # Bot intervals
     price_publish_interval_seconds: int = 300  # 5 minutes
