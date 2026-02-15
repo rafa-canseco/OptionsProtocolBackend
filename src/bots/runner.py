@@ -1,0 +1,52 @@
+"""
+Standalone bot runner.
+
+Usage:
+    uv run python -m src.bots.runner price_publisher
+    uv run python -m src.bots.runner event_indexer
+    uv run python -m src.bots.runner expiry_settler
+    uv run python -m src.bots.runner circuit_breaker
+    uv run python -m src.bots.runner all
+"""
+import asyncio
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
+
+BOTS = {
+    "price_publisher": "src.bots.price_publisher",
+    "event_indexer": "src.bots.event_indexer",
+    "expiry_settler": "src.bots.expiry_settler",
+    "circuit_breaker": "src.bots.circuit_breaker_bot",
+}
+
+
+async def main(bot_name: str):
+    if bot_name == "all":
+        from src.bots import price_publisher, event_indexer, expiry_settler, circuit_breaker_bot
+        await asyncio.gather(
+            price_publisher.run(),
+            event_indexer.run(),
+            expiry_settler.run(),
+            circuit_breaker_bot.run(),
+        )
+    elif bot_name in BOTS:
+        import importlib
+        mod = importlib.import_module(BOTS[bot_name])
+        await mod.run()
+    else:
+        print(f"Unknown bot: {bot_name}")
+        print(f"Available: {', '.join(BOTS.keys())}, all")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python -m src.bots.runner <bot_name>")
+        print(f"Available: {', '.join(BOTS.keys())}, all")
+        sys.exit(1)
+    asyncio.run(main(sys.argv[1]))

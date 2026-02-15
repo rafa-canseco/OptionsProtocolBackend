@@ -1,3 +1,6 @@
+import logging
+import threading
+
 from web3 import Web3
 from web3.contract import Contract
 from eth_account import Account
@@ -10,7 +13,10 @@ from src.contracts.abis import (
     OTOKEN_ABI,
 )
 
+logger = logging.getLogger(__name__)
+
 _w3: Web3 | None = None
+_nonce_lock = threading.Lock()
 
 
 def get_w3() -> Web3:
@@ -56,16 +62,27 @@ def get_otoken(address: str) -> Contract:
     )
 
 
-def build_and_send_tx(contract_fn, account) -> str:
-    """Build, sign, and send a transaction. Returns tx hash hex."""
-    w3 = get_w3()
-    tx = contract_fn.build_transaction({
-        "from": account.address,
-        "nonce": w3.eth.get_transaction_count(account.address),
-        "gas": 500_000,
-        "gasPrice": w3.eth.gas_price,
-        "chainId": settings.chain_id,
-    })
-    signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
+    """Build, sign, send, and confirm a transaction. Returns tx hash hex.
+
+    Uses a lock + pending nonce to prevent nonce collisions between bots.
+    Waits for the transaction receipt and raises on revert.
+    """
+    with _nonce_lock:
+        w3 = get_w3()
+        nonce = w3.eth.get_transaction_count(account.address, "pending")
+        tx = contract_fn.build_transaction({
+            "from": account.address,
+            "nonce": nonce,
+            "gas": 500_000,
+            "gasPrice": w3.eth.gas_price,
+            "chainId": settings.chain_id,
+        })
+        signed = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
+    if receipt.status != 1:
+        logger.error(f"Transaction reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
+        raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}")
     return tx_hash.hex()
