@@ -53,12 +53,13 @@ async def invalidate_all_quotes():
 
 
 async def check_once():
-    """Single circuit breaker check."""
+    """Single circuit breaker check. If tripped, invalidates quotes on-chain."""
     eth_price, _ = get_eth_price()
 
     if circuit_breaker.check(eth_price):
         logger.warning(f"Circuit breaker tripped: {circuit_breaker.pause_reason}")
         await invalidate_all_quotes()
+        circuit_breaker.update_reference(eth_price)
 
 
 async def run():
