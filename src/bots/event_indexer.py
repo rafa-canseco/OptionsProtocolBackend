@@ -69,13 +69,10 @@ async def index_once():
     settler = get_batch_settler()
     to_block = min(from_block + BLOCK_RANGE - 1, current_block)
 
-    # Use the first event in the ABI (OrderExecuted)
-    # If the contracts instance renames this event, update abis.py
-    event_filter = settler.events.OrderExecuted.create_filter(
-        fromBlock=from_block,
-        toBlock=to_block,
+    raw_events = settler.events.OrderExecuted.get_logs(
+        from_block=from_block,
+        to_block=to_block,
     )
-    raw_events = event_filter.get_all_entries()
 
     events_to_store = []
     for ev in raw_events:
