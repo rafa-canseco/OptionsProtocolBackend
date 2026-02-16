@@ -66,15 +66,23 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
     Uses a lock + pending nonce to prevent nonce collisions between bots.
-    Waits for the transaction receipt and raises on revert.
+    Gas is estimated before acquiring the lock to minimize contention.
+    Waits for receipt and raises on revert.
     """
+    try:
+        gas_estimate = contract_fn.estimate_gas({"from": account.address})
+    except Exception as e:
+        logger.error(f"Gas estimation failed for tx from {account.address}: {e}")
+        raise
+    gas_limit = int(gas_estimate * 1.2)
+
     with _nonce_lock:
         w3 = get_w3()
         nonce = w3.eth.get_transaction_count(account.address, "pending")
         tx = contract_fn.build_transaction({
             "from": account.address,
             "nonce": nonce,
-            "gas": 500_000,
+            "gas": gas_limit,
             "gasPrice": w3.eth.gas_price,
             "chainId": settings.chain_id,
         })

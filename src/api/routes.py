@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DEFAULT_AVAILABLE_AMOUNT = 10.0
-MAX_EXPIRY_DIFF_DAYS = 3
+ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 def _quote_key(q: PriceQuote) -> tuple:
@@ -26,40 +26,59 @@ def _quote_key(q: PriceQuote) -> tuple:
 
 
 def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
-    """Map (type, strike, expiry_days) → oToken address using on-chain data.
+    """Map (type, strike, expiry_days) → oToken address via exact hash lookup.
 
-    Reuses the same matching logic as price_publisher.match_quotes_to_otokens:
-    match by option type, strike within $1, closest expiry (max 3 days diff).
-    Returns empty dict on failure — otoken_address will be null for all quotes.
+    Uses the same params hash as the contracts (keccak256 of packed params)
+    to look up oToken addresses from OTokenFactory. Read-only — does not create.
+    Returns empty dict on failure.
     """
     try:
-        from src.bots.price_publisher import discover_active_otokens
-        otokens = discover_active_otokens()
-    except Exception:
-        logger.exception("Failed to discover oTokens from factory")
-        return {}
+        from src.bots.price_publisher import (
+            compute_params_hash,
+            strike_to_8_decimals,
+            expiry_days_to_timestamp,
+        )
+        from src.pricing.black_scholes import OptionType
+        from src.contracts.web3_client import get_otoken_factory
+        from src.config import settings
+        from web3 import Web3
 
-    if not otokens:
-        logger.debug("No active oTokens on-chain; otoken_address will be null")
+        factory = get_otoken_factory()
+        weth = Web3.to_checksum_address(settings.weth_address)
+        usdc = Web3.to_checksum_address(settings.usdc_address)
+    except Exception:
+        logger.exception("Failed to initialize oToken lookup")
         return {}
 
     result: dict[tuple, str] = {}
+    # Cache lookups: None = failed/not found, str = address
+    seen: dict[tuple, str | None] = {}
+
     for q in quotes:
-        q_type = q.option_type.value
-        best_addr = None
-        best_expiry_diff = float("inf")
-        for ot in otokens:
-            ot_type = "put" if ot["is_put"] else "call"
-            if ot_type != q_type:
-                continue
-            if abs(q.strike - ot["strike_usd"]) > 1.0:
-                continue
-            diff = abs(q.expiry_days - ot["expiry_days"])
-            if diff < best_expiry_diff and diff <= MAX_EXPIRY_DIFF_DAYS:
-                best_expiry_diff = diff
-                best_addr = ot["address"]
-        if best_addr:
-            result[_quote_key(q)] = best_addr
+        key = _quote_key(q)
+        if key in seen:
+            if seen[key] is not None:
+                result[key] = seen[key]
+            continue
+
+        is_put = q.option_type == OptionType.PUT
+        collateral = usdc if is_put else weth
+        strike_price = strike_to_8_decimals(q.strike)
+        expiry = expiry_days_to_timestamp(q.expiry_days)
+
+        try:
+            params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
+            addr = factory.functions.getOToken(params_hash).call()
+        except Exception:
+            logger.exception(f"Failed to look up oToken for {key}")
+            seen[key] = None
+            continue
+
+        if addr != ZERO_ADDRESS:
+            result[key] = addr
+            seen[key] = addr
+        else:
+            seen[key] = None
 
     return result
 

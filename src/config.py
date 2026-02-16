@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     base_sepolia_rpc_url: str = "https://sepolia.base.org"
     chainlink_eth_usd_address: str = "0x4aDC67696bA383F43DD60A9e78F2C97Fbbfc7cb1"  # Base Sepolia
 
+    # Asset addresses (Base Sepolia)
+    weth_address: str = "0x4200000000000000000000000000000000000006"
+    usdc_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
     # Contract addresses (set after deployment)
     price_sheet_address: str = ""
     batch_settler_address: str = ""
