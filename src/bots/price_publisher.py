@@ -145,7 +145,7 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
                     results.append((addr, quote))
                     continue
             except Exception:
-                pass
+                logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
             logger.exception(f"Failed to create oToken: {label}")
             seen[key] = None
             continue

@@ -1,6 +1,8 @@
 import time
 from unittest.mock import patch, MagicMock
 
+from web3 import Web3
+
 from src.bots.price_publisher import (
     premium_to_usdc,
     strike_to_8_decimals,
@@ -254,3 +256,47 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
 
     assert len(results) == 1
     assert results[0][0] == addr1
+
+
+@patch("src.bots.price_publisher.build_and_send_tx")
+@patch("src.bots.price_publisher.get_operator_account")
+@patch("src.bots.price_publisher.get_otoken_factory")
+def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account, mock_tx):
+    """CALL options must use WETH as collateral."""
+    new_addr = "0x6666666666666666666666666666666666666666"
+    factory = MagicMock()
+    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, new_addr]
+    factory.functions.createOToken.return_value = MagicMock()
+    mock_factory_fn.return_value = factory
+    mock_account.return_value = MagicMock()
+    mock_tx.return_value = "0xabcd"
+
+    quotes = [_make_quote(option_type=OptionType.CALL)]
+    results = ensure_otokens_exist(quotes)
+
+    assert len(results) == 1
+    # 3rd arg to createOToken is collateral — must be WETH for calls
+    call_args = factory.functions.createOToken.call_args[0]
+    assert call_args[2] == Web3.to_checksum_address(WETH)
+
+
+@patch("src.bots.price_publisher.build_and_send_tx")
+@patch("src.bots.price_publisher.get_operator_account")
+@patch("src.bots.price_publisher.get_otoken_factory")
+def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, mock_tx):
+    """PUT options must use USDC as collateral."""
+    new_addr = "0x7777777777777777777777777777777777777777"
+    factory = MagicMock()
+    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, new_addr]
+    factory.functions.createOToken.return_value = MagicMock()
+    mock_factory_fn.return_value = factory
+    mock_account.return_value = MagicMock()
+    mock_tx.return_value = "0xabcd"
+
+    quotes = [_make_quote(option_type=OptionType.PUT)]
+    results = ensure_otokens_exist(quotes)
+
+    assert len(results) == 1
+    # 3rd arg to createOToken is collateral — must be USDC for puts
+    call_args = factory.functions.createOToken.call_args[0]
+    assert call_args[2] == Web3.to_checksum_address(USDC)
