@@ -129,6 +129,29 @@ OTOKEN_FACTORY_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # getOToken(bytes32) → address — mapping getter, returns address(0) if not created
+    {
+        "inputs": [{"name": "", "type": "bytes32"}],
+        "name": "getOToken",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # createOToken(address,address,address,uint256,uint256,bool) → address
+    {
+        "inputs": [
+            {"name": "_underlying", "type": "address"},
+            {"name": "_strikeAsset", "type": "address"},
+            {"name": "_collateralAsset", "type": "address"},
+            {"name": "_strikePrice", "type": "uint256"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_isPut", "type": "bool"},
+        ],
+        "name": "createOToken",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 OTOKEN_ABI = [
