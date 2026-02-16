@@ -50,7 +50,7 @@ app.add_middleware(
         "http://localhost:3000",
         "https://frontend-git-main-rcsc1s-projects.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origin_regex=r"https://.*-rcsc1s-projects\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
