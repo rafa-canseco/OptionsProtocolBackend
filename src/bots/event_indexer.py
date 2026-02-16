@@ -41,7 +41,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
         event_data["expiry"] = ot.functions.expiry().call()
         event_data["is_put"] = ot.functions.isPut().call()
     except Exception:
-        logger.warning(f"Could not read oToken metadata for {event_data['otoken_address']}")
+        logger.exception(f"Could not read oToken metadata for {event_data['otoken_address']}")
     return event_data
 
 
@@ -69,13 +69,10 @@ async def index_once():
     settler = get_batch_settler()
     to_block = min(from_block + BLOCK_RANGE - 1, current_block)
 
-    # Use the first event in the ABI (OrderExecuted)
-    # If the contracts instance renames this event, update abis.py
-    event_filter = settler.events.OrderExecuted.create_filter(
-        fromBlock=from_block,
-        toBlock=to_block,
+    raw_events = settler.events.OrderExecuted.get_logs(
+        from_block=from_block,
+        to_block=to_block,
     )
-    raw_events = event_filter.get_all_entries()
 
     events_to_store = []
     for ev in raw_events:

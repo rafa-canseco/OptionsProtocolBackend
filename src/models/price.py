@@ -14,3 +14,4 @@ class PriceResponse(BaseModel):
     ttl: int
     expires_at: float
     available_amount: float  # max notional available at this price
+    otoken_address: str | None = None  # on-chain oToken address, null if not yet created
