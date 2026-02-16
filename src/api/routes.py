@@ -32,15 +32,15 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
     match by option type, strike within $1, closest expiry (max 3 days diff).
     Returns empty dict on failure — otoken_address will be null for all quotes.
     """
-    from src.bots.price_publisher import discover_active_otokens
-
     try:
+        from src.bots.price_publisher import discover_active_otokens
         otokens = discover_active_otokens()
     except Exception:
         logger.exception("Failed to discover oTokens from factory")
         return {}
 
     if not otokens:
+        logger.debug("No active oTokens on-chain; otoken_address will be null")
         return {}
 
     result: dict[tuple, str] = {}

@@ -41,7 +41,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
         event_data["expiry"] = ot.functions.expiry().call()
         event_data["is_put"] = ot.functions.isPut().call()
     except Exception:
-        logger.warning(f"Could not read oToken metadata for {event_data['otoken_address']}")
+        logger.exception(f"Could not read oToken metadata for {event_data['otoken_address']}")
     return event_data
 
 
