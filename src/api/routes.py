@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 DEFAULT_AVAILABLE_AMOUNT = 10.0
+MAX_EXPIRY_DIFF_DAYS = 3
 
 
 def _quote_key(q: PriceQuote) -> tuple:
@@ -27,14 +29,15 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
     """Map (type, strike, expiry_days) → oToken address using on-chain data.
 
     Reuses the same matching logic as price_publisher.match_quotes_to_otokens:
-    match by option type, strike within $1, closest expiry.
+    match by option type, strike within $1, closest expiry (max 3 days diff).
+    Returns empty dict on failure — otoken_address will be null for all quotes.
     """
     from src.bots.price_publisher import discover_active_otokens
 
     try:
         otokens = discover_active_otokens()
     except Exception:
-        logger.warning("Could not discover oTokens, returning all null")
+        logger.exception("Failed to discover oTokens from factory")
         return {}
 
     if not otokens:
@@ -42,7 +45,7 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
 
     result: dict[tuple, str] = {}
     for q in quotes:
-        q_type = q.option_type.value  # "call" or "put"
+        q_type = q.option_type.value
         best_addr = None
         best_expiry_diff = float("inf")
         for ot in otokens:
@@ -52,7 +55,7 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
             if abs(q.strike - ot["strike_usd"]) > 1.0:
                 continue
             diff = abs(q.expiry_days - ot["expiry_days"])
-            if diff < best_expiry_diff:
+            if diff < best_expiry_diff and diff <= MAX_EXPIRY_DIFF_DAYS:
                 best_expiry_diff = diff
                 best_addr = ot["address"]
         if best_addr:
@@ -82,7 +85,7 @@ async def get_prices():
     circuit_breaker.update_reference(eth_price)
     quotes = generate_price_sheet(spot=eth_price, iv=iv)
 
-    otoken_map = _build_otoken_map(quotes)
+    otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
 
     return [
         PriceResponse(
