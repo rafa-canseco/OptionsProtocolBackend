@@ -1,6 +1,12 @@
-from src.bots.price_publisher import premium_to_usdc, match_quotes_to_otokens, SPREAD
-from src.pricing.price_sheet import PriceQuote
-from src.pricing.black_scholes import OptionType
+import time
+
+from src.bots.price_publisher import (
+    premium_to_usdc,
+    strike_to_8_decimals,
+    expiry_days_to_timestamp,
+    compute_params_hash,
+    SPREAD,
+)
 
 
 def test_premium_to_usdc():
@@ -14,90 +20,60 @@ def test_premium_to_usdc_zero():
     assert premium_to_usdc(0.0) == 1
 
 
-def test_match_quotes_to_otokens_call():
-    quotes = [
-        PriceQuote(
-            option_type=OptionType.CALL,
-            strike=2000.0,
-            expiry_days=7,
-            premium=50.0,
-            delta=0.5,
-            iv=0.4,
-            spot=2000.0,
-            created_at=0,
-            ttl=30,
-        ),
-    ]
-    otokens = [
-        {
-            "address": "0x1111111111111111111111111111111111111111",
-            "strike_price": 200000000000,  # 2000 * 1e8
-            "expiry": 1000000,
-            "is_put": False,
-            "strike_usd": 2000.0,
-            "expiry_days": 7.0,
-        },
-    ]
-    matched = match_quotes_to_otokens(quotes, otokens)
-    assert len(matched) == 1
-    addr, bid, ask, deadline = matched[0]
-    assert addr == "0x1111111111111111111111111111111111111111"
-    assert bid == premium_to_usdc(50.0 * (1 - SPREAD))
-    assert ask == premium_to_usdc(50.0 * (1 + SPREAD))
+def test_strike_to_8_decimals():
+    assert strike_to_8_decimals(2000.0) == 200_000_000_000
+    assert strike_to_8_decimals(2500.50) == 250_050_000_000
+    assert strike_to_8_decimals(100.0) == 10_000_000_000
 
 
-def test_match_quotes_to_otokens_no_match():
-    quotes = [
-        PriceQuote(
-            option_type=OptionType.CALL,
-            strike=2000.0,
-            expiry_days=7,
-            premium=50.0,
-            delta=0.5,
-            iv=0.4,
-            spot=2000.0,
-            created_at=0,
-            ttl=30,
-        ),
-    ]
-    otokens = [
-        {
-            "address": "0x2222222222222222222222222222222222222222",
-            "strike_price": 300000000000,  # 3000 * 1e8 — no match
-            "expiry": 1000000,
-            "is_put": False,
-            "strike_usd": 3000.0,
-            "expiry_days": 7.0,
-        },
-    ]
-    matched = match_quotes_to_otokens(quotes, otokens)
-    assert len(matched) == 0
+def test_expiry_days_to_timestamp_is_0800_utc():
+    """Expiry timestamp must be at 08:00 UTC (ts % 86400 == 28800)."""
+    for days in [7, 14, 30]:
+        ts = expiry_days_to_timestamp(days)
+        assert ts % 86400 == 28800, f"days={days}: {ts} is not 08:00 UTC"
 
 
-def test_match_quotes_put_vs_call():
-    """Put oToken should not match call quote."""
-    quotes = [
-        PriceQuote(
-            option_type=OptionType.CALL,
-            strike=2000.0,
-            expiry_days=7,
-            premium=50.0,
-            delta=0.5,
-            iv=0.4,
-            spot=2000.0,
-            created_at=0,
-            ttl=30,
-        ),
-    ]
-    otokens = [
-        {
-            "address": "0x3333333333333333333333333333333333333333",
-            "strike_price": 200000000000,
-            "expiry": 1000000,
-            "is_put": True,  # put, not call
-            "strike_usd": 2000.0,
-            "expiry_days": 7.0,
-        },
-    ]
-    matched = match_quotes_to_otokens(quotes, otokens)
-    assert len(matched) == 0
+def test_expiry_days_to_timestamp_is_future():
+    """All expiry timestamps must be in the future."""
+    now = int(time.time())
+    for days in [7, 14, 30]:
+        ts = expiry_days_to_timestamp(days)
+        assert ts > now, f"days={days}: {ts} should be > {now}"
+
+
+def test_expiry_days_ordering():
+    """Longer expiry → later timestamp."""
+    ts7 = expiry_days_to_timestamp(7)
+    ts14 = expiry_days_to_timestamp(14)
+    ts30 = expiry_days_to_timestamp(30)
+    assert ts7 < ts14 < ts30
+
+
+def test_compute_params_hash_deterministic():
+    """Same inputs → same hash."""
+    args = (
+        "0x4200000000000000000000000000000000000006",
+        "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        200_000_000_000,
+        1771833600,
+        True,
+    )
+    h1 = compute_params_hash(*args)
+    h2 = compute_params_hash(*args)
+    assert h1 == h2
+    assert len(h1) == 32
+
+
+def test_compute_params_hash_different_for_put_vs_call():
+    """Put and call with same strike/expiry should produce different hashes."""
+    common = (
+        "0x4200000000000000000000000000000000000006",
+        "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        200_000_000_000,
+        1771833600,
+    )
+    h_put = compute_params_hash(*common, True)
+    h_call = compute_params_hash(*common, False)
+    assert h_put != h_call
