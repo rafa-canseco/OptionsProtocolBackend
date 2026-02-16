@@ -51,12 +51,14 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
         return {}
 
     result: dict[tuple, str] = {}
-    seen: dict[tuple, str] = {}
+    # Cache lookups: None = failed/not found, str = address
+    seen: dict[tuple, str | None] = {}
 
     for q in quotes:
         key = _quote_key(q)
         if key in seen:
-            result[key] = seen[key]
+            if seen[key] is not None:
+                result[key] = seen[key]
             continue
 
         is_put = q.option_type == OptionType.PUT
@@ -68,15 +70,15 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
             params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
             addr = factory.functions.getOToken(params_hash).call()
         except Exception:
-            logger.debug(f"Failed to look up oToken for {key}")
-            seen[key] = ""
+            logger.exception(f"Failed to look up oToken for {key}")
+            seen[key] = None
             continue
 
         if addr != ZERO_ADDRESS:
             result[key] = addr
             seen[key] = addr
         else:
-            seen[key] = ""
+            seen[key] = None
 
     return result
 

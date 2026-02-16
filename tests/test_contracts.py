@@ -38,6 +38,8 @@ def test_otoken_factory_functions():
     fns = _fn_names(OTOKEN_FACTORY_ABI)
     assert "getOTokensLength" in fns
     assert "oTokens" in fns
+    assert "getOToken" in fns
+    assert "createOToken" in fns
 
 
 def test_otoken_functions():

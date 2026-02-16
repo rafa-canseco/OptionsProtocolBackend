@@ -5,7 +5,6 @@ Generates Black-Scholes prices, ensures oTokens exist on-chain
 for each quote, then publishes quotes to PriceSheet.
 """
 import asyncio
-import calendar
 import logging
 import time
 from datetime import datetime, timezone, timedelta
@@ -46,15 +45,17 @@ def expiry_days_to_timestamp(days: int) -> int:
     """Convert days-from-now to a UTC 08:00 expiry timestamp.
 
     The contract requires expiry % 86400 == 28800 (08:00 UTC).
-    We snap to 08:00 UTC of the target day.
+    Anchored to the next 08:00 UTC boundary so that all calls within
+    the same 24h window (08:00→08:00) produce the same timestamp.
+    If days=0 and current time is past 08:00 UTC, returns tomorrow's 08:00.
     """
     now = datetime.now(timezone.utc)
-    target = now + timedelta(days=days)
-    # Snap to 08:00 UTC of the target day
-    expiry_dt = target.replace(hour=8, minute=0, second=0, microsecond=0)
-    # If we've already passed 08:00 today and days=0, push to next day
-    if expiry_dt <= now:
-        expiry_dt += timedelta(days=1)
+    today_8am = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if today_8am <= now:
+        base = today_8am + timedelta(days=1)
+    else:
+        base = today_8am
+    expiry_dt = base + timedelta(days=days)
     return int(expiry_dt.timestamp())
 
 
@@ -83,7 +84,10 @@ def compute_params_hash(
 def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote]]:
     """For each quote, ensure the corresponding oToken exists on-chain.
 
+    Deduplicates by (strike, expiry_days, is_put) to avoid redundant on-chain calls.
     Creates oTokens via OTokenFactory.createOToken if they don't exist yet.
+    Handles OTokenAlreadyExists gracefully (reads existing address).
+    Skips individual quotes on failure without aborting the whole cycle.
     Returns a list of (otoken_address, quote) pairs.
     """
     factory = get_otoken_factory()
@@ -91,39 +95,74 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
     weth = Web3.to_checksum_address(settings.weth_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
-    # Deduplicate by (strike, expiry_days, option_type) — each combo maps to one oToken
-    seen: dict[tuple, str] = {}  # (strike, expiry_days, is_put) → otoken address
+    # (strike, expiry_days, is_put) → otoken address (None = failed)
+    seen: dict[tuple, str | None] = {}
     results: list[tuple[str, PriceQuote]] = []
 
     for quote in quotes:
         is_put = quote.option_type == OptionType.PUT
         key = (quote.strike, quote.expiry_days, is_put)
+        label = f"strike={quote.strike} expiry={quote.expiry_days}d {'put' if is_put else 'call'}"
 
         if key in seen:
-            results.append((seen[key], quote))
+            if seen[key] is not None:
+                results.append((seen[key], quote))
             continue
 
         strike_price = strike_to_8_decimals(quote.strike)
         expiry = expiry_days_to_timestamp(quote.expiry_days)
         collateral = usdc if is_put else weth
 
-        params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
-        existing = factory.functions.getOToken(params_hash).call()
+        # Step 1: check if oToken already exists
+        try:
+            params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
+            existing = factory.functions.getOToken(params_hash).call()
+        except Exception:
+            logger.exception(f"Failed to check oToken existence: {label}")
+            seen[key] = None
+            continue
 
         if existing != ZERO_ADDRESS:
-            logger.debug(f"oToken exists: strike={quote.strike} expiry={quote.expiry_days}d {'put' if is_put else 'call'} → {existing}")
+            logger.debug(f"oToken exists: {label} → {existing}")
             seen[key] = existing
             results.append((existing, quote))
             continue
 
-        # Create the oToken
-        logger.info(f"Creating oToken: strike={quote.strike} expiry={quote.expiry_days}d {'put' if is_put else 'call'}")
-        tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
-        tx_hash = build_and_send_tx(tx_fn, account)
-        logger.info(f"oToken created, tx: {tx_hash}")
+        # Step 2: create the oToken
+        try:
+            logger.info(f"Creating oToken: {label}")
+            tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
+            tx_hash = build_and_send_tx(tx_fn, account)
+            logger.info(f"oToken created, tx: {tx_hash}")
+        except Exception:
+            # Handle OTokenAlreadyExists (race condition: another actor created it)
+            # Try to read the address anyway before giving up
+            try:
+                addr = factory.functions.getOToken(params_hash).call()
+                if addr != ZERO_ADDRESS:
+                    logger.info(f"oToken already existed (race condition): {label} → {addr}")
+                    seen[key] = addr
+                    results.append((addr, quote))
+                    continue
+            except Exception:
+                pass
+            logger.exception(f"Failed to create oToken: {label}")
+            seen[key] = None
+            continue
 
-        # Read the address of the newly created oToken
-        otoken_addr = factory.functions.getOToken(params_hash).call()
+        # Step 3: read back the newly created address
+        try:
+            otoken_addr = factory.functions.getOToken(params_hash).call()
+        except Exception:
+            logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
+            seen[key] = None
+            continue
+
+        if otoken_addr == ZERO_ADDRESS:
+            logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
+            seen[key] = None
+            continue
+
         seen[key] = otoken_addr
         results.append((otoken_addr, quote))
 
@@ -165,6 +204,13 @@ async def publish_once():
 
 async def run():
     """Main loop: publish prices every N seconds."""
+    if not settings.otoken_factory_address:
+        logger.error("otoken_factory_address not configured, price publisher cannot start")
+        return
+    if not settings.operator_private_key:
+        logger.error("operator_private_key not configured, price publisher cannot start")
+        return
+
     logger.info(f"Price publisher starting (interval={settings.price_publish_interval_seconds}s)")
     while True:
         try:
