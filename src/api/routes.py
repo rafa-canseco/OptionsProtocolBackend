@@ -4,6 +4,7 @@ import re
 
 from fastapi import APIRouter, HTTPException
 
+from src.config import settings
 from src.db.database import get_client
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
@@ -107,12 +108,18 @@ async def get_prices():
 
     otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
 
+    if not (0 <= settings.protocol_fee_bps < 10_000):
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfiguration: invalid protocol_fee_bps",
+        )
+    fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
     return [
         PriceResponse(
             option_type=q.option_type,
             strike=q.strike,
             expiry_days=q.expiry_days,
-            premium=q.premium,
+            premium=q.premium * fee_mult,
             delta=q.delta,
             iv=q.iv,
             spot=q.spot,
@@ -143,18 +150,70 @@ async def join_waitlist(body: WaitlistRequest):
     return WaitlistResponse(ok=True)
 
 
+def _compute_outcome(position: dict) -> str | None:
+    """Compute human-readable outcome for settled positions.
+
+    Examples:
+      - "Bought 1.0000 ETH @ $2,400" — PUT ITM, user's USDC collateral was
+        swapped to WETH at strike (physical delivery)
+      - "Sold 1.0000 ETH @ $2,800" — CALL ITM, user's WETH collateral was
+        swapped to USDC at strike (physical delivery)
+      - "Expired ITM — cash settled" — physical delivery failed, fallback
+      - "Expired OTM — collateral returned"
+    """
+    if not position.get("is_settled"):
+        return None
+
+    if position.get("is_itm"):
+        st = position.get("settlement_type")
+        if st == "physical":
+            strike = position.get("strike_price")
+            amount_raw = position.get("amount")
+            is_put = position.get("is_put")
+            if strike is None or amount_raw is None or is_put is None:
+                return "Settled (physical) — details unavailable"
+            try:
+                # Both oToken amount and strike_price use 8 decimals
+                amount_human = int(amount_raw) / 1e8
+                strike_human = int(strike) / 1e8
+            except (ValueError, TypeError):
+                return "Settled (physical) — details unavailable"
+            if is_put:
+                return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+            else:
+                return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+        elif st == "physical_failed":
+            return "Expired ITM — delivery failed, pending review"
+        else:
+            return "Expired ITM — cash settled"
+
+    return "Expired OTM — collateral returned"
+
+
 @router.get("/positions/{address}")
 async def get_positions(address: str):
     """Get all positions for a user address (from indexed on-chain events)."""
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
 
-    client = get_client()
-    result = (
-        client.table("order_events")
-        .select("*")
-        .eq("user_address", address.lower())
-        .order("indexed_at", desc=True)
-        .execute()
-    )
-    return result.data
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select("*")
+            .eq("user_address", address.lower())
+            .order("indexed_at", desc=True)
+            .execute()
+        )
+    except Exception:
+        logger.exception(f"Failed to fetch positions for {address}")
+        raise HTTPException(status_code=502, detail="Could not fetch positions")
+
+    positions = result.data or []
+    for pos in positions:
+        pos["outcome"] = _compute_outcome(pos)
+        # Frontend sees net_premium as "premium". Fall back to premium
+        # for old rows that predate the fee columns.
+        if pos.get("net_premium") is not None:
+            pos["premium"] = pos["net_premium"]
+    return positions

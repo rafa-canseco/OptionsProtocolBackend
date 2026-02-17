@@ -83,7 +83,9 @@ BATCH_SETTLER_ABI = [
             {"indexed": True, "name": "user", "type": "address"},
             {"indexed": True, "name": "oToken", "type": "address"},
             {"indexed": False, "name": "amount", "type": "uint256"},
-            {"indexed": False, "name": "premium", "type": "uint256"},
+            {"indexed": False, "name": "grossPremium", "type": "uint256"},
+            {"indexed": False, "name": "netPremium", "type": "uint256"},
+            {"indexed": False, "name": "fee", "type": "uint256"},
             {"indexed": False, "name": "collateral", "type": "uint256"},
             {"indexed": False, "name": "vaultId", "type": "uint256"},
         ],
@@ -111,6 +113,36 @@ BATCH_SETTLER_ABI = [
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function",
+    },
+    # physicalRedeem(address oToken, address user, uint256 amount, uint256 maxCollateralSpent)
+    # Executes physical delivery for ITM positions via flash loan + DEX swap.
+    # Contract handles swap routing internally (exactOutputSingle).
+    # TODO: update ABI from blockchain/out/BatchSettler.sol/BatchSettler.json when ready.
+    {
+        "inputs": [
+            {"name": "oToken", "type": "address"},
+            {"name": "user", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+            {"name": "maxCollateralSpent", "type": "uint256"},
+        ],
+        "name": "physicalRedeem",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # PhysicalDeliveryExecuted — emitted by physicalRedeem().
+    # TODO: confirm event signature from contract build output.
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "user", "type": "address"},
+            {"indexed": True, "name": "oToken", "type": "address"},
+            {"indexed": False, "name": "deliveredAsset", "type": "address"},
+            {"indexed": False, "name": "deliveredAmount", "type": "uint256"},
+            {"indexed": False, "name": "collateralUsed", "type": "uint256"},
+        ],
+        "name": "PhysicalDeliveryExecuted",
+        "type": "event",
     },
 ]
 
@@ -181,6 +213,87 @@ OTOKEN_ABI = [
         "name": "collateralAsset",
         "outputs": [{"name": "", "type": "address"}],
         "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+ORACLE_ABI = [
+    # getExpiryPrice(address asset, uint256 expiry) → (uint256 price, bool isFinalized)
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiryTimestamp", "type": "uint256"},
+        ],
+        "name": "getExpiryPrice",
+        "outputs": [
+            {"name": "", "type": "uint256"},
+            {"name": "", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+CONTROLLER_ABI = [
+    # getVault(address owner, uint256 vaultId) → Vault tuple
+    {
+        "inputs": [
+            {"name": "_accountOwner", "type": "address"},
+            {"name": "_vaultId", "type": "uint256"},
+        ],
+        "name": "getVault",
+        "outputs": [
+            {
+                "components": [
+                    {"name": "shortOtoken", "type": "address"},
+                    {"name": "collateralAsset", "type": "address"},
+                    {"name": "shortAmount", "type": "uint256"},
+                    {"name": "collateralAmount", "type": "uint256"},
+                ],
+                "name": "",
+                "type": "tuple",
+            },
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # vaultSettled(address owner, uint256 vaultId) → bool
+    {
+        "inputs": [
+            {"name": "", "type": "address"},
+            {"name": "", "type": "uint256"},
+        ],
+        "name": "vaultSettled",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+UNISWAP_V3_QUOTER_ABI = [
+    # quoteExactOutputSingle — estimate how much input is needed for exact output
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "amount", "type": "uint256"},
+                    {"name": "fee", "type": "uint24"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            },
+        ],
+        "name": "quoteExactOutputSingle",
+        "outputs": [
+            {"name": "amountIn", "type": "uint256"},
+            {"name": "sqrtPriceX96After", "type": "uint160"},
+            {"name": "initializedTicksCrossed", "type": "uint32"},
+            {"name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
         "type": "function",
     },
 ]

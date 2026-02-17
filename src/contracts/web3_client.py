@@ -11,6 +11,8 @@ from src.contracts.abis import (
     BATCH_SETTLER_ABI,
     OTOKEN_FACTORY_ABI,
     OTOKEN_ABI,
+    ORACLE_ABI,
+    UNISWAP_V3_QUOTER_ABI,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,26 @@ def get_otoken(address: str) -> Contract:
     return w3.eth.contract(
         address=Web3.to_checksum_address(address),
         abi=OTOKEN_ABI,
+    )
+
+
+def get_oracle() -> Contract:
+    if not settings.oracle_address:
+        raise ValueError("oracle_address not configured. Set ORACLE_ADDRESS env var.")
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.oracle_address),
+        abi=ORACLE_ABI,
+    )
+
+
+def get_uniswap_quoter() -> Contract:
+    if not settings.uniswap_v3_quoter_address:
+        raise ValueError("uniswap_v3_quoter_address not configured. Set UNISWAP_V3_QUOTER_ADDRESS env var.")
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.uniswap_v3_quoter_address),
+        abi=UNISWAP_V3_QUOTER_ABI,
     )
 
 
