@@ -65,6 +65,14 @@ def test_waitlist_invalid_email():
     assert response.status_code == 422
 
 
+def test_waitlist_case_insensitive():
+    """Mixed-case duplicate should be treated as same email."""
+    client.post("/waitlist", json={"email": "CaseTest@Example.COM"})
+    response = client.post("/waitlist", json={"email": "casetest@example.com"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
 def test_waitlist_missing_email():
     response = client.post("/waitlist", json={})
     assert response.status_code == 422

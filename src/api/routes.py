@@ -128,11 +128,18 @@ async def get_prices():
 @router.post("/waitlist", response_model=WaitlistResponse)
 async def join_waitlist(body: WaitlistRequest):
     """Add an email to the waitlist. Idempotent — duplicates return 200."""
-    client = get_client()
-    client.table("waitlist").upsert(
-        {"email": body.email.lower()},
-        on_conflict="email",
-    ).execute()
+    try:
+        client = get_client()
+        result = client.table("waitlist").upsert(
+            {"email": body.email},
+            on_conflict="email",
+        ).execute()
+    except Exception:
+        logger.exception("Waitlist upsert failed for %s", body.email)
+        raise HTTPException(status_code=502, detail="Could not save to waitlist")
+    if not result.data:
+        logger.error("Waitlist upsert returned empty data for %s", body.email)
+        raise HTTPException(status_code=502, detail="Could not save to waitlist")
     return WaitlistResponse(ok=True)
 
 
