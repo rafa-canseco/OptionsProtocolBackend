@@ -53,20 +53,24 @@ def get_expired_unsettled() -> list[dict]:
 
 def identify_itm_positions(
     positions: list[dict],
-) -> tuple[list[dict], dict[int, int | None]]:
+) -> tuple[list[dict], dict[int, int | None], set[tuple[str, int]]]:
     """Separate ITM from OTM positions based on oracle expiry price.
 
     Reads the oracle's finalized expiry price and compares with strike:
       - PUT is ITM if expiryPrice < strikePrice
       - CALL is ITM if expiryPrice > strikePrice
 
-    Returns (itm_positions, expiry_price_cache) so the cache can be reused
-    for OTM marking without redundant on-chain reads.
+    Returns (itm_positions, expiry_price_cache, skipped_keys):
+      - itm_positions: positions that are in-the-money
+      - expiry_price_cache: reusable cache for OTM marking
+      - skipped_keys: (user_address, vault_id) tuples for positions whose
+        oracle price was unavailable — must be excluded from OTM classification
     """
     oracle = get_oracle()
     weth = Web3.to_checksum_address(settings.weth_address)
 
     itm: list[dict] = []
+    skipped: set[tuple[str, int]] = set()
     expiry_price_cache: dict[int, int | None] = {}
 
     for pos in positions:
@@ -82,6 +86,7 @@ def identify_itm_positions(
         oracle_price = expiry_price_cache[expiry]
         if oracle_price is None:
             logger.warning(f"Expiry price not finalized for {expiry}, skipping position")
+            skipped.add((pos["user_address"], pos["vault_id"]))
             continue
 
         strike = int(pos["strike_price"])
@@ -92,8 +97,11 @@ def identify_itm_positions(
             pos["expiry_price_raw"] = oracle_price
             itm.append(pos)
 
-    logger.info(f"Identified {len(itm)} ITM out of {len(positions)} expired positions")
-    return itm, expiry_price_cache
+    logger.info(
+        f"Identified {len(itm)} ITM, {len(skipped)} skipped "
+        f"out of {len(positions)} expired positions"
+    )
+    return itm, expiry_price_cache, skipped
 
 
 def compute_max_collateral_spent(position: dict) -> tuple[int, int]:
@@ -180,7 +188,6 @@ async def settle_once():
     account = get_operator_account()
 
     settled_positions: list[dict] = []
-    phase1_tx_map: dict[tuple[str, int], str] = {}  # (user, vault_id) → tx_hash
     phase1_failed = False
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
@@ -200,8 +207,6 @@ async def settle_once():
 
         # On-chain succeeded — these vaults ARE settled regardless of DB outcome
         settled_positions.extend(batch)
-        for o, v in zip(owners, vault_ids):
-            phase1_tx_map[(o, v)] = tx_hash
 
         # Step 2: mark in DB (separate try so on-chain success is never misattributed)
         now = datetime.now(timezone.utc).isoformat()
@@ -230,7 +235,7 @@ async def settle_once():
     await asyncio.sleep(delay)
 
     # --- Phase 2: physical delivery for ITM positions ---
-    itm_positions, expiry_cache = await asyncio.to_thread(
+    itm_positions, expiry_cache, skipped_keys = await asyncio.to_thread(
         identify_itm_positions, settled_positions,
     )
 
@@ -315,13 +320,17 @@ async def settle_once():
             except Exception:
                 pass  # already logged by _db_update
 
-    # Update OTM positions with expiry price and ITM flag (display only)
+    # Update OTM positions with expiry price and ITM flag (display only).
+    # Exclude both ITM positions and skipped positions (oracle unavailable)
+    # to avoid incorrectly marking skipped positions as OTM.
     itm_keys = {(p["user_address"], p["vault_id"]) for p in itm_positions}
+    excluded_keys = itm_keys | skipped_keys
     otm_positions = [
         p for p in settled_positions
-        if (p["user_address"], p["vault_id"]) not in itm_keys
+        if (p["user_address"], p["vault_id"]) not in excluded_keys
     ]
     if otm_positions:
+        otm_failures = 0
         for pos in otm_positions:
             expiry = pos["expiry"]
             cached_price = expiry_cache.get(expiry)
@@ -332,8 +341,14 @@ async def settle_once():
                     "expiry_price": expiry_price_str,
                 }, "OTM expiry price update")
             except Exception:
-                pass  # already logged by _db_update
-        logger.info(f"Updated {len(otm_positions)} OTM positions with expiry data")
+                otm_failures += 1
+        updated = len(otm_positions) - otm_failures
+        logger.info(f"Updated {updated}/{len(otm_positions)} OTM positions with expiry data")
+    if skipped_keys:
+        logger.warning(
+            f"{len(skipped_keys)} positions skipped (oracle unavailable), "
+            f"will retry next cycle"
+        )
 
 
 def _mark_batch_settled(
@@ -349,9 +364,9 @@ def _mark_batch_settled(
             "settlement_type": "cash",
         }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
         if not result.data:
-            logger.error(
-                f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
-            )
+            msg = f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
+            logger.error(msg)
+            raise RuntimeError(msg)
 
 
 async def _wait_until_target_hour():

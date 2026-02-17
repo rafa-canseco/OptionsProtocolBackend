@@ -100,7 +100,7 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
                 "otoken_address", ev["otoken_address"],
             ).execute()
             if result.data:
-                updated += 1
+                updated += len(result.data)
             else:
                 logger.warning(
                     f"Physical delivery event matched no DB row: "
