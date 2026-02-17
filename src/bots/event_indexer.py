@@ -1,7 +1,7 @@
 """
 Event Indexer Bot
 
-Polls OrderExecuted events from BatchSettler.executeOrder(),
+Polls OrderExecuted and PhysicalDeliveryExecuted events from BatchSettler,
 stores them in the order_events Supabase table.
 Tracks last_indexed_block for resumability.
 """
@@ -57,6 +57,27 @@ def _store_events(events: list[dict]) -> int:
     return len(result.data) if result.data else 0
 
 
+def _update_delivery_events(delivery_events: list[dict]) -> int:
+    """Update existing order_events rows with physical delivery data."""
+    if not delivery_events:
+        return 0
+    client = get_client()
+    updated = 0
+    for ev in delivery_events:
+        result = client.table("order_events").update({
+            "settlement_type": "physical",
+            "delivered_asset": ev["delivered_asset"],
+            "delivered_amount": ev["delivered_amount"],
+            "delivery_tx_hash": ev["delivery_tx_hash"],
+            "is_itm": True,
+        }).eq("user_address", ev["user_address"]).eq(
+            "otoken_address", ev["otoken_address"],
+        ).execute()
+        if result.data:
+            updated += 1
+    return updated
+
+
 async def index_once():
     """Single indexing cycle: fetch new events from chain, store in DB."""
     w3 = get_w3()
@@ -69,6 +90,7 @@ async def index_once():
     settler = get_batch_settler()
     to_block = min(from_block + BLOCK_RANGE - 1, current_block)
 
+    # Index OrderExecuted events (new orders)
     raw_events = settler.events.OrderExecuted.get_logs(
         from_block=from_block,
         to_block=to_block,
@@ -91,6 +113,29 @@ async def index_once():
         events_to_store.append(event_data)
 
     stored = _store_events(events_to_store)
+
+    # Index PhysicalDeliveryExecuted events (ITM delivery)
+    try:
+        delivery_events_raw = settler.events.PhysicalDeliveryExecuted.get_logs(
+            from_block=from_block,
+            to_block=to_block,
+        )
+        delivery_to_update = []
+        for ev in delivery_events_raw:
+            delivery_to_update.append({
+                "user_address": ev.args.user.lower(),
+                "otoken_address": ev.args.oToken.lower(),
+                "delivered_asset": ev.args.deliveredAsset.lower(),
+                "delivered_amount": str(ev.args.deliveredAmount),
+                "delivery_tx_hash": ev.transactionHash.hex(),
+            })
+        delivered = _update_delivery_events(delivery_to_update)
+        if delivered > 0:
+            logger.info(f"Updated {delivered} positions with physical delivery data")
+    except Exception:
+        # Event may not exist yet if contract hasn't been updated
+        logger.debug("PhysicalDeliveryExecuted event not available (contract pending)")
+
     _set_last_indexed_block(to_block)
 
     if stored > 0:

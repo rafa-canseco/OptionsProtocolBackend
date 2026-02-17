@@ -143,6 +143,39 @@ async def join_waitlist(body: WaitlistRequest):
     return WaitlistResponse(ok=True)
 
 
+def _compute_outcome(position: dict) -> str | None:
+    """Compute human-readable outcome for settled positions.
+
+    Examples:
+      - "Bought 1.0000 ETH @ $2,400" (PUT ITM, physical delivery)
+      - "Sold 1.0000 ETH @ $2,800" (CALL ITM, physical delivery)
+      - "Expired OTM — collateral returned" (OTM, cash settlement)
+    """
+    if not position.get("is_settled"):
+        return None
+
+    if position.get("settlement_type") == "physical" and position.get("is_itm"):
+        strike = position.get("strike_price")
+        amount_raw = position.get("amount")
+        is_put = position.get("is_put")
+        if strike is None or amount_raw is None or is_put is None:
+            return None
+
+        # oToken amount is 8 decimals
+        amount_human = int(amount_raw) / 1e8
+        strike_human = int(strike) / 1e8
+
+        if is_put:
+            return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+        else:
+            return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+
+    if position.get("is_settled") and not position.get("is_itm"):
+        return "Expired OTM — collateral returned"
+
+    return None
+
+
 @router.get("/positions/{address}")
 async def get_positions(address: str):
     """Get all positions for a user address (from indexed on-chain events)."""
@@ -157,4 +190,8 @@ async def get_positions(address: str):
         .order("indexed_at", desc=True)
         .execute()
     )
-    return result.data
+
+    positions = result.data or []
+    for pos in positions:
+        pos["outcome"] = _compute_outcome(pos)
+    return positions

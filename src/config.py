@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
 
+    # Physical settlement (flash loan + DEX swap)
+    uniswap_v3_router_address: str = ""
+    uniswap_v3_quoter_address: str = ""
+    aave_v3_pool_address: str = ""
+    swap_slippage_tolerance: float = 0.01  # 1% slippage default
+    flash_loan_redeem_delay_seconds: int = 300  # wait 5 min post-settle before delivery
+
+    # Oracle (for reading expiry prices)
+    oracle_address: str = ""
+
     # Chain
     chain_id: int = 84532  # Base Sepolia
 

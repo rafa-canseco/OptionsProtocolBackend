@@ -26,3 +26,11 @@ class OnChainOrder(BaseModel):
     settled_at: datetime | None = None
     settlement_tx_hash: str | None = None
     indexed_at: datetime | None = None
+
+    # Physical settlement fields
+    settlement_type: str | None = None       # "physical" or "cash"
+    delivered_asset: str | None = None       # address of asset delivered to user
+    delivered_amount: str | None = None      # raw amount delivered
+    delivery_tx_hash: str | None = None      # tx hash of physical delivery
+    is_itm: bool | None = None               # whether option expired in-the-money
+    expiry_price: str | None = None          # oracle ETH price at expiry
