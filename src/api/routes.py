@@ -135,10 +135,10 @@ async def join_waitlist(body: WaitlistRequest):
             on_conflict="email",
         ).execute()
     except Exception:
-        logger.exception("Waitlist upsert failed for %s", body.email)
+        logger.exception("Waitlist upsert failed")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
     if not result.data:
-        logger.error("Waitlist upsert returned empty data for %s", body.email)
+        logger.error("Waitlist upsert returned empty data")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
     return WaitlistResponse(ok=True)
 
