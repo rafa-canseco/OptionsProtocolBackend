@@ -4,6 +4,7 @@ import re
 
 from fastapi import APIRouter, HTTPException
 
+from src.config import settings
 from src.db.database import get_client
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
@@ -107,12 +108,13 @@ async def get_prices():
 
     otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
 
+    fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
     return [
         PriceResponse(
             option_type=q.option_type,
             strike=q.strike,
             expiry_days=q.expiry_days,
-            premium=q.premium,
+            premium=q.premium * fee_mult,
             delta=q.delta,
             iv=q.iv,
             spot=q.spot,
@@ -201,4 +203,8 @@ async def get_positions(address: str):
     positions = result.data or []
     for pos in positions:
         pos["outcome"] = _compute_outcome(pos)
+        # Frontend sees net_premium as "premium". Fall back to premium
+        # for old rows that predate the fee columns.
+        if pos.get("net_premium") is not None:
+            pos["premium"] = pos["net_premium"]
     return positions

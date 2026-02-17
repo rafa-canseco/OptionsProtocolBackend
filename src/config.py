@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Circuit breaker
     circuit_breaker_threshold: float = 0.02  # 2% move triggers pause
 
+    # Protocol fee
+    protocol_fee_bps: int = 400  # 4% — must match on-chain value
+
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
 

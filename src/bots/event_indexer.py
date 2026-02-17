@@ -143,7 +143,10 @@ async def index_once():
             "user_address": ev.args.user.lower(),
             "otoken_address": ev.args.oToken.lower(),
             "amount": str(ev.args.amount),
-            "premium": str(ev.args.premium),
+            "premium": str(ev.args.grossPremium),
+            "gross_premium": str(ev.args.grossPremium),
+            "net_premium": str(ev.args.netPremium),
+            "protocol_fee": str(ev.args.fee),
             "collateral": str(ev.args.collateral),
             "vault_id": ev.args.vaultId,
         }

@@ -16,8 +16,11 @@ class OnChainOrder(BaseModel):
     user_address: str
     otoken_address: str
     amount: str          # raw oToken amount (8 decimals) as string for precision
-    premium: str         # raw USDC premium (6 decimals) as string
+    premium: str         # raw gross premium (6 decimals) — kept for backwards compat
     collateral: str      # raw collateral as string
+    gross_premium: str | None = None   # what the MM paid (= premium, for analytics)
+    net_premium: str | None = None     # what the user received (after protocol fee)
+    protocol_fee: str | None = None    # what the treasury received
     vault_id: int
     strike_price: int | None = None
     expiry: int | None = None
