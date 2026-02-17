@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from src.db.database import get_client
 from src.models.price import PriceResponse
+from src.models.waitlist import WaitlistRequest, WaitlistResponse
 from src.pricing.chainlink import get_eth_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.pricing.deribit import get_eth_iv
@@ -122,6 +123,17 @@ async def get_prices():
         )
         for q in quotes
     ]
+
+
+@router.post("/waitlist", response_model=WaitlistResponse)
+async def join_waitlist(body: WaitlistRequest):
+    """Add an email to the waitlist. Idempotent — duplicates return 200."""
+    client = get_client()
+    client.table("waitlist").upsert(
+        {"email": body.email.lower()},
+        on_conflict="email",
+    ).execute()
+    return WaitlistResponse(ok=True)
 
 
 @router.get("/positions/{address}")
