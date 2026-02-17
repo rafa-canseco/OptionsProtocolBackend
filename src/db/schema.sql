@@ -80,3 +80,13 @@ create table if not exists indexer_state (
 
 insert into indexer_state (last_indexed_block) values (0)
   on conflict (id) do nothing;
+
+-- ============================================================
+-- Waitlist
+-- ============================================================
+
+create table if not exists waitlist (
+  id bigint generated always as identity primary key,
+  email text not null unique,
+  created_at timestamptz not null default now()
+);

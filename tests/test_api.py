@@ -46,6 +46,38 @@ def test_get_positions_no_0x_prefix():
     assert response.status_code == 400
 
 
+def test_waitlist_valid_email():
+    response = client.post("/waitlist", json={"email": "test@example.com"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_waitlist_duplicate_email():
+    """Duplicate email should still return 200."""
+    client.post("/waitlist", json={"email": "dupe@example.com"})
+    response = client.post("/waitlist", json={"email": "dupe@example.com"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_waitlist_invalid_email():
+    response = client.post("/waitlist", json={"email": "not-an-email"})
+    assert response.status_code == 422
+
+
+def test_waitlist_case_insensitive():
+    """Mixed-case duplicate should be treated as same email."""
+    client.post("/waitlist", json={"email": "CaseTest@Example.COM"})
+    response = client.post("/waitlist", json={"email": "casetest@example.com"})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+
+
+def test_waitlist_missing_email():
+    response = client.post("/waitlist", json={})
+    assert response.status_code == 422
+
+
 def test_accept_removed():
     """POST /accept no longer exists — orders are on-chain."""
     response = client.post("/accept", json={})
