@@ -69,12 +69,12 @@ def _store_events(events: list[dict]) -> int:
         events,
         on_conflict="tx_hash",
     ).execute()
-    if not result.data and events:
+    if not result.data:
         logger.error(
             f"_store_events: Supabase returned empty data for {len(events)} events"
         )
         raise RuntimeError(f"Supabase upsert returned no data for {len(events)} events")
-    return len(result.data) if result.data else 0
+    return len(result.data)
 
 
 def _update_delivery_events(delivery_events: list[dict]) -> int:
@@ -89,27 +89,20 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
     client = get_client()
     updated = 0
     for ev in delivery_events:
-        try:
-            result = client.table("order_events").update({
-                "settlement_type": "physical",
-                "delivered_asset": ev["delivered_asset"],
-                "delivered_amount": ev["delivered_amount"],
-                "delivery_tx_hash": ev["delivery_tx_hash"],
-                "is_itm": True,
-            }).eq("user_address", ev["user_address"]).eq(
-                "otoken_address", ev["otoken_address"],
-            ).execute()
-            if result.data:
-                updated += len(result.data)
-            else:
-                logger.warning(
-                    f"Physical delivery event matched no DB row: "
-                    f"user={ev['user_address']} otoken={ev['otoken_address']} "
-                    f"tx={ev['delivery_tx_hash']}"
-                )
-        except Exception:
-            logger.exception(
-                f"Failed to update delivery event: "
+        result = client.table("order_events").update({
+            "settlement_type": "physical",
+            "delivered_asset": ev["delivered_asset"],
+            "delivered_amount": ev["delivered_amount"],
+            "delivery_tx_hash": ev["delivery_tx_hash"],
+            "is_itm": True,
+        }).eq("user_address", ev["user_address"]).eq(
+            "otoken_address", ev["otoken_address"],
+        ).execute()
+        if result.data:
+            updated += len(result.data)
+        else:
+            logger.warning(
+                f"Physical delivery event matched no DB row: "
                 f"user={ev['user_address']} otoken={ev['otoken_address']} "
                 f"tx={ev['delivery_tx_hash']}"
             )
@@ -157,13 +150,18 @@ async def index_once():
 
     # Index PhysicalDeliveryExecuted events (ITM delivery)
     try:
-        delivery_events_raw = settler.events.PhysicalDeliveryExecuted.get_logs(
+        delivery_event_type = settler.events.PhysicalDeliveryExecuted
+    except AttributeError:
+        logger.info("PhysicalDeliveryExecuted event not in ABI (contract pending upgrade)")
+        delivery_event_type = None
+
+    if delivery_event_type is not None:
+        # get_logs errors (RPC/network) must propagate to prevent block pointer advance
+        delivery_events_raw = delivery_event_type.get_logs(
             from_block=from_block,
             to_block=to_block,
         )
-    except (AttributeError, KeyError):
-        # Event not in ABI — contract hasn't been upgraded yet
-        logger.debug("PhysicalDeliveryExecuted event not in ABI (contract pending upgrade)")
+    else:
         delivery_events_raw = []
 
     if delivery_events_raw:

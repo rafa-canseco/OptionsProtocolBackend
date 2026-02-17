@@ -18,9 +18,9 @@ class OnChainOrder(BaseModel):
     amount: str          # raw oToken amount (8 decimals) as string for precision
     premium: str         # raw gross premium (6 decimals) — kept for backwards compat
     collateral: str      # raw collateral as string
-    gross_premium: str | None = None   # what the MM paid (= premium, for analytics)
-    net_premium: str | None = None     # what the user received (after protocol fee)
-    protocol_fee: str | None = None    # what the treasury received
+    gross_premium: str | None = None   # total premium before protocol fee
+    net_premium: str | None = None     # premium credited to user after fee deduction
+    protocol_fee: str | None = None    # fee taken by protocol treasury
     vault_id: int
     strike_price: int | None = None
     expiry: int | None = None
@@ -31,7 +31,7 @@ class OnChainOrder(BaseModel):
     indexed_at: datetime | None = None
 
     # Physical settlement fields
-    settlement_type: str | None = None       # "physical" or "cash"
+    settlement_type: str | None = None       # "physical", "cash", or "physical_failed"
     delivered_asset: str | None = None       # address of asset delivered to user
     delivered_amount: str | None = None      # raw amount delivered
     delivery_tx_hash: str | None = None      # tx hash of physical delivery

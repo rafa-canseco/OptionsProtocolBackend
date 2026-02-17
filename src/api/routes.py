@@ -108,6 +108,11 @@ async def get_prices():
 
     otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
 
+    if not (0 <= settings.protocol_fee_bps < 10_000):
+        raise HTTPException(
+            status_code=500,
+            detail="Server misconfiguration: invalid protocol_fee_bps",
+        )
     fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
     return [
         PriceResponse(
@@ -191,14 +196,18 @@ async def get_positions(address: str):
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
 
-    client = get_client()
-    result = (
-        client.table("order_events")
-        .select("*")
-        .eq("user_address", address.lower())
-        .order("indexed_at", desc=True)
-        .execute()
-    )
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select("*")
+            .eq("user_address", address.lower())
+            .order("indexed_at", desc=True)
+            .execute()
+        )
+    except Exception:
+        logger.exception(f"Failed to fetch positions for {address}")
+        raise HTTPException(status_code=502, detail="Could not fetch positions")
 
     positions = result.data or []
     for pos in positions:

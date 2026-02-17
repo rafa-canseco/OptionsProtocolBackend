@@ -267,7 +267,10 @@ async def settle_once():
                     "expiry_price": expiry_price_str,
                 }, "Phase 2 quote-fail mark")
             except Exception:
-                pass  # already logged by _db_update
+                logger.error(
+                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
+                    f"vault={vault_id}. Position is ITM but has no settlement_type in DB."
+                )
             continue
 
         # Step 2: on-chain physical delivery
@@ -318,7 +321,10 @@ async def settle_once():
                     "expiry_price": expiry_price_str,
                 }, "Phase 2 delivery-fail mark")
             except Exception:
-                pass  # already logged by _db_update
+                logger.error(
+                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
+                    f"vault={vault_id}. Position is ITM but has no settlement_type in DB."
+                )
 
     # Update OTM positions with expiry price and ITM flag (display only).
     # Exclude both ITM positions and skipped positions (oracle unavailable)
@@ -343,34 +349,52 @@ async def settle_once():
             except Exception:
                 otm_failures += 1
         updated = len(otm_positions) - otm_failures
-        logger.info(f"Updated {updated}/{len(otm_positions)} OTM positions with expiry data")
+        if otm_failures:
+            logger.error(
+                f"Failed to update {otm_failures}/{len(otm_positions)} OTM positions"
+            )
+        else:
+            logger.info(f"Updated {len(otm_positions)} OTM positions with expiry data")
     if skipped_keys:
-        logger.warning(
-            f"{len(skipped_keys)} positions skipped (oracle unavailable), "
-            f"will retry next cycle"
+        logger.error(
+            f"ALERT: {len(skipped_keys)} positions skipped (oracle unavailable). "
+            f"Already settled on-chain but lack ITM/OTM classification. "
+            f"REQUIRES MANUAL REVIEW."
         )
 
 
 def _mark_batch_settled(
     owners: list[str], vault_ids: list[int], tx_hash: str, now: str,
 ) -> None:
-    """Mark a batch of positions as settled in the DB. Raises on first failure."""
+    """Mark a batch of positions as settled in the DB. Raises if any failed."""
     client = get_client()
+    failures = 0
     for user_addr, vault_id in zip(owners, vault_ids):
-        result = client.table("order_events").update({
-            "is_settled": True,
-            "settled_at": now,
-            "settlement_tx_hash": tx_hash,
-            "settlement_type": "cash",
-        }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
-        if not result.data:
-            msg = f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
-            logger.error(msg)
-            raise RuntimeError(msg)
+        try:
+            result = client.table("order_events").update({
+                "is_settled": True,
+                "settled_at": now,
+                "settlement_tx_hash": tx_hash,
+                "settlement_type": "cash",
+            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+            if not result.data:
+                logger.error(
+                    f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
+                )
+                failures += 1
+        except Exception:
+            logger.exception(
+                f"_mark_batch_settled failed: user={user_addr} vault={vault_id}"
+            )
+            failures += 1
+    if failures:
+        raise RuntimeError(
+            f"_mark_batch_settled: {failures}/{len(owners)} positions failed"
+        )
 
 
 async def _wait_until_target_hour():
-    """Sleep until the next 08:00 UTC."""
+    """Sleep until the next settlement hour (default 08:00 UTC)."""
     now = datetime.now(timezone.utc)
     target = now.replace(
         hour=settings.expiry_settle_hour_utc,
