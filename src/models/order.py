@@ -19,7 +19,7 @@ class OnChainOrder(BaseModel):
     premium: str         # raw USDC premium (6 decimals) as string
     collateral: str      # raw collateral as string
     vault_id: int
-    strike_price: float | None = None
+    strike_price: int | None = None
     expiry: int | None = None
     is_put: bool | None = None
     is_settled: bool = False

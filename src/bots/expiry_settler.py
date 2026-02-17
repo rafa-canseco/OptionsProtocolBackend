@@ -6,6 +6,7 @@ Two-phase settlement at 08:00 UTC daily:
   2. physicalRedeem() per ITM position — flash loan + DEX swap delivers contra-asset
 
 DB marking happens per-batch in Phase 1 and per-position in Phase 2.
+On-chain calls and DB writes are in separate try blocks to prevent misattribution.
 """
 import asyncio
 import logging
@@ -30,7 +31,11 @@ UNISWAP_FEE_TIER = 3000  # 0.3% — standard tier for ETH/USDC on Uniswap V3
 
 
 def get_expired_unsettled() -> list[dict]:
-    """Get all unsettled positions with expired oTokens."""
+    """Get all unsettled positions with expired oTokens.
+
+    Filters out rows missing settlement-critical fields (strike_price, is_put)
+    which can happen if oToken metadata enrichment failed during indexing.
+    """
     client = get_client()
     now = int(datetime.now(timezone.utc).timestamp())
     result = (
@@ -38,6 +43,9 @@ def get_expired_unsettled() -> list[dict]:
         .select("user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put")
         .eq("is_settled", False)
         .lt("expiry", now)
+        .not_.is_("strike_price", "null")
+        .not_.is_("is_put", "null")
+        .not_.is_("amount", "null")
         .execute()
     )
     return result.data or []
@@ -88,8 +96,11 @@ def identify_itm_positions(
     return itm, expiry_price_cache
 
 
-def compute_max_collateral_spent(position: dict) -> int:
+def compute_max_collateral_spent(position: dict) -> tuple[int, int]:
     """Compute maxCollateralSpent for physicalRedeem via Uniswap Quoter.
+
+    Returns (max_collateral_spent, contra_amount) so the caller can reuse
+    contra_amount as delivered_amount without recalculating.
 
     1. Determine contra-asset amount (what user receives):
        - PUT ITM: user gets WETH. contra_amount = oTokenAmount * 1e10
@@ -136,71 +147,24 @@ def compute_max_collateral_spent(position: dict) -> int:
         f"(slippage {settings.swap_slippage_tolerance:.1%}) "
         f"for oToken {position['otoken_address']}"
     )
-    return max_collateral
+    return max_collateral, contra_amount
 
 
-def _mark_settled(
-    user_vaults: list[tuple[str, int]],
-    settlement_tx: str | None,
-    *,
-    settlement_type: str = "cash",
-    is_itm: bool = False,
-    expiry_price: str | None = None,
-) -> None:
-    """Mark positions as settled in the DB.
-
-    settlement_type: 'physical', 'cash', or 'physical_failed'.
-    Raises on DB write failure so callers know the write did not succeed.
-    """
-    client = get_client()
-    now = datetime.now(timezone.utc).isoformat()
-    for user_addr, vault_id in user_vaults:
-        try:
-            result = client.table("order_events").update({
-                "is_settled": True,
-                "settled_at": now,
-                "settlement_tx_hash": settlement_tx,
-                "settlement_type": settlement_type,
-                "is_itm": is_itm,
-                "expiry_price": expiry_price,
-            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
-            if not result.data:
-                logger.error(
-                    f"_mark_settled matched no rows: user={user_addr} vault={vault_id}"
-                )
-        except Exception:
-            logger.exception(
-                f"Failed to mark settled in DB: user={user_addr} vault={vault_id} "
-                f"tx={settlement_tx}"
-            )
-            raise
-
-
-def _mark_physical_delivery(
-    user_addr: str,
-    vault_id: int,
-    delivery_tx: str,
-    delivered_asset: str,
-    delivered_amount: str,
-) -> None:
-    """Mark a position with physical delivery details. Raises on DB failure."""
+def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> None:
+    """Update a single order_events row. Logs on no-match or failure."""
     client = get_client()
     try:
-        result = client.table("order_events").update({
-            "delivery_tx_hash": delivery_tx,
-            "delivered_asset": delivered_asset,
-            "delivered_amount": delivered_amount,
-        }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
-        if not result.data:
-            logger.error(
-                f"_mark_physical_delivery matched no rows: "
-                f"user={user_addr} vault={vault_id}"
-            )
-    except Exception:
-        logger.exception(
-            f"Failed to mark physical delivery in DB: "
-            f"user={user_addr} vault={vault_id} tx={delivery_tx}"
+        result = (
+            client.table("order_events")
+            .update(fields)
+            .eq("user_address", user_addr)
+            .eq("vault_id", vault_id)
+            .execute()
         )
+        if not result.data:
+            logger.error(f"{context}: matched no rows user={user_addr} vault={vault_id}")
+    except Exception:
+        logger.exception(f"{context}: DB write failed user={user_addr} vault={vault_id}")
         raise
 
 
@@ -216,6 +180,7 @@ async def settle_once():
     account = get_operator_account()
 
     settled_positions: list[dict] = []
+    phase1_tx_map: dict[tuple[str, int], str] = {}  # (user, vault_id) → tx_hash
     phase1_failed = False
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
@@ -223,19 +188,31 @@ async def settle_once():
         owners = [p["user_address"] for p in batch]
         vault_ids = [p["vault_id"] for p in batch]
 
+        # Step 1: on-chain settlement
         try:
             tx_fn = settler.functions.batchSettleVaults(owners, vault_ids)
             tx_hash = build_and_send_tx(tx_fn, account)
-            logger.info(f"Phase 1: settled {len(batch)} vaults, tx: {tx_hash}")
-            # Mark immediately after on-chain success to stay in sync
-            _mark_settled(
-                list(zip(owners, vault_ids)), tx_hash, settlement_type="cash",
-            )
-            settled_positions.extend(batch)
+            logger.info(f"Phase 1: settled {len(batch)} vaults on-chain, tx: {tx_hash}")
         except Exception:
-            logger.exception(f"Phase 1: batchSettleVaults failed for {len(batch)} vaults")
+            logger.exception(f"Phase 1: batchSettleVaults tx failed for {len(batch)} vaults")
             phase1_failed = True
             break
+
+        # On-chain succeeded — these vaults ARE settled regardless of DB outcome
+        settled_positions.extend(batch)
+        for o, v in zip(owners, vault_ids):
+            phase1_tx_map[(o, v)] = tx_hash
+
+        # Step 2: mark in DB (separate try so on-chain success is never misattributed)
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            _mark_batch_settled(owners, vault_ids, tx_hash, now)
+        except Exception:
+            logger.exception(
+                f"Phase 1: DB write failed after on-chain success (tx: {tx_hash}). "
+                f"{len(batch)} vaults settled on-chain but not marked in DB."
+            )
+            # Continue — vaults are in settled_positions so Phase 2 can still run
 
     if not settled_positions:
         logger.error("Phase 1: no batches settled successfully, aborting")
@@ -265,21 +242,32 @@ async def settle_once():
         user_addr = pos["user_address"]
         amount_raw = int(pos["amount"])
         vault_id = pos["vault_id"]
-        expiry_price_str = str(pos.get("expiry_price_raw", ""))
+        expiry_price_raw = pos.get("expiry_price_raw")
+        expiry_price_str = str(expiry_price_raw) if expiry_price_raw is not None else None
 
+        # Step 1: get swap quote
         try:
-            max_collateral = await asyncio.to_thread(compute_max_collateral_spent, pos)
+            max_collateral, contra_amount = await asyncio.to_thread(
+                compute_max_collateral_spent, pos,
+            )
         except Exception:
             logger.exception(
                 f"ALERT: Skipping physical delivery for {otoken_addr} user={user_addr} "
                 f"(quote failed). Position requires manual review."
             )
-            _mark_settled(
-                [(user_addr, vault_id)], None, settlement_type="physical_failed",
-                is_itm=True, expiry_price=expiry_price_str,
-            )
+            try:
+                _db_update(user_addr, vault_id, {
+                    "settlement_type": "physical_failed",
+                    "is_itm": True,
+                    "expiry_price": expiry_price_str,
+                }, "Phase 2 quote-fail mark")
+            except Exception:
+                pass  # already logged by _db_update
             continue
 
+        # Step 2: on-chain physical delivery
+        delivery_succeeded = False
+        tx_hash = None
         try:
             tx_fn = settler.functions.physicalRedeem(
                 Web3.to_checksum_address(otoken_addr),
@@ -288,60 +276,82 @@ async def settle_once():
                 max_collateral,
             )
             tx_hash = build_and_send_tx(tx_fn, account)
-            logger.info(f"Phase 2: physical delivery for {user_addr} vault {vault_id}, tx: {tx_hash}")
-
-            delivered_asset = weth if pos["is_put"] else usdc
-            if pos["is_put"]:
-                delivered_amount = str(amount_raw * (10**10))
-            else:
-                delivered_amount = str((amount_raw * int(pos["strike_price"])) // (10**10))
-
-            # Update the row that Phase 1 already marked as settled
-            client = get_client()
-            client.table("order_events").update({
-                "settlement_type": "physical",
-                "is_itm": True,
-                "expiry_price": expiry_price_str,
-                "delivery_tx_hash": tx_hash,
-                "delivered_asset": delivered_asset,
-                "delivered_amount": delivered_amount,
-            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
-
+            delivery_succeeded = True
+            logger.info(
+                f"Phase 2: physical delivery for {user_addr} vault {vault_id}, tx: {tx_hash}"
+            )
         except Exception:
             logger.exception(
-                f"ALERT: physicalRedeem failed for {otoken_addr} user={user_addr} "
+                f"ALERT: physicalRedeem tx failed for {otoken_addr} user={user_addr} "
                 f"vault={vault_id}. Position requires manual review."
             )
-            client = get_client()
-            client.table("order_events").update({
-                "settlement_type": "physical_failed",
-                "is_itm": True,
-                "expiry_price": expiry_price_str,
-            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
 
-    # Update OTM positions with expiry price (for display only)
+        # Step 3: mark DB (separate from on-chain to prevent misattribution)
+        if delivery_succeeded:
+            delivered_asset = weth if pos["is_put"] else usdc
+            delivered_amount = str(contra_amount)
+            try:
+                _db_update(user_addr, vault_id, {
+                    "settlement_type": "physical",
+                    "is_itm": True,
+                    "expiry_price": expiry_price_str,
+                    "delivery_tx_hash": tx_hash,
+                    "delivered_asset": delivered_asset,
+                    "delivered_amount": delivered_amount,
+                }, "Phase 2 delivery mark")
+            except Exception:
+                logger.error(
+                    f"ALERT: Physical delivery succeeded on-chain (tx: {tx_hash}) but "
+                    f"DB write failed for user={user_addr} vault={vault_id}. "
+                    f"DB shows 'cash' but user received physical delivery."
+                )
+        else:
+            try:
+                _db_update(user_addr, vault_id, {
+                    "settlement_type": "physical_failed",
+                    "is_itm": True,
+                    "expiry_price": expiry_price_str,
+                }, "Phase 2 delivery-fail mark")
+            except Exception:
+                pass  # already logged by _db_update
+
+    # Update OTM positions with expiry price and ITM flag (display only)
     itm_keys = {(p["user_address"], p["vault_id"]) for p in itm_positions}
-    otm_positions = [p for p in settled_positions if (p["user_address"], p["vault_id"]) not in itm_keys]
+    otm_positions = [
+        p for p in settled_positions
+        if (p["user_address"], p["vault_id"]) not in itm_keys
+    ]
     if otm_positions:
-        client = get_client()
         for pos in otm_positions:
             expiry = pos["expiry"]
             cached_price = expiry_cache.get(expiry)
             expiry_price_str = str(cached_price) if cached_price is not None else None
             try:
-                client.table("order_events").update({
+                _db_update(pos["user_address"], pos["vault_id"], {
                     "is_itm": False,
                     "expiry_price": expiry_price_str,
-                }).eq("user_address", pos["user_address"]).eq(
-                    "vault_id", pos["vault_id"],
-                ).execute()
+                }, "OTM expiry price update")
             except Exception:
-                logger.warning(
-                    f"Failed to update expiry price for OTM position "
-                    f"user={pos['user_address']} vault={pos['vault_id']}",
-                    exc_info=True,
-                )
+                pass  # already logged by _db_update
         logger.info(f"Updated {len(otm_positions)} OTM positions with expiry data")
+
+
+def _mark_batch_settled(
+    owners: list[str], vault_ids: list[int], tx_hash: str, now: str,
+) -> None:
+    """Mark a batch of positions as settled in the DB. Raises on first failure."""
+    client = get_client()
+    for user_addr, vault_id in zip(owners, vault_ids):
+        result = client.table("order_events").update({
+            "is_settled": True,
+            "settled_at": now,
+            "settlement_tx_hash": tx_hash,
+            "settlement_type": "cash",
+        }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+        if not result.data:
+            logger.error(
+                f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
+            )
 
 
 async def _wait_until_target_hour():

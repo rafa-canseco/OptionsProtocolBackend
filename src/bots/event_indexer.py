@@ -57,7 +57,11 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
 
 
 def _store_events(events: list[dict]) -> int:
-    """Insert events into Supabase. Returns count inserted."""
+    """Insert events into Supabase. Returns count inserted.
+
+    Raises if Supabase accepts the request but returns empty data for a
+    non-empty input — prevents the block pointer from advancing past lost events.
+    """
     if not events:
         return 0
     client = get_client()
@@ -65,6 +69,11 @@ def _store_events(events: list[dict]) -> int:
         events,
         on_conflict="tx_hash",
     ).execute()
+    if not result.data and events:
+        logger.error(
+            f"_store_events: Supabase returned empty data for {len(events)} events"
+        )
+        raise RuntimeError(f"Supabase upsert returned no data for {len(events)} events")
     return len(result.data) if result.data else 0
 
 
@@ -80,20 +89,27 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
     client = get_client()
     updated = 0
     for ev in delivery_events:
-        result = client.table("order_events").update({
-            "settlement_type": "physical",
-            "delivered_asset": ev["delivered_asset"],
-            "delivered_amount": ev["delivered_amount"],
-            "delivery_tx_hash": ev["delivery_tx_hash"],
-            "is_itm": True,
-        }).eq("user_address", ev["user_address"]).eq(
-            "otoken_address", ev["otoken_address"],
-        ).execute()
-        if result.data:
-            updated += 1
-        else:
-            logger.warning(
-                f"Physical delivery event matched no DB row: "
+        try:
+            result = client.table("order_events").update({
+                "settlement_type": "physical",
+                "delivered_asset": ev["delivered_asset"],
+                "delivered_amount": ev["delivered_amount"],
+                "delivery_tx_hash": ev["delivery_tx_hash"],
+                "is_itm": True,
+            }).eq("user_address", ev["user_address"]).eq(
+                "otoken_address", ev["otoken_address"],
+            ).execute()
+            if result.data:
+                updated += 1
+            else:
+                logger.warning(
+                    f"Physical delivery event matched no DB row: "
+                    f"user={ev['user_address']} otoken={ev['otoken_address']} "
+                    f"tx={ev['delivery_tx_hash']}"
+                )
+        except Exception:
+            logger.exception(
+                f"Failed to update delivery event: "
                 f"user={ev['user_address']} otoken={ev['otoken_address']} "
                 f"tx={ev['delivery_tx_hash']}"
             )

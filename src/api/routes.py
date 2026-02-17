@@ -158,7 +158,8 @@ def _compute_outcome(position: dict) -> str | None:
         return None
 
     if position.get("is_itm"):
-        if position.get("settlement_type") == "physical":
+        st = position.get("settlement_type")
+        if st == "physical":
             strike = position.get("strike_price")
             amount_raw = position.get("amount")
             is_put = position.get("is_put")
@@ -174,6 +175,8 @@ def _compute_outcome(position: dict) -> str | None:
                 return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
             else:
                 return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+        elif st == "physical_failed":
+            return "Expired ITM — delivery failed, pending review"
         else:
             return "Expired ITM — cash settled"
 
