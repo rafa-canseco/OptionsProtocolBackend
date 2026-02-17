@@ -2,12 +2,13 @@
 Expiry Settler Bot
 
 Two-phase settlement at 08:00 UTC daily:
-  1. batchSettleVaults() — settles all expired vaults (OTM users get collateral back)
+  1. batchSettleVaults() — settles all expired vaults on-chain (collateral released)
   2. physicalRedeem() per ITM position — flash loan + DEX swap delivers contra-asset
+
+DB marking happens per-batch in Phase 1 and per-position in Phase 2.
 """
 import asyncio
 import logging
-import math
 from datetime import datetime, timezone, timedelta
 
 from web3 import Web3
@@ -16,7 +17,6 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import (
     get_batch_settler,
-    get_otoken,
     get_oracle,
     get_uniswap_quoter,
     get_operator_account,
@@ -26,7 +26,7 @@ from src.contracts.web3_client import (
 logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 50  # max vaults per tx to avoid gas limit
-UNISWAP_FEE_TIER = 3000  # 0.3%
+UNISWAP_FEE_TIER = 3000  # 0.3% — standard tier for ETH/USDC on Uniswap V3
 
 
 def get_expired_unsettled() -> list[dict]:
@@ -43,20 +43,22 @@ def get_expired_unsettled() -> list[dict]:
     return result.data or []
 
 
-def identify_itm_positions(positions: list[dict]) -> list[dict]:
+def identify_itm_positions(
+    positions: list[dict],
+) -> tuple[list[dict], dict[int, int | None]]:
     """Separate ITM from OTM positions based on oracle expiry price.
 
     Reads the oracle's finalized expiry price and compares with strike:
       - PUT is ITM if expiryPrice < strikePrice
       - CALL is ITM if expiryPrice > strikePrice
 
-    Returns only ITM positions (OTM are already handled by batchSettleVaults).
+    Returns (itm_positions, expiry_price_cache) so the cache can be reused
+    for OTM marking without redundant on-chain reads.
     """
     oracle = get_oracle()
     weth = Web3.to_checksum_address(settings.weth_address)
 
     itm: list[dict] = []
-    # Cache expiry prices to avoid redundant on-chain reads
     expiry_price_cache: dict[int, int | None] = {}
 
     for pos in positions:
@@ -74,27 +76,28 @@ def identify_itm_positions(positions: list[dict]) -> list[dict]:
             logger.warning(f"Expiry price not finalized for {expiry}, skipping position")
             continue
 
-        strike = pos["strike_price"]
+        strike = int(pos["strike_price"])
         is_put = pos["is_put"]
 
-        # Oracle price and strike are both in 8-decimal format
         is_itm = (is_put and oracle_price < strike) or (not is_put and oracle_price > strike)
         if is_itm:
             pos["expiry_price_raw"] = oracle_price
             itm.append(pos)
 
     logger.info(f"Identified {len(itm)} ITM out of {len(positions)} expired positions")
-    return itm
+    return itm, expiry_price_cache
 
 
 def compute_max_collateral_spent(position: dict) -> int:
     """Compute maxCollateralSpent for physicalRedeem via Uniswap Quoter.
 
     1. Determine contra-asset amount (what user receives):
-       - PUT ITM: user gets WETH. contra_amount = oTokenAmount * 1e10 (8-dec → 18-dec)
-       - CALL ITM: user gets USDC. contra_amount = oTokenAmount * strikePrice / 1e10 (→ 6-dec)
+       - PUT ITM: user gets WETH. contra_amount = oTokenAmount * 1e10
+         decimal math: 10^8 * 10^10 = 10^18 (WETH 18-dec)
+       - CALL ITM: user gets USDC. contra_amount = oTokenAmount * strikePrice / 1e10
+         decimal math: 10^8 * 10^8 / 10^10 = 10^6 (USDC 6-dec)
     2. Quote Uniswap: how much collateral needed to produce that exact output
-    3. Apply slippage buffer
+    3. Apply slippage buffer (integer arithmetic to avoid float precision loss)
     """
     amount_raw = int(position["amount"])  # 8 decimals (oToken)
     strike = int(position["strike_price"])  # 8 decimals
@@ -104,17 +107,13 @@ def compute_max_collateral_spent(position: dict) -> int:
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
     if is_put:
-        # PUT ITM: collateral is USDC, user receives WETH
-        # contra_amount in WETH (18 decimals) = oTokenAmount (8 dec) * 1e10
         contra_amount = amount_raw * (10**10)
-        token_in = usdc   # collateral (what gets spent)
-        token_out = weth  # contra-asset (what user receives)
+        token_in = usdc
+        token_out = weth
     else:
-        # CALL ITM: collateral is WETH, user receives USDC
-        # contra_amount in USDC (6 decimals) = oTokenAmount (8 dec) * strikePrice (8 dec) / 1e10
         contra_amount = (amount_raw * strike) // (10**10)
-        token_in = weth   # collateral (what gets spent)
-        token_out = usdc  # contra-asset (what user receives)
+        token_in = weth
+        token_out = usdc
 
     quoter = get_uniswap_quoter()
     try:
@@ -129,7 +128,9 @@ def compute_max_collateral_spent(position: dict) -> int:
         )
         raise
 
-    max_collateral = math.ceil(amount_in * (1 + settings.swap_slippage_tolerance))
+    # Integer arithmetic: avoid float for amounts that can exceed 2^53
+    slippage_bps = int(settings.swap_slippage_tolerance * 10_000)
+    max_collateral = amount_in + (amount_in * slippage_bps + 9_999) // 10_000
     logger.info(
         f"Swap quote: {amount_in} → max {max_collateral} "
         f"(slippage {settings.swap_slippage_tolerance:.1%}) "
@@ -140,24 +141,39 @@ def compute_max_collateral_spent(position: dict) -> int:
 
 def _mark_settled(
     user_vaults: list[tuple[str, int]],
-    settlement_tx: str,
+    settlement_tx: str | None,
     *,
     settlement_type: str = "cash",
     is_itm: bool = False,
     expiry_price: str | None = None,
 ) -> None:
-    """Mark positions as settled in the DB."""
+    """Mark positions as settled in the DB.
+
+    settlement_type: 'physical', 'cash', or 'physical_failed'.
+    Raises on DB write failure so callers know the write did not succeed.
+    """
     client = get_client()
     now = datetime.now(timezone.utc).isoformat()
     for user_addr, vault_id in user_vaults:
-        client.table("order_events").update({
-            "is_settled": True,
-            "settled_at": now,
-            "settlement_tx_hash": settlement_tx,
-            "settlement_type": settlement_type,
-            "is_itm": is_itm,
-            "expiry_price": expiry_price,
-        }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+        try:
+            result = client.table("order_events").update({
+                "is_settled": True,
+                "settled_at": now,
+                "settlement_tx_hash": settlement_tx,
+                "settlement_type": settlement_type,
+                "is_itm": is_itm,
+                "expiry_price": expiry_price,
+            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+            if not result.data:
+                logger.error(
+                    f"_mark_settled matched no rows: user={user_addr} vault={vault_id}"
+                )
+        except Exception:
+            logger.exception(
+                f"Failed to mark settled in DB: user={user_addr} vault={vault_id} "
+                f"tx={settlement_tx}"
+            )
+            raise
 
 
 def _mark_physical_delivery(
@@ -167,13 +183,25 @@ def _mark_physical_delivery(
     delivered_asset: str,
     delivered_amount: str,
 ) -> None:
-    """Mark a position with physical delivery details."""
+    """Mark a position with physical delivery details. Raises on DB failure."""
     client = get_client()
-    client.table("order_events").update({
-        "delivery_tx_hash": delivery_tx,
-        "delivered_asset": delivered_asset,
-        "delivered_amount": delivered_amount,
-    }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+    try:
+        result = client.table("order_events").update({
+            "delivery_tx_hash": delivery_tx,
+            "delivered_asset": delivered_asset,
+            "delivered_amount": delivered_amount,
+        }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+        if not result.data:
+            logger.error(
+                f"_mark_physical_delivery matched no rows: "
+                f"user={user_addr} vault={vault_id}"
+            )
+    except Exception:
+        logger.exception(
+            f"Failed to mark physical delivery in DB: "
+            f"user={user_addr} vault={vault_id} tx={delivery_tx}"
+        )
+        raise
 
 
 async def settle_once():
@@ -183,9 +211,12 @@ async def settle_once():
         logger.info("No expired positions to settle")
         return
 
-    # --- Phase 1: batchSettleVaults (settles all vaults, returns excess collateral to OTM) ---
+    # --- Phase 1: batchSettleVaults (settles all expired vaults on-chain) ---
     settler = get_batch_settler()
     account = get_operator_account()
+
+    settled_positions: list[dict] = []
+    phase1_failed = False
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
         batch = positions[i:i + MAX_BATCH_SIZE]
@@ -196,9 +227,25 @@ async def settle_once():
             tx_fn = settler.functions.batchSettleVaults(owners, vault_ids)
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(f"Phase 1: settled {len(batch)} vaults, tx: {tx_hash}")
+            # Mark immediately after on-chain success to stay in sync
+            _mark_settled(
+                list(zip(owners, vault_ids)), tx_hash, settlement_type="cash",
+            )
+            settled_positions.extend(batch)
         except Exception:
             logger.exception(f"Phase 1: batchSettleVaults failed for {len(batch)} vaults")
-            return  # don't proceed to phase 2 if settlement fails
+            phase1_failed = True
+            break
+
+    if not settled_positions:
+        logger.error("Phase 1: no batches settled successfully, aborting")
+        return
+
+    if phase1_failed:
+        logger.warning(
+            f"Phase 1: partial success — {len(settled_positions)}/{len(positions)} "
+            f"vaults settled. Continuing with settled vaults only."
+        )
 
     # --- Wait for vaults to be fully settled before physical delivery ---
     delay = settings.flash_loan_redeem_delay_seconds
@@ -206,7 +253,9 @@ async def settle_once():
     await asyncio.sleep(delay)
 
     # --- Phase 2: physical delivery for ITM positions ---
-    itm_positions = await asyncio.to_thread(identify_itm_positions, positions)
+    itm_positions, expiry_cache = await asyncio.to_thread(
+        identify_itm_positions, settled_positions,
+    )
 
     weth = settings.weth_address.lower()
     usdc = settings.usdc_address.lower()
@@ -221,10 +270,12 @@ async def settle_once():
         try:
             max_collateral = await asyncio.to_thread(compute_max_collateral_spent, pos)
         except Exception:
-            logger.exception(f"Skipping physical delivery for {otoken_addr} (quote failed)")
-            # Mark as cash settlement since physical failed
+            logger.exception(
+                f"ALERT: Skipping physical delivery for {otoken_addr} user={user_addr} "
+                f"(quote failed). Position requires manual review."
+            )
             _mark_settled(
-                [(user_addr, vault_id)], "", settlement_type="cash",
+                [(user_addr, vault_id)], None, settlement_type="physical_failed",
                 is_itm=True, expiry_price=expiry_price_str,
             )
             continue
@@ -239,50 +290,58 @@ async def settle_once():
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(f"Phase 2: physical delivery for {user_addr} vault {vault_id}, tx: {tx_hash}")
 
-            # Determine delivered asset
             delivered_asset = weth if pos["is_put"] else usdc
             if pos["is_put"]:
                 delivered_amount = str(amount_raw * (10**10))
             else:
                 delivered_amount = str((amount_raw * int(pos["strike_price"])) // (10**10))
 
-            _mark_settled(
-                [(user_addr, vault_id)], tx_hash,
-                settlement_type="physical", is_itm=True,
-                expiry_price=expiry_price_str,
-            )
-            _mark_physical_delivery(
-                user_addr, vault_id, tx_hash, delivered_asset, delivered_amount,
-            )
+            # Update the row that Phase 1 already marked as settled
+            client = get_client()
+            client.table("order_events").update({
+                "settlement_type": "physical",
+                "is_itm": True,
+                "expiry_price": expiry_price_str,
+                "delivery_tx_hash": tx_hash,
+                "delivered_asset": delivered_asset,
+                "delivered_amount": delivered_amount,
+            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
 
         except Exception:
-            logger.exception(f"Phase 2: physicalRedeem failed for {otoken_addr} user {user_addr}")
-            _mark_settled(
-                [(user_addr, vault_id)], "", settlement_type="cash",
-                is_itm=True, expiry_price=expiry_price_str,
+            logger.exception(
+                f"ALERT: physicalRedeem failed for {otoken_addr} user={user_addr} "
+                f"vault={vault_id}. Position requires manual review."
             )
+            client = get_client()
+            client.table("order_events").update({
+                "settlement_type": "physical_failed",
+                "is_itm": True,
+                "expiry_price": expiry_price_str,
+            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
 
-    # Mark remaining OTM positions as cash-settled
+    # Update OTM positions with expiry price (for display only)
     itm_keys = {(p["user_address"], p["vault_id"]) for p in itm_positions}
-    otm_positions = [p for p in positions if (p["user_address"], p["vault_id"]) not in itm_keys]
+    otm_positions = [p for p in settled_positions if (p["user_address"], p["vault_id"]) not in itm_keys]
     if otm_positions:
+        client = get_client()
         for pos in otm_positions:
-            expiry_price_str = ""
             expiry = pos["expiry"]
-            # Try to get expiry price for OTM too (for display)
+            cached_price = expiry_cache.get(expiry)
+            expiry_price_str = str(cached_price) if cached_price is not None else None
             try:
-                oracle = get_oracle()
-                weth_addr = Web3.to_checksum_address(settings.weth_address)
-                price_raw, _ = oracle.functions.getExpiryPrice(weth_addr, expiry).call()
-                expiry_price_str = str(price_raw)
+                client.table("order_events").update({
+                    "is_itm": False,
+                    "expiry_price": expiry_price_str,
+                }).eq("user_address", pos["user_address"]).eq(
+                    "vault_id", pos["vault_id"],
+                ).execute()
             except Exception:
-                pass
-            _mark_settled(
-                [(pos["user_address"], pos["vault_id"])], "",
-                settlement_type="cash", is_itm=False,
-                expiry_price=expiry_price_str,
-            )
-        logger.info(f"Marked {len(otm_positions)} OTM positions as cash-settled")
+                logger.warning(
+                    f"Failed to update expiry price for OTM position "
+                    f"user={pos['user_address']} vault={pos['vault_id']}",
+                    exc_info=True,
+                )
+        logger.info(f"Updated {len(otm_positions)} OTM positions with expiry data")
 
 
 async def _wait_until_target_hour():

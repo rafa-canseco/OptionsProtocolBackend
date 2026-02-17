@@ -34,14 +34,25 @@ def _set_last_indexed_block(block: int) -> None:
 
 
 def _enrich_with_otoken_metadata(event_data: dict) -> dict:
-    """Read oToken on-chain metadata for denormalization into DB."""
+    """Read oToken on-chain metadata for denormalization into DB.
+
+    All three fields (strike_price, expiry, is_put) are assigned atomically —
+    either all succeed or none are set. These fields are critical for settlement
+    (identify_itm_positions depends on them).
+    """
     try:
         ot = get_otoken(event_data["otoken_address"])
-        event_data["strike_price"] = ot.functions.strikePrice().call()
-        event_data["expiry"] = ot.functions.expiry().call()
-        event_data["is_put"] = ot.functions.isPut().call()
+        strike = ot.functions.strikePrice().call()
+        expiry = ot.functions.expiry().call()
+        is_put = ot.functions.isPut().call()
+        event_data["strike_price"] = strike
+        event_data["expiry"] = expiry
+        event_data["is_put"] = is_put
     except Exception:
-        logger.exception(f"Could not read oToken metadata for {event_data['otoken_address']}")
+        logger.exception(
+            f"Could not read oToken metadata for {event_data['otoken_address']}. "
+            f"This position will lack settlement-critical fields."
+        )
     return event_data
 
 
@@ -58,7 +69,12 @@ def _store_events(events: list[dict]) -> int:
 
 
 def _update_delivery_events(delivery_events: list[dict]) -> int:
-    """Update existing order_events rows with physical delivery data."""
+    """Update existing order_events rows with physical delivery data.
+
+    Matches on (user_address, otoken_address). If a user has multiple positions
+    for the same oToken, all will be updated — this is acceptable because all
+    positions on the same oToken share the same ITM/OTM outcome.
+    """
     if not delivery_events:
         return 0
     client = get_client()
@@ -75,6 +91,12 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
         ).execute()
         if result.data:
             updated += 1
+        else:
+            logger.warning(
+                f"Physical delivery event matched no DB row: "
+                f"user={ev['user_address']} otoken={ev['otoken_address']} "
+                f"tx={ev['delivery_tx_hash']}"
+            )
     return updated
 
 
@@ -120,6 +142,12 @@ async def index_once():
             from_block=from_block,
             to_block=to_block,
         )
+    except (AttributeError, KeyError):
+        # Event not in ABI — contract hasn't been upgraded yet
+        logger.debug("PhysicalDeliveryExecuted event not in ABI (contract pending upgrade)")
+        delivery_events_raw = []
+
+    if delivery_events_raw:
         delivery_to_update = []
         for ev in delivery_events_raw:
             delivery_to_update.append({
@@ -132,9 +160,6 @@ async def index_once():
         delivered = _update_delivery_events(delivery_to_update)
         if delivered > 0:
             logger.info(f"Updated {delivered} positions with physical delivery data")
-    except Exception:
-        # Event may not exist yet if contract hasn't been updated
-        logger.debug("PhysicalDeliveryExecuted event not available (contract pending)")
 
     _set_last_indexed_block(to_block)
 

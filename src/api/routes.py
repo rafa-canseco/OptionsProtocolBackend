@@ -147,33 +147,37 @@ def _compute_outcome(position: dict) -> str | None:
     """Compute human-readable outcome for settled positions.
 
     Examples:
-      - "Bought 1.0000 ETH @ $2,400" (PUT ITM, physical delivery)
-      - "Sold 1.0000 ETH @ $2,800" (CALL ITM, physical delivery)
-      - "Expired OTM — collateral returned" (OTM, cash settlement)
+      - "Bought 1.0000 ETH @ $2,400" — PUT ITM, user's USDC collateral was
+        swapped to WETH at strike (physical delivery)
+      - "Sold 1.0000 ETH @ $2,800" — CALL ITM, user's WETH collateral was
+        swapped to USDC at strike (physical delivery)
+      - "Expired ITM — cash settled" — physical delivery failed, fallback
+      - "Expired OTM — collateral returned"
     """
     if not position.get("is_settled"):
         return None
 
-    if position.get("settlement_type") == "physical" and position.get("is_itm"):
-        strike = position.get("strike_price")
-        amount_raw = position.get("amount")
-        is_put = position.get("is_put")
-        if strike is None or amount_raw is None or is_put is None:
-            return None
-
-        # oToken amount is 8 decimals
-        amount_human = int(amount_raw) / 1e8
-        strike_human = int(strike) / 1e8
-
-        if is_put:
-            return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+    if position.get("is_itm"):
+        if position.get("settlement_type") == "physical":
+            strike = position.get("strike_price")
+            amount_raw = position.get("amount")
+            is_put = position.get("is_put")
+            if strike is None or amount_raw is None or is_put is None:
+                return "Settled (physical) — details unavailable"
+            try:
+                # Both oToken amount and strike_price use 8 decimals
+                amount_human = int(amount_raw) / 1e8
+                strike_human = int(strike) / 1e8
+            except (ValueError, TypeError):
+                return "Settled (physical) — details unavailable"
+            if is_put:
+                return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+            else:
+                return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
         else:
-            return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+            return "Expired ITM — cash settled"
 
-    if position.get("is_settled") and not position.get("is_itm"):
-        return "Expired OTM — collateral returned"
-
-    return None
+    return "Expired OTM — collateral returned"
 
 
 @router.get("/positions/{address}")

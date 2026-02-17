@@ -66,6 +66,8 @@ def get_otoken(address: str) -> Contract:
 
 
 def get_oracle() -> Contract:
+    if not settings.oracle_address:
+        raise ValueError("oracle_address not configured. Set ORACLE_ADDRESS env var.")
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.oracle_address),
@@ -74,6 +76,8 @@ def get_oracle() -> Contract:
 
 
 def get_controller() -> Contract:
+    if not settings.controller_address:
+        raise ValueError("controller_address not configured. Set CONTROLLER_ADDRESS env var.")
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.controller_address),
@@ -82,6 +86,8 @@ def get_controller() -> Contract:
 
 
 def get_uniswap_quoter() -> Contract:
+    if not settings.uniswap_v3_quoter_address:
+        raise ValueError("uniswap_v3_quoter_address not configured. Set UNISWAP_V3_QUOTER_ADDRESS env var.")
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.uniswap_v3_quoter_address),
