@@ -170,8 +170,16 @@ async def index_once():
         for ev in delivery_events_raw:
             otoken_addr = ev.args.oToken.lower()
             # Contract doesn't emit deliveredAsset — derive from oToken metadata
-            ot = get_otoken(otoken_addr)
-            is_put = ot.functions.isPut().call()
+            try:
+                ot = get_otoken(otoken_addr)
+                is_put = ot.functions.isPut().call()
+            except Exception:
+                logger.exception(
+                    f"Could not read isPut() for oToken {otoken_addr} "
+                    f"(tx={ev.transactionHash.hex()}). "
+                    f"Skipping delivery update for this event."
+                )
+                continue
             delivered_asset = settings.weth_address.lower() if is_put else settings.usdc_address.lower()
             delivery_to_update.append({
                 "user_address": ev.args.user.lower(),
