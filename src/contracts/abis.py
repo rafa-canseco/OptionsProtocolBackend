@@ -117,7 +117,6 @@ BATCH_SETTLER_ABI = [
     # physicalRedeem(address oToken, address user, uint256 amount, uint256 maxCollateralSpent)
     # Executes physical delivery for ITM positions via flash loan + DEX swap.
     # Contract handles swap routing internally (exactOutputSingle).
-    # TODO: update ABI from blockchain/out/BatchSettler.sol/BatchSettler.json when ready.
     {
         "inputs": [
             {"name": "oToken", "type": "address"},
@@ -130,19 +129,31 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
-    # PhysicalDeliveryExecuted — emitted by physicalRedeem().
-    # TODO: confirm event signature from contract build output.
+    # PhysicalDelivery — emitted by physicalRedeem().
     {
         "anonymous": False,
         "inputs": [
-            {"indexed": True, "name": "user", "type": "address"},
             {"indexed": True, "name": "oToken", "type": "address"},
-            {"indexed": False, "name": "deliveredAsset", "type": "address"},
-            {"indexed": False, "name": "deliveredAmount", "type": "uint256"},
+            {"indexed": True, "name": "user", "type": "address"},
+            {"indexed": False, "name": "contraAmount", "type": "uint256"},
             {"indexed": False, "name": "collateralUsed", "type": "uint256"},
         ],
-        "name": "PhysicalDeliveryExecuted",
+        "name": "PhysicalDelivery",
         "type": "event",
+    },
+    # batchPhysicalRedeem(address[], address[], uint256[], uint256[])
+    # Not used yet (settler does sequential physicalRedeem), but ready for batch optimization.
+    {
+        "inputs": [
+            {"name": "oTokens", "type": "address[]"},
+            {"name": "users", "type": "address[]"},
+            {"name": "amounts", "type": "uint256[]"},
+            {"name": "maxCollateralSpents", "type": "uint256[]"},
+        ],
+        "name": "batchPhysicalRedeem",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
     },
 ]
 

@@ -1,8 +1,9 @@
 """
 Event Indexer Bot
 
-Polls OrderExecuted and PhysicalDeliveryExecuted events from BatchSettler,
-stores them in the order_events Supabase table.
+Polls OrderExecuted and PhysicalDelivery events from BatchSettler,
+stores OrderExecuted events and updates existing rows with PhysicalDelivery
+delivery data in the order_events Supabase table.
 Tracks last_indexed_block for resumability.
 """
 import asyncio
@@ -148,11 +149,11 @@ async def index_once():
 
     stored = _store_events(events_to_store)
 
-    # Index PhysicalDeliveryExecuted events (ITM delivery)
+    # Index PhysicalDelivery events (ITM delivery)
     try:
-        delivery_event_type = settler.events.PhysicalDeliveryExecuted
+        delivery_event_type = settler.events.PhysicalDelivery
     except AttributeError:
-        logger.info("PhysicalDeliveryExecuted event not in ABI (contract pending upgrade)")
+        logger.info("PhysicalDelivery event not in ABI (contract pending upgrade)")
         delivery_event_type = None
 
     if delivery_event_type is not None:
@@ -167,11 +168,16 @@ async def index_once():
     if delivery_events_raw:
         delivery_to_update = []
         for ev in delivery_events_raw:
+            otoken_addr = ev.args.oToken.lower()
+            # Contract doesn't emit deliveredAsset — derive from oToken metadata
+            ot = get_otoken(otoken_addr)
+            is_put = ot.functions.isPut().call()
+            delivered_asset = settings.weth_address.lower() if is_put else settings.usdc_address.lower()
             delivery_to_update.append({
                 "user_address": ev.args.user.lower(),
-                "otoken_address": ev.args.oToken.lower(),
-                "delivered_asset": ev.args.deliveredAsset.lower(),
-                "delivered_amount": str(ev.args.deliveredAmount),
+                "otoken_address": otoken_addr,
+                "delivered_asset": delivered_asset,
+                "delivered_amount": str(ev.args.contraAmount),
                 "delivery_tx_hash": ev.transactionHash.hex(),
             })
         delivered = _update_delivery_events(delivery_to_update)
