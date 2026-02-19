@@ -88,8 +88,8 @@ def get_uniswap_quoter() -> Contract:
 def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
-    Uses a lock + pending nonce to prevent nonce collisions between bots.
-    Gas is estimated before acquiring the lock to minimize contention.
+    Uses a lock + local nonce tracker to prevent nonce collisions.
+    Retries with bumped gas price to replace stuck pending transactions.
     Waits for receipt and raises on revert.
     """
     try:
@@ -99,21 +99,34 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
         raise
     gas_limit = int(gas_estimate * 1.2)
 
-    with _nonce_lock:
-        w3 = get_w3()
-        chain_nonce = w3.eth.get_transaction_count(account.address, "pending")
-        local = _local_nonce.get(account.address, 0)
-        nonce = max(chain_nonce, local)
-        tx = contract_fn.build_transaction({
-            "from": account.address,
-            "nonce": nonce,
-            "gas": gas_limit,
-            "gasPrice": w3.eth.gas_price,
-            "chainId": settings.chain_id,
-        })
-        signed = account.sign_transaction(tx)
-        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-        _local_nonce[account.address] = nonce + 1
+    max_retries = 3
+    for attempt in range(max_retries):
+        with _nonce_lock:
+            w3 = get_w3()
+            chain_nonce = w3.eth.get_transaction_count(account.address, "pending")
+            local = _local_nonce.get(account.address, 0)
+            nonce = max(chain_nonce, local)
+            gas_price = int(w3.eth.gas_price * (1.15 ** (attempt + 1)))
+            tx = contract_fn.build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": gas_limit,
+                "gasPrice": gas_price,
+                "chainId": settings.chain_id,
+            })
+            signed = account.sign_transaction(tx)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                _local_nonce[account.address] = nonce + 1
+            except Exception as e:
+                if "replacement transaction underpriced" in str(e) and attempt < max_retries - 1:
+                    logger.warning(
+                        f"Nonce {nonce} has stuck pending tx, retrying with bumped gas "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    continue
+                raise
+        break
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
