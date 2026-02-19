@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _w3: Web3 | None = None
 _nonce_lock = threading.Lock()
+_local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
 
 
 def get_w3() -> Web3:
@@ -100,7 +101,9 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
 
     with _nonce_lock:
         w3 = get_w3()
-        nonce = w3.eth.get_transaction_count(account.address, "pending")
+        chain_nonce = w3.eth.get_transaction_count(account.address, "pending")
+        local = _local_nonce.get(account.address, 0)
+        nonce = max(chain_nonce, local)
         tx = contract_fn.build_transaction({
             "from": account.address,
             "nonce": nonce,
@@ -110,6 +113,7 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
         })
         signed = account.sign_transaction(tx)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+        _local_nonce[account.address] = nonce + 1
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
