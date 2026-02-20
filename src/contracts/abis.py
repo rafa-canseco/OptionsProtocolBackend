@@ -243,6 +243,18 @@ ORACLE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # setExpiryPrice(address asset, uint256 expiry, uint256 price) — owner only
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+        ],
+        "name": "setExpiryPrice",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 CONTROLLER_ABI = [

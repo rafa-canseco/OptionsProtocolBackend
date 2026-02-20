@@ -104,36 +104,74 @@ def identify_itm_positions(
     return itm, expiry_price_cache, skipped
 
 
-def compute_max_collateral_spent(position: dict) -> tuple[int, int]:
-    """Compute maxCollateralSpent for physicalRedeem via Uniswap Quoter.
+def _compute_contra_amount(amount_raw: int, strike: int, is_put: bool) -> tuple[int, str, str]:
+    """Determine contra-asset amount and token direction.
 
-    Returns (max_collateral_spent, contra_amount) so the caller can reuse
-    contra_amount as delivered_amount without recalculating.
+    Returns (contra_amount, token_in_addr, token_out_addr).
 
-    1. Determine contra-asset amount (what user receives):
-       - PUT ITM: user gets WETH. contra_amount = oTokenAmount * 1e10
-         decimal math: 10^8 * 10^10 = 10^18 (WETH 18-dec)
-       - CALL ITM: user gets USDC. contra_amount = oTokenAmount * strikePrice / 1e10
-         decimal math: 10^8 * 10^8 / 10^10 = 10^6 (USDC 6-dec)
-    2. Quote Uniswap: how much collateral needed to produce that exact output
-    3. Apply slippage buffer (integer arithmetic to avoid float precision loss)
+    Decimal math:
+      - PUT ITM: user gets WETH. contra = oTokenAmount * 1e10  (10^8 * 10^10 = 10^18)
+      - CALL ITM: user gets USDC. contra = oTokenAmount * strike / 1e10  (10^8 * 10^8 / 10^10 = 10^6)
     """
-    amount_raw = int(position["amount"])  # 8 decimals (oToken)
-    strike = int(position["strike_price"])  # 8 decimals
-    is_put = position["is_put"]
-
     weth = Web3.to_checksum_address(settings.weth_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
     if is_put:
         contra_amount = amount_raw * (10**10)
-        token_in = usdc
-        token_out = weth
+        return contra_amount, usdc, weth
     else:
         contra_amount = (amount_raw * strike) // (10**10)
-        token_in = weth
-        token_out = usdc
+        return contra_amount, weth, usdc
 
+
+def _beta_compute_max_collateral(
+    contra_amount: int, is_put: bool, oracle_price_8dec: int,
+) -> int:
+    """Compute maxCollateralSpent from Oracle price with a 10% buffer (beta mode).
+
+    No Uniswap Quoter needed — uses the mock Oracle price for conversion.
+
+    oracle_price_8dec is ETH/USD in 8 decimals (e.g., $2500 = 250000000000).
+    """
+    if is_put:
+        # PUT: collateral is USDC (6-dec), contra is WETH (18-dec)
+        # max_collateral_usdc = contra_weth * oracle_price / 1e(18 + 8 - 6) = contra * price / 1e20
+        amount_in = (contra_amount * oracle_price_8dec) // (10**20)
+    else:
+        # CALL: collateral is WETH (18-dec), contra is USDC (6-dec)
+        # max_collateral_weth = contra_usdc * 1e(18 + 8 - 6) / oracle_price = contra * 1e20 / price
+        amount_in = (contra_amount * (10**20)) // oracle_price_8dec
+
+    # 10% buffer (1000 bps)
+    max_collateral = amount_in + (amount_in * 1_000 + 9_999) // 10_000
+    logger.info(
+        f"Beta swap estimate: {amount_in} → max {max_collateral} (10% buffer)"
+    )
+    return max_collateral
+
+
+def compute_max_collateral_spent(
+    position: dict, oracle_price_8dec: int | None = None,
+) -> tuple[int, int]:
+    """Compute maxCollateralSpent for physicalRedeem.
+
+    In beta mode (oracle_price_8dec provided), uses Oracle price + 10% buffer.
+    In production mode, queries Uniswap Quoter for an exact swap quote.
+
+    Returns (max_collateral_spent, contra_amount).
+    """
+    amount_raw = int(position["amount"])  # 8 decimals (oToken)
+    strike = int(position["strike_price"])  # 8 decimals
+    is_put = position["is_put"]
+
+    contra_amount, token_in, token_out = _compute_contra_amount(amount_raw, strike, is_put)
+
+    # Beta mode: use Oracle price instead of Quoter
+    if settings.beta_mode and oracle_price_8dec is not None:
+        max_collateral = _beta_compute_max_collateral(contra_amount, is_put, oracle_price_8dec)
+        return max_collateral, contra_amount
+
+    # Production mode: Uniswap Quoter
     quoter = get_uniswap_quoter()
     try:
         result = quoter.functions.quoteExactOutputSingle(

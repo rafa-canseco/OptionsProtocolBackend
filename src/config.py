@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     # Chain
     chain_id: int = 84532  # Base Sepolia
 
+    # Beta mode: disables auto-settlement, enables /demo/settle endpoint
+    beta_mode: bool = False
+    demo_api_key: str = ""
+
     model_config = {"env_file": ".env"}
 
 
