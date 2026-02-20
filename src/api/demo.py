@@ -191,7 +191,25 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
         else:
             raise HTTPException(500, "Oracle price set but not yet visible (RPC sync issue)")
     else:
-        oracle_price_8dec = already_set[0]
+        # Oracle price already locked from a previous settlement on this expiry
+        locked_price = already_set[0]
+        if body.force_itm is not None and locked_price != oracle_price_8dec:
+            # force_itm requested but we can't override the locked price
+            would_be_itm = (is_put and oracle_price_8dec < strike_price) or (
+                not is_put and oracle_price_8dec > strike_price
+            )
+            actual_itm = (is_put and locked_price < strike_price) or (
+                not is_put and locked_price > strike_price
+            )
+            if would_be_itm != actual_itm:
+                raise HTTPException(
+                    409,
+                    f"Cannot force {'ITM' if body.force_itm else 'OTM'}: Oracle price "
+                    f"already locked at {locked_price} for this expiry from a previous "
+                    f"settlement. Use a position with a different expiry to test "
+                    f"{'ITM' if body.force_itm else 'OTM'} settlement."
+                )
+        oracle_price_8dec = locked_price
         logger.info(f"Expiry price already finalized for {expiry}: {oracle_price_8dec}")
 
     # --- Step 4: batchSettleVaults ---
