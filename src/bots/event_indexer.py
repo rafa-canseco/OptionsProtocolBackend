@@ -16,6 +16,7 @@ from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 logger = logging.getLogger(__name__)
 
 BLOCK_RANGE = 2000  # max blocks per getLogs query
+CONFIRMATION_BLOCKS = 5  # wait N blocks before indexing to avoid RPC sync issues
 
 
 def _get_last_indexed_block() -> int:
@@ -114,13 +115,14 @@ async def index_once():
     """Single indexing cycle: fetch new events from chain, store in DB."""
     w3 = get_w3()
     current_block = w3.eth.block_number
+    safe_block = current_block - CONFIRMATION_BLOCKS
     from_block = _get_last_indexed_block() + 1
 
-    if from_block > current_block:
+    if from_block > safe_block:
         return
 
     settler = get_batch_settler()
-    to_block = min(from_block + BLOCK_RANGE - 1, current_block)
+    to_block = min(from_block + BLOCK_RANGE - 1, safe_block)
 
     # Index OrderExecuted events (new orders)
     raw_events = settler.events.OrderExecuted.get_logs(
