@@ -52,7 +52,7 @@ def generate_price_sheet(
         num_strikes: Number of strikes to generate around ATM
     """
     if expiry_days is None:
-        expiry_days = [7, 14, 30]
+        expiry_days = [15, 30, 60] if settings.beta_mode else [7, 14, 30]
 
     r = settings.risk_free_rate
     strikes = generate_strikes(spot, num_strikes)

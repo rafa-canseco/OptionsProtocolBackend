@@ -30,7 +30,10 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(price_publisher.run()))
         tasks.append(asyncio.create_task(event_indexer.run()))
-        tasks.append(asyncio.create_task(expiry_settler.run()))
+        if not settings.beta_mode:
+            tasks.append(asyncio.create_task(expiry_settler.run()))
+        else:
+            logger.info("Beta mode: expiry_settler disabled (settlement is user-triggered)")
         tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
         logger.info(f"Started {len(tasks)} background bots")
     else:
@@ -57,6 +60,11 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+if settings.beta_mode:
+    from src.api.demo import router as demo_router
+    app.include_router(demo_router)
+    logger.info("Beta mode: /demo/settle endpoint enabled")
 
 
 @app.get("/health")

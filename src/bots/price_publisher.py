@@ -19,6 +19,7 @@ from src.pricing.black_scholes import OptionType
 from src.contracts.web3_client import (
     get_price_sheet,
     get_otoken_factory,
+    get_whitelist,
     get_operator_account,
     build_and_send_tx,
 )
@@ -123,45 +124,61 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
             continue
 
         if existing != ZERO_ADDRESS:
-            logger.debug(f"oToken exists: {label} → {existing}")
-            seen[key] = existing
-            results.append((existing, quote))
-            continue
-
-        # Step 2: create the oToken
-        try:
-            logger.info(f"Creating oToken: {label}")
-            tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
-            tx_hash = build_and_send_tx(tx_fn, account)
-            logger.info(f"oToken created, tx: {tx_hash}")
-        except Exception:
-            # Handle OTokenAlreadyExists (race condition: another actor created it)
-            # Try to read the address anyway before giving up
+            otoken_addr = existing
+            logger.debug(f"oToken exists: {label} → {otoken_addr}")
+        else:
+            # Step 2: create the oToken
             try:
-                addr = factory.functions.getOToken(params_hash).call()
-                if addr != ZERO_ADDRESS:
-                    logger.info(f"oToken already existed (race condition): {label} → {addr}")
-                    seen[key] = addr
-                    results.append((addr, quote))
-                    continue
+                logger.info(f"Creating oToken: {label}")
+                tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
+                tx_hash = build_and_send_tx(tx_fn, account)
+                logger.info(f"oToken created, tx: {tx_hash}")
             except Exception:
-                logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
-            logger.exception(f"Failed to create oToken: {label}")
-            seen[key] = None
-            continue
+                # Handle OTokenAlreadyExists (race condition: another actor created it)
+                try:
+                    addr = factory.functions.getOToken(params_hash).call()
+                    if addr != ZERO_ADDRESS:
+                        logger.info(f"oToken already existed (race condition): {label} → {addr}")
+                        otoken_addr = addr
+                    else:
+                        logger.exception(f"Failed to create oToken: {label}")
+                        seen[key] = None
+                        continue
+                except Exception:
+                    logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
+                    logger.exception(f"Failed to create oToken: {label}")
+                    seen[key] = None
+                    continue
+            else:
+                # Step 3: read back the newly created address
+                try:
+                    otoken_addr = factory.functions.getOToken(params_hash).call()
+                except Exception:
+                    logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
+                    seen[key] = None
+                    continue
 
-        # Step 3: read back the newly created address
-        try:
-            otoken_addr = factory.functions.getOToken(params_hash).call()
-        except Exception:
-            logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
-            seen[key] = None
-            continue
+                if otoken_addr == ZERO_ADDRESS:
+                    logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
+                    seen[key] = None
+                    continue
 
-        if otoken_addr == ZERO_ADDRESS:
-            logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
-            seen[key] = None
-            continue
+        # Ensure oToken is whitelisted (runs for both new and existing oTokens)
+        if settings.whitelist_address:
+            try:
+                whitelist = get_whitelist()
+                is_wl = whitelist.functions.isWhitelistedOToken(otoken_addr).call()
+                if not is_wl:
+                    tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
+                    wl_hash = build_and_send_tx(tx_fn, account)
+                    logger.info(f"Whitelisted oToken {otoken_addr}, tx: {wl_hash}")
+            except Exception:
+                logger.exception(
+                    f"Failed to whitelist oToken {otoken_addr}: {label}. "
+                    f"Excluding from published quotes to prevent user tx reverts."
+                )
+                seen[key] = None
+                continue
 
         seen[key] = otoken_addr
         results.append((otoken_addr, quote))

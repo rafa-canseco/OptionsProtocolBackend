@@ -12,6 +12,8 @@ from src.contracts.abis import (
     OTOKEN_FACTORY_ABI,
     OTOKEN_ABI,
     ORACLE_ABI,
+    CONTROLLER_ABI,
+    WHITELIST_ABI,
     UNISWAP_V3_QUOTER_ABI,
 )
 
@@ -65,6 +67,16 @@ def get_otoken(address: str) -> Contract:
     )
 
 
+def get_controller() -> Contract:
+    if not settings.controller_address:
+        raise ValueError("controller_address not configured. Set CONTROLLER_ADDRESS env var.")
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.controller_address),
+        abi=CONTROLLER_ABI,
+    )
+
+
 def get_oracle() -> Contract:
     if not settings.oracle_address:
         raise ValueError("oracle_address not configured. Set ORACLE_ADDRESS env var.")
@@ -72,6 +84,16 @@ def get_oracle() -> Contract:
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.oracle_address),
         abi=ORACLE_ABI,
+    )
+
+
+def get_whitelist() -> Contract:
+    if not settings.whitelist_address:
+        raise ValueError("whitelist_address not configured. Set WHITELIST_ADDRESS env var.")
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.whitelist_address),
+        abi=WHITELIST_ABI,
     )
 
 

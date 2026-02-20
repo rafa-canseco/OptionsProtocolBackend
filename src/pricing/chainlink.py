@@ -26,8 +26,11 @@ AGGREGATOR_V3_ABI = [
 ]
 
 
-def get_eth_price() -> float:
-    """Read ETH/USD price from Chainlink on Base Sepolia."""
+def get_eth_price() -> tuple[float, int]:
+    """Read ETH/USD price from Chainlink on Base Sepolia.
+
+    Returns (price_float, updated_at_timestamp).
+    """
     w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
     feed = w3.eth.contract(
         address=Web3.to_checksum_address(settings.chainlink_eth_usd_address),
@@ -36,3 +39,19 @@ def get_eth_price() -> float:
     decimals = feed.functions.decimals().call()
     (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
     return answer / (10**decimals), updated_at
+
+
+def get_eth_price_raw() -> tuple[int, int, int]:
+    """Read raw ETH/USD price from Chainlink (no float conversion).
+
+    Returns (raw_answer, decimals, updated_at_timestamp).
+    Use this when integer precision matters (e.g., Oracle price setting).
+    """
+    w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
+    feed = w3.eth.contract(
+        address=Web3.to_checksum_address(settings.chainlink_eth_usd_address),
+        abi=AGGREGATOR_V3_ABI,
+    )
+    decimals = feed.functions.decimals().call()
+    (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
+    return answer, decimals, updated_at

@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     circuit_breaker_poll_seconds: int = 10
 
     # Quote settings
-    quote_deadline_seconds: int = 600  # 10 min deadline for on-chain quotes
-    default_max_amount_wei: int = 10_000_000_000_000_000_000  # 10 ETH in wei
+    quote_deadline_seconds: int = 1800  # 30 min deadline for on-chain quotes
+    default_max_amount_wei: int = 1_000_000_000_000_000_000_000  # 1000 ETH in wei
 
     # Circuit breaker
     circuit_breaker_threshold: float = 0.02  # 2% move triggers pause
@@ -53,8 +53,16 @@ class Settings(BaseSettings):
     # Oracle (for reading expiry prices)
     oracle_address: str = ""
 
+    # Whitelist (for whitelisting oTokens after creation)
+    whitelist_address: str = ""
+
     # Chain
     chain_id: int = 84532  # Base Sepolia
+
+    # Beta mode: disables auto-settlement, enables /demo/settle endpoint
+    beta_mode: bool = False
+    demo_api_key: str = ""
+    mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
     model_config = {"env_file": ".env"}
 

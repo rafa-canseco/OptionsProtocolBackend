@@ -243,6 +243,29 @@ ORACLE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # setExpiryPrice(address asset, uint256 expiry, uint256 price) — owner only
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+        ],
+        "name": "setExpiryPrice",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # resetExpiryPrice(address asset, uint256 expiry) — owner only, beta mode only
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+        ],
+        "name": "resetExpiryPrice",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 CONTROLLER_ABI = [
@@ -275,6 +298,25 @@ CONTROLLER_ABI = [
             {"name": "", "type": "uint256"},
         ],
         "name": "vaultSettled",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+WHITELIST_ABI = [
+    # whitelistOToken(address) — owner only
+    {
+        "inputs": [{"name": "_oToken", "type": "address"}],
+        "name": "whitelistOToken",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # isWhitelistedOToken(address) → bool
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "isWhitelistedOToken",
         "outputs": [{"name": "", "type": "bool"}],
         "stateMutability": "view",
         "type": "function",
