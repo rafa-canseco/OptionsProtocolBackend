@@ -215,10 +215,10 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             logger.exception("Failed to read ETH price from Chainlink")
             raise HTTPException(500, "Failed to read ETH price from Chainlink")
 
-        if decimals == 8:
-            oracle_price_8dec = raw_answer
+        if decimals <= 8:
+            oracle_price_8dec = raw_answer * (10 ** (8 - decimals))
         else:
-            oracle_price_8dec = raw_answer * (10 ** (8 - decimals)) if decimals < 8 else raw_answer // (10 ** (decimals - 8))
+            oracle_price_8dec = raw_answer // (10 ** (decimals - 8))
 
     if oracle_price_8dec <= 0:
         raise HTTPException(500, f"Invalid oracle price: {oracle_price_8dec}")
@@ -345,7 +345,7 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             # Approve oToken to BatchSettler if needed (operator must allow pull)
             w3 = get_w3()
             otoken_erc20 = w3.eth.contract(
-                address=Web3.to_checksum_address(otoken_addr), abi=ERC20_APPROVE_ABI,
+                address=otoken_addr, abi=ERC20_APPROVE_ABI,
             )
             settler_addr = Web3.to_checksum_address(settings.batch_settler_address)
             allowance = await asyncio.to_thread(

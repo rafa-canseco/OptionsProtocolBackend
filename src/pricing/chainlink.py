@@ -44,17 +44,6 @@ def _get_decimals() -> int:
     return _decimals_cache
 
 
-def get_eth_price() -> tuple[float, int]:
-    """Read ETH/USD price from Chainlink on Base Sepolia.
-
-    Returns (price_float, updated_at_timestamp).
-    """
-    feed = _get_feed()
-    decimals = _get_decimals()
-    (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
-    return answer / (10**decimals), updated_at
-
-
 def get_eth_price_raw() -> tuple[int, int, int]:
     """Read raw ETH/USD price from Chainlink (no float conversion).
 
@@ -65,3 +54,12 @@ def get_eth_price_raw() -> tuple[int, int, int]:
     decimals = _get_decimals()
     (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
     return answer, decimals, updated_at
+
+
+def get_eth_price() -> tuple[float, int]:
+    """Read ETH/USD price from Chainlink on Base Sepolia.
+
+    Returns (price_float, updated_at_timestamp).
+    """
+    answer, decimals, updated_at = get_eth_price_raw()
+    return answer / (10**decimals), updated_at

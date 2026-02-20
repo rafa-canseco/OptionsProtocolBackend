@@ -119,9 +119,9 @@ def _compute_contra_amount(amount_raw: int, strike: int, is_put: bool) -> tuple[
     if is_put:
         contra_amount = amount_raw * (10**10)
         return contra_amount, usdc, weth
-    else:
-        contra_amount = (amount_raw * strike) // (10**10)
-        return contra_amount, weth, usdc
+
+    contra_amount = (amount_raw * strike) // (10**10)
+    return contra_amount, weth, usdc
 
 
 def _beta_compute_max_collateral(
