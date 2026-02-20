@@ -164,11 +164,20 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
     if short_amount == 0:
         raise HTTPException(400, "Vault has no short position (already settled or empty)")
 
+    # Validate that the supplied otoken_address matches the vault's actual shortOtoken
+    vault_otoken = Web3.to_checksum_address(vault[0])
+    if vault_otoken != otoken_addr:
+        raise HTTPException(400, "otoken_address does not match vault's short oToken")
+
     try:
         already_settled = await asyncio.to_thread(
             controller.functions.vaultSettled(user, vault_id).call,
         )
     except Exception:
+        logger.exception(
+            f"Failed to check vaultSettled for user={user} vault={vault_id}. "
+            f"Proceeding with settlement attempt (may fail if already settled)."
+        )
         already_settled = False
     if already_settled:
         raise HTTPException(400, "Vault is already settled on-chain")
@@ -222,7 +231,7 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
     already_set = await asyncio.to_thread(
         oracle.functions.getExpiryPrice(weth, expiry).call,
     )
-    needs_reset = already_set[1] and body.force_itm is not None and already_set[0] != oracle_price_8dec
+    needs_reset = already_set[1] and already_set[0] != oracle_price_8dec
     needs_set = not already_set[1] or needs_reset
 
     if needs_reset:

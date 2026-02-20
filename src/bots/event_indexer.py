@@ -150,6 +150,7 @@ def _fetch_and_update_delivery_events(settler, from_block: int, to_block: int) -
     try:
         delivery_event_type = settler.events.PhysicalDelivery
     except AttributeError:
+        logger.info("PhysicalDelivery event not in ABI (contract pending upgrade), skipping delivery indexing")
         return 0
 
     delivery_events_raw = delivery_event_type.get_logs(
@@ -217,14 +218,20 @@ async def index_once():
 
     # --- Pass 2: re-scan recent blocks to catch missed events ---
     rescan_from = max(last_indexed - RESCAN_BLOCKS, 0)
-    rescan_to = safe_block
+    rescan_to = min(safe_block, rescan_from + BLOCK_RANGE - 1)
     if rescan_from < rescan_to:
-        rescued = _fetch_and_store_order_events(settler, rescan_from, rescan_to)
-        rescued_delivery = _fetch_and_update_delivery_events(settler, rescan_from, rescan_to)
-        if rescued > 0:
-            logger.info(f"Re-scan recovered {rescued} events from blocks {rescan_from}-{rescan_to}")
-        if rescued_delivery > 0:
-            logger.info(f"Re-scan updated {rescued_delivery} delivery events")
+        try:
+            rescued = _fetch_and_store_order_events(settler, rescan_from, rescan_to)
+            rescued_delivery = _fetch_and_update_delivery_events(settler, rescan_from, rescan_to)
+            if rescued > 0:
+                logger.info(f"Re-scan recovered {rescued} events from blocks {rescan_from}-{rescan_to}")
+            if rescued_delivery > 0:
+                logger.info(f"Re-scan updated {rescued_delivery} delivery events")
+        except Exception:
+            logger.exception(
+                f"Re-scan pass failed for blocks {rescan_from}-{rescan_to}. "
+                f"Forward pass succeeded. Will retry re-scan on next cycle."
+            )
 
 
 async def run():

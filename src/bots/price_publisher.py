@@ -173,7 +173,12 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
                     wl_hash = build_and_send_tx(tx_fn, account)
                     logger.info(f"Whitelisted oToken {otoken_addr}, tx: {wl_hash}")
             except Exception:
-                logger.exception(f"Failed to whitelist oToken {otoken_addr}: {label}")
+                logger.exception(
+                    f"Failed to whitelist oToken {otoken_addr}: {label}. "
+                    f"Excluding from published quotes to prevent user tx reverts."
+                )
+                seen[key] = None
+                continue
 
         seen[key] = otoken_addr
         results.append((otoken_addr, quote))
