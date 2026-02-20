@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 
 from fastapi import APIRouter, HTTPException
 
@@ -20,6 +21,16 @@ router = APIRouter()
 
 DEFAULT_AVAILABLE_AMOUNT = settings.default_max_amount_wei / 10**18
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+# --- Caches ---
+_PRICES_TTL = 15  # seconds
+_prices_cache: list | None = None
+_prices_cached_at: float = 0.0
+
+_OTOKEN_TTL = 120  # seconds
+_otoken_cache: dict[tuple, str] = {}
+_otoken_cached_at: float = 0.0
+_otoken_quote_keys: set[tuple] | None = None
 
 
 def _quote_key(q: PriceQuote) -> tuple:
@@ -85,17 +96,60 @@ def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
     return result
 
 
+async def _get_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
+    """Return otoken_map, using a 120s cache that invalidates when quotes change."""
+    global _otoken_cache, _otoken_cached_at, _otoken_quote_keys
+
+    current_keys = {_quote_key(q) for q in quotes}
+    now = time.monotonic()
+    cache_valid = (
+        (now - _otoken_cached_at) < _OTOKEN_TTL
+        and _otoken_quote_keys == current_keys
+    )
+    if cache_valid:
+        logger.debug("otoken_map cache hit (age=%.1fs)", now - _otoken_cached_at)
+        return _otoken_cache
+
+    logger.info("otoken_map cache miss — refreshing")
+    otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
+
+    if not otoken_map and quotes:
+        logger.warning("otoken_map empty for %d quotes — not caching", len(quotes))
+        return _otoken_cache or otoken_map
+
+    _otoken_cache = otoken_map
+    _otoken_cached_at = now
+    _otoken_quote_keys = current_keys
+    return otoken_map
+
+
 @router.get("/prices", response_model=list[PriceResponse])
 async def get_prices():
     """Get current price menu for ETH options."""
+    global _prices_cache, _prices_cached_at
+
     if circuit_breaker.is_paused:
         raise HTTPException(
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
 
-    eth_price, _ = get_eth_price()
-    iv = await get_eth_iv()
+    now = time.monotonic()
+    if _prices_cache is not None and (now - _prices_cached_at) < _PRICES_TTL:
+        logger.debug("prices cache hit (age=%.1fs)", now - _prices_cached_at)
+        return _prices_cache
+
+    logger.info("prices cache miss — recalculating")
+
+    # Parallelize Chainlink (sync, in thread) and Deribit (async)
+    try:
+        (eth_price, _), iv = await asyncio.gather(
+            asyncio.to_thread(get_eth_price),
+            get_eth_iv(),
+        )
+    except Exception:
+        logger.exception("Failed to fetch market data from Chainlink/Deribit")
+        raise HTTPException(502, "Market data unavailable — Chainlink or Deribit may be down")
 
     if circuit_breaker.check(eth_price):
         raise HTTPException(
@@ -106,7 +160,7 @@ async def get_prices():
     circuit_breaker.update_reference(eth_price)
     quotes = generate_price_sheet(spot=eth_price, iv=iv)
 
-    otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
+    otoken_map = await _get_otoken_map(quotes)
 
     if not (0 <= settings.protocol_fee_bps < 10_000):
         raise HTTPException(
@@ -114,7 +168,7 @@ async def get_prices():
             detail="Server misconfiguration: invalid protocol_fee_bps",
         )
     fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
-    return [
+    result = [
         PriceResponse(
             option_type=q.option_type,
             strike=q.strike,
@@ -130,6 +184,10 @@ async def get_prices():
         )
         for q in quotes
     ]
+
+    _prices_cache = result
+    _prices_cached_at = time.monotonic()
+    return result
 
 
 @router.post("/waitlist", response_model=WaitlistResponse)

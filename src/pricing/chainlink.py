@@ -1,6 +1,7 @@
 from web3 import Web3
 
 from src.config import settings
+from src.contracts.web3_client import get_w3
 
 AGGREGATOR_V3_ABI = [
     {
@@ -25,20 +26,22 @@ AGGREGATOR_V3_ABI = [
     },
 ]
 
+_decimals_cache: int | None = None
 
-def get_eth_price() -> tuple[float, int]:
-    """Read ETH/USD price from Chainlink on Base Sepolia.
 
-    Returns (price_float, updated_at_timestamp).
-    """
-    w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
-    feed = w3.eth.contract(
+def _get_feed():
+    w3 = get_w3()
+    return w3.eth.contract(
         address=Web3.to_checksum_address(settings.chainlink_eth_usd_address),
         abi=AGGREGATOR_V3_ABI,
     )
-    decimals = feed.functions.decimals().call()
-    (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
-    return answer / (10**decimals), updated_at
+
+
+def _get_decimals() -> int:
+    global _decimals_cache
+    if _decimals_cache is None:
+        _decimals_cache = _get_feed().functions.decimals().call()
+    return _decimals_cache
 
 
 def get_eth_price_raw() -> tuple[int, int, int]:
@@ -47,11 +50,18 @@ def get_eth_price_raw() -> tuple[int, int, int]:
     Returns (raw_answer, decimals, updated_at_timestamp).
     Use this when integer precision matters (e.g., Oracle price setting).
     """
-    w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
-    feed = w3.eth.contract(
-        address=Web3.to_checksum_address(settings.chainlink_eth_usd_address),
-        abi=AGGREGATOR_V3_ABI,
-    )
-    decimals = feed.functions.decimals().call()
+    feed = _get_feed()
+    decimals = _get_decimals()
     (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
+    if answer <= 0:
+        raise ValueError(f"Chainlink returned non-positive price: {answer}")
     return answer, decimals, updated_at
+
+
+def get_eth_price() -> tuple[float, int]:
+    """Read ETH/USD price from Chainlink on Base Sepolia.
+
+    Returns (price_float, updated_at_timestamp).
+    """
+    answer, decimals, updated_at = get_eth_price_raw()
+    return answer / (10**decimals), updated_at

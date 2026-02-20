@@ -48,7 +48,7 @@ def generate_price_sheet(
     Args:
         spot: Current ETH price
         iv: Implied volatility (annualized decimal, e.g. 0.80)
-        expiry_days: List of expiry windows in days. Defaults to [7, 14, 30]
+        expiry_days: List of expiry windows in days. Defaults to [15, 30, 60] in beta mode, [7, 14, 30] otherwise
         num_strikes: Number of strikes to generate around ATM
     """
     if expiry_days is None:
