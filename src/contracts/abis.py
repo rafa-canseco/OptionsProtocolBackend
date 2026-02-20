@@ -293,6 +293,25 @@ CONTROLLER_ABI = [
     },
 ]
 
+WHITELIST_ABI = [
+    # whitelistOToken(address) — owner only
+    {
+        "inputs": [{"name": "_oToken", "type": "address"}],
+        "name": "whitelistOToken",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # isWhitelistedOToken(address) → bool
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "isWhitelistedOToken",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
 UNISWAP_V3_QUOTER_ABI = [
     # quoteExactOutputSingle — estimate how much input is needed for exact output
     {

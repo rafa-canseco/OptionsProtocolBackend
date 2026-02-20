@@ -19,6 +19,7 @@ from src.pricing.black_scholes import OptionType
 from src.contracts.web3_client import (
     get_price_sheet,
     get_otoken_factory,
+    get_whitelist,
     get_operator_account,
     build_and_send_tx,
 )
@@ -162,6 +163,19 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
             logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
             seen[key] = None
             continue
+
+        # Step 4: whitelist the oToken on the Whitelist contract
+        if settings.whitelist_address:
+            try:
+                whitelist = get_whitelist()
+                is_wl = whitelist.functions.isWhitelistedOToken(otoken_addr).call()
+                if not is_wl:
+                    tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
+                    wl_hash = build_and_send_tx(tx_fn, account)
+                    logger.info(f"Whitelisted oToken {otoken_addr}, tx: {wl_hash}")
+            except Exception:
+                logger.exception(f"Failed to whitelist oToken {otoken_addr}: {label}")
+                # Continue anyway — oToken exists, just not whitelisted yet
 
         seen[key] = otoken_addr
         results.append((otoken_addr, quote))

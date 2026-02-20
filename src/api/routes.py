@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-DEFAULT_AVAILABLE_AMOUNT = 10.0
+DEFAULT_AVAILABLE_AMOUNT = settings.default_max_amount_wei / 10**18
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 

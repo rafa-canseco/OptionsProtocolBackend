@@ -105,6 +105,15 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
         raise HTTPException(400, "Vault has no short position (already settled or empty)")
 
     try:
+        already_settled = await asyncio.to_thread(
+            controller.functions.vaultSettled(user, vault_id).call,
+        )
+    except Exception:
+        already_settled = False
+    if already_settled:
+        raise HTTPException(400, "Vault is already settled on-chain")
+
+    try:
         otoken = get_otoken(otoken_addr)
         strike_price, expiry, is_put = await asyncio.gather(
             asyncio.to_thread(otoken.functions.strikePrice().call),
@@ -154,6 +163,18 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             else:
                 logger.exception("Failed to set expiry price")
                 raise HTTPException(500, "Failed to set expiry price on Oracle")
+
+        # Wait for RPC nodes to sync the Oracle price update before settling
+        for _attempt in range(5):
+            check = await asyncio.to_thread(
+                oracle.functions.getExpiryPrice(weth, expiry).call,
+            )
+            if check[1]:  # isFinalized
+                oracle_price_8dec = check[0]
+                break
+            await asyncio.sleep(1)
+        else:
+            raise HTTPException(500, "Oracle price set but not yet visible (RPC sync issue)")
     else:
         oracle_price_8dec = already_set[0]
         logger.info(f"Expiry price already finalized for {expiry}: {oracle_price_8dec}")
