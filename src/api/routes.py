@@ -112,6 +112,11 @@ async def _get_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
 
     logger.info("otoken_map cache miss — refreshing")
     otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
+
+    if not otoken_map and quotes:
+        logger.warning("otoken_map empty for %d quotes — not caching", len(quotes))
+        return _otoken_cache or otoken_map
+
     _otoken_cache = otoken_map
     _otoken_cached_at = now
     _otoken_quote_keys = current_keys
@@ -177,7 +182,7 @@ async def get_prices():
     ]
 
     _prices_cache = result
-    _prices_cached_at = now
+    _prices_cached_at = time.monotonic()
     return result
 
 
