@@ -22,7 +22,7 @@ from web3 import Web3
 
 from src.config import settings
 from src.db.database import get_client
-from src.pricing.chainlink import get_eth_price
+from src.pricing.chainlink import get_eth_price_raw
 from src.contracts.web3_client import (
     get_oracle,
     get_batch_settler,
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/demo", tags=["demo"])
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_settle_lock = asyncio.Lock()
 
 
 class SettleRequest(BaseModel):
@@ -79,6 +80,11 @@ async def demo_settle(
 ):
     _verify_api_key(x_demo_key)
 
+    async with _settle_lock:
+        return await _do_settle(body)
+
+
+async def _do_settle(body: SettleRequest) -> SettleResponse:
     user = body.user_address  # already checksummed by validator
     vault_id = body.vault_id
     otoken_addr = body.otoken_address  # already checksummed by validator
@@ -111,15 +117,19 @@ async def demo_settle(
 
     # --- Step 2: read current ETH price from Chainlink ---
     try:
-        eth_price_float, _updated_at = await asyncio.to_thread(get_eth_price)
+        raw_answer, decimals, _updated_at = await asyncio.to_thread(get_eth_price_raw)
     except Exception:
         logger.exception("Failed to read ETH price from Chainlink")
         raise HTTPException(500, "Failed to read ETH price from Chainlink")
 
-    # Convert to 8-decimal integer (Oracle format)
-    oracle_price_8dec = int(eth_price_float * 10**8)
-    if oracle_price_8dec == 0:
-        raise HTTPException(500, "Chainlink returned zero price")
+    # Scale to 8-decimal integer (Oracle format) without float round-trip
+    if decimals == 8:
+        oracle_price_8dec = raw_answer
+    else:
+        oracle_price_8dec = raw_answer * (10 ** (8 - decimals)) if decimals < 8 else raw_answer // (10 ** (decimals - 8))
+
+    if oracle_price_8dec <= 0:
+        raise HTTPException(500, f"Chainlink returned invalid price: {oracle_price_8dec}")
 
     # --- Step 3: set expiry price on Oracle (idempotent) ---
     oracle = get_oracle()
