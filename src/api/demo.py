@@ -4,7 +4,7 @@ Demo settlement endpoint for beta mode.
 POST /demo/settle — triggers instant settlement for a single vault:
   1. Read vault + oToken details on-chain
   2. Read current ETH price from Chainlink
-  3. Set expiry price on Oracle (skip if already finalized)
+  3. Set expiry price on Oracle (reset + re-set if needed for force_itm)
   4. batchSettleVaults for the vault
   5. Determine ITM status; if ITM, physicalRedeem via BatchSettler
   6. Update DB + return result
@@ -174,11 +174,8 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             controller.functions.vaultSettled(user, vault_id).call,
         )
     except Exception:
-        logger.exception(
-            f"Failed to check vaultSettled for user={user} vault={vault_id}. "
-            f"Proceeding with settlement attempt (may fail if already settled)."
-        )
-        already_settled = False
+        logger.exception(f"Failed to check vaultSettled for user={user} vault={vault_id}")
+        raise HTTPException(502, "Cannot verify vault settlement status. Please retry.")
     if already_settled:
         raise HTTPException(400, "Vault is already settled on-chain")
 
@@ -223,7 +220,7 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
     if oracle_price_8dec <= 0:
         raise HTTPException(500, f"Invalid oracle price: {oracle_price_8dec}")
 
-    # --- Step 3: set expiry price on Oracle (idempotent) ---
+    # --- Step 3: set expiry price on Oracle (reset + set if price changed) ---
     oracle = get_oracle()
     account = get_operator_account()
     weth = Web3.to_checksum_address(settings.weth_address)

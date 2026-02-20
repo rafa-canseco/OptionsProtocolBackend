@@ -53,6 +53,8 @@ def get_eth_price_raw() -> tuple[int, int, int]:
     feed = _get_feed()
     decimals = _get_decimals()
     (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()
+    if answer <= 0:
+        raise ValueError(f"Chainlink returned non-positive price: {answer}")
     return answer, decimals, updated_at
 
 

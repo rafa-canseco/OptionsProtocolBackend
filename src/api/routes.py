@@ -142,10 +142,14 @@ async def get_prices():
     logger.info("prices cache miss — recalculating")
 
     # Parallelize Chainlink (sync, in thread) and Deribit (async)
-    (eth_price, _), iv = await asyncio.gather(
-        asyncio.to_thread(get_eth_price),
-        get_eth_iv(),
-    )
+    try:
+        (eth_price, _), iv = await asyncio.gather(
+            asyncio.to_thread(get_eth_price),
+            get_eth_iv(),
+        )
+    except Exception:
+        logger.exception("Failed to fetch market data from Chainlink/Deribit")
+        raise HTTPException(502, "Market data unavailable — Chainlink or Deribit may be down")
 
     if circuit_breaker.check(eth_price):
         raise HTTPException(

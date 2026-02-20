@@ -16,6 +16,7 @@ async def get_eth_iv() -> float:
         f"{DERIBIT_BASE_URL}/public/get_index_price",
         params={"index_name": "eth_usd"},
     )
+    index_resp.raise_for_status()
     index_data = index_resp.json()
     eth_price = index_data["result"]["index_price"]
 
@@ -24,6 +25,7 @@ async def get_eth_iv() -> float:
         f"{DERIBIT_BASE_URL}/public/get_book_summary_by_currency",
         params={"currency": "ETH", "kind": "option"},
     )
+    book_resp.raise_for_status()
     book_data = book_resp.json()
     options = book_data["result"]
 
@@ -61,5 +63,6 @@ async def get_eth_index_price() -> float:
         f"{DERIBIT_BASE_URL}/public/get_index_price",
         params={"index_name": "eth_usd"},
     )
+    resp.raise_for_status()
     data = resp.json()
     return data["result"]["index_price"]
