@@ -124,47 +124,46 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
             continue
 
         if existing != ZERO_ADDRESS:
-            logger.debug(f"oToken exists: {label} → {existing}")
-            seen[key] = existing
-            results.append((existing, quote))
-            continue
-
-        # Step 2: create the oToken
-        try:
-            logger.info(f"Creating oToken: {label}")
-            tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
-            tx_hash = build_and_send_tx(tx_fn, account)
-            logger.info(f"oToken created, tx: {tx_hash}")
-        except Exception:
-            # Handle OTokenAlreadyExists (race condition: another actor created it)
-            # Try to read the address anyway before giving up
+            otoken_addr = existing
+            logger.debug(f"oToken exists: {label} → {otoken_addr}")
+        else:
+            # Step 2: create the oToken
             try:
-                addr = factory.functions.getOToken(params_hash).call()
-                if addr != ZERO_ADDRESS:
-                    logger.info(f"oToken already existed (race condition): {label} → {addr}")
-                    seen[key] = addr
-                    results.append((addr, quote))
-                    continue
+                logger.info(f"Creating oToken: {label}")
+                tx_fn = factory.functions.createOToken(weth, usdc, collateral, strike_price, expiry, is_put)
+                tx_hash = build_and_send_tx(tx_fn, account)
+                logger.info(f"oToken created, tx: {tx_hash}")
             except Exception:
-                logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
-            logger.exception(f"Failed to create oToken: {label}")
-            seen[key] = None
-            continue
+                # Handle OTokenAlreadyExists (race condition: another actor created it)
+                try:
+                    addr = factory.functions.getOToken(params_hash).call()
+                    if addr != ZERO_ADDRESS:
+                        logger.info(f"oToken already existed (race condition): {label} → {addr}")
+                        otoken_addr = addr
+                    else:
+                        logger.exception(f"Failed to create oToken: {label}")
+                        seen[key] = None
+                        continue
+                except Exception:
+                    logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
+                    logger.exception(f"Failed to create oToken: {label}")
+                    seen[key] = None
+                    continue
+            else:
+                # Step 3: read back the newly created address
+                try:
+                    otoken_addr = factory.functions.getOToken(params_hash).call()
+                except Exception:
+                    logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
+                    seen[key] = None
+                    continue
 
-        # Step 3: read back the newly created address
-        try:
-            otoken_addr = factory.functions.getOToken(params_hash).call()
-        except Exception:
-            logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
-            seen[key] = None
-            continue
+                if otoken_addr == ZERO_ADDRESS:
+                    logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
+                    seen[key] = None
+                    continue
 
-        if otoken_addr == ZERO_ADDRESS:
-            logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
-            seen[key] = None
-            continue
-
-        # Step 4: whitelist the oToken on the Whitelist contract
+        # Ensure oToken is whitelisted (runs for both new and existing oTokens)
         if settings.whitelist_address:
             try:
                 whitelist = get_whitelist()
@@ -175,7 +174,6 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
                     logger.info(f"Whitelisted oToken {otoken_addr}, tx: {wl_hash}")
             except Exception:
                 logger.exception(f"Failed to whitelist oToken {otoken_addr}: {label}")
-                # Continue anyway — oToken exists, just not whitelisted yet
 
         seen[key] = otoken_addr
         results.append((otoken_addr, quote))
