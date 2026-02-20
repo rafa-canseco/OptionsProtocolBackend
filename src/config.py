@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     # Beta mode: disables auto-settlement, enables /demo/settle endpoint
     beta_mode: bool = False
     demo_api_key: str = ""
+    mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
     model_config = {"env_file": ".env"}
 

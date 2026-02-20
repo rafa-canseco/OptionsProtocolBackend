@@ -5,6 +5,9 @@ Polls OrderExecuted and PhysicalDelivery events from BatchSettler,
 stores OrderExecuted events and updates existing rows with PhysicalDelivery
 delivery data in the order_events Supabase table.
 Tracks last_indexed_block for resumability.
+
+Uses a re-scan window to catch events missed due to RPC load balancer
+inconsistency (getLogs returning stale data on some nodes).
 """
 import asyncio
 import logging
@@ -16,7 +19,8 @@ from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 logger = logging.getLogger(__name__)
 
 BLOCK_RANGE = 2000  # max blocks per getLogs query
-CONFIRMATION_BLOCKS = 5  # wait N blocks before indexing to avoid RPC sync issues
+CONFIRMATION_BLOCKS = 10  # wait N blocks before indexing to avoid RPC sync issues
+RESCAN_BLOCKS = 50  # re-scan last N blocks each cycle to catch missed events
 
 
 def _get_last_indexed_block() -> int:
@@ -61,6 +65,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
 def _store_events(events: list[dict]) -> int:
     """Insert events into Supabase. Returns count inserted.
 
+    Uses upsert on tx_hash so re-scanned events are safely deduplicated.
     Raises if Supabase accepts the request but returns empty data for a
     non-empty input — prevents the block pointer from advancing past lost events.
     """
@@ -111,20 +116,8 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
     return updated
 
 
-async def index_once():
-    """Single indexing cycle: fetch new events from chain, store in DB."""
-    w3 = get_w3()
-    current_block = w3.eth.block_number
-    safe_block = current_block - CONFIRMATION_BLOCKS
-    from_block = _get_last_indexed_block() + 1
-
-    if from_block > safe_block:
-        return
-
-    settler = get_batch_settler()
-    to_block = min(from_block + BLOCK_RANGE - 1, safe_block)
-
-    # Index OrderExecuted events (new orders)
+def _fetch_and_store_order_events(settler, from_block: int, to_block: int) -> int:
+    """Fetch OrderExecuted events in range and upsert into DB. Returns count stored."""
     raw_events = settler.events.OrderExecuted.get_logs(
         from_block=from_block,
         to_block=to_block,
@@ -149,55 +142,89 @@ async def index_once():
         event_data = _enrich_with_otoken_metadata(event_data)
         events_to_store.append(event_data)
 
-    stored = _store_events(events_to_store)
+    return _store_events(events_to_store)
 
-    # Index PhysicalDelivery events (ITM delivery)
+
+def _fetch_and_update_delivery_events(settler, from_block: int, to_block: int) -> int:
+    """Fetch PhysicalDelivery events in range and update matching DB rows."""
     try:
         delivery_event_type = settler.events.PhysicalDelivery
     except AttributeError:
-        logger.info("PhysicalDelivery event not in ABI (contract pending upgrade)")
-        delivery_event_type = None
+        return 0
 
-    if delivery_event_type is not None:
-        # get_logs errors (RPC/network) must propagate to prevent block pointer advance
-        delivery_events_raw = delivery_event_type.get_logs(
-            from_block=from_block,
-            to_block=to_block,
-        )
-    else:
-        delivery_events_raw = []
+    delivery_events_raw = delivery_event_type.get_logs(
+        from_block=from_block,
+        to_block=to_block,
+    )
 
-    if delivery_events_raw:
-        delivery_to_update = []
-        for ev in delivery_events_raw:
-            otoken_addr = ev.args.oToken.lower()
-            # Contract doesn't emit deliveredAsset — derive from oToken metadata
-            try:
-                ot = get_otoken(otoken_addr)
-                is_put = ot.functions.isPut().call()
-            except Exception:
-                logger.exception(
-                    f"Could not read isPut() for oToken {otoken_addr} "
-                    f"(tx={ev.transactionHash.hex()}). "
-                    f"Skipping delivery update for this event."
-                )
-                continue
-            delivered_asset = settings.weth_address.lower() if is_put else settings.usdc_address.lower()
-            delivery_to_update.append({
-                "user_address": ev.args.user.lower(),
-                "otoken_address": otoken_addr,
-                "delivered_asset": delivered_asset,
-                "delivered_amount": str(ev.args.contraAmount),
-                "delivery_tx_hash": ev.transactionHash.hex(),
-            })
-        delivered = _update_delivery_events(delivery_to_update)
+    if not delivery_events_raw:
+        return 0
+
+    delivery_to_update = []
+    for ev in delivery_events_raw:
+        otoken_addr = ev.args.oToken.lower()
+        try:
+            ot = get_otoken(otoken_addr)
+            is_put = ot.functions.isPut().call()
+        except Exception:
+            logger.exception(
+                f"Could not read isPut() for oToken {otoken_addr} "
+                f"(tx={ev.transactionHash.hex()}). "
+                f"Skipping delivery update for this event."
+            )
+            continue
+        delivered_asset = settings.weth_address.lower() if is_put else settings.usdc_address.lower()
+        delivery_to_update.append({
+            "user_address": ev.args.user.lower(),
+            "otoken_address": otoken_addr,
+            "delivered_asset": delivered_asset,
+            "delivered_amount": str(ev.args.contraAmount),
+            "delivery_tx_hash": ev.transactionHash.hex(),
+        })
+
+    return _update_delivery_events(delivery_to_update)
+
+
+async def index_once():
+    """Single indexing cycle: fetch new events from chain, store in DB.
+
+    Two passes per cycle:
+    1. Forward pass: index from last_indexed_block to safe_block (advances pointer)
+    2. Re-scan pass: re-check the last RESCAN_BLOCKS to catch events missed
+       by the RPC load balancer on previous cycles (upsert deduplicates safely)
+    """
+    w3 = get_w3()
+    current_block = w3.eth.block_number
+    safe_block = current_block - CONFIRMATION_BLOCKS
+    last_indexed = _get_last_indexed_block()
+    from_block = last_indexed + 1
+
+    settler = get_batch_settler()
+
+    # --- Pass 1: forward indexing (advance the pointer) ---
+    if from_block <= safe_block:
+        to_block = min(from_block + BLOCK_RANGE - 1, safe_block)
+
+        stored = _fetch_and_store_order_events(settler, from_block, to_block)
+        delivered = _fetch_and_update_delivery_events(settler, from_block, to_block)
+
+        _set_last_indexed_block(to_block)
+
+        if stored > 0:
+            logger.info(f"Indexed {stored} events from blocks {from_block}-{to_block}")
         if delivered > 0:
             logger.info(f"Updated {delivered} positions with physical delivery data")
 
-    _set_last_indexed_block(to_block)
-
-    if stored > 0:
-        logger.info(f"Indexed {stored} events from blocks {from_block}-{to_block}")
+    # --- Pass 2: re-scan recent blocks to catch missed events ---
+    rescan_from = max(last_indexed - RESCAN_BLOCKS, 0)
+    rescan_to = safe_block
+    if rescan_from < rescan_to:
+        rescued = _fetch_and_store_order_events(settler, rescan_from, rescan_to)
+        rescued_delivery = _fetch_and_update_delivery_events(settler, rescan_from, rescan_to)
+        if rescued > 0:
+            logger.info(f"Re-scan recovered {rescued} events from blocks {rescan_from}-{rescan_to}")
+        if rescued_delivery > 0:
+            logger.info(f"Re-scan updated {rescued_delivery} delivery events")
 
 
 async def run():

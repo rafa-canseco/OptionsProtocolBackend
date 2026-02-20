@@ -29,9 +29,51 @@ from src.contracts.web3_client import (
     get_controller,
     get_otoken,
     get_operator_account,
+    get_w3,
     build_and_send_tx,
 )
 from src.bots.expiry_settler import compute_max_collateral_spent
+
+MOCK_CHAINLINK_FEED_ABI = [
+    {
+        "inputs": [{"name": "_price", "type": "int256"}],
+        "name": "setPrice",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "price",
+        "outputs": [{"name": "", "type": "int256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+ERC20_APPROVE_ABI = [
+    {
+        "inputs": [
+            {"name": "spender", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "approve",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+        ],
+        "name": "allowance",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+MAX_UINT256 = 2**256 - 1
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +81,23 @@ router = APIRouter(prefix="/demo", tags=["demo"])
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _settle_lock = asyncio.Lock()
+
+RPC_SYNC_ATTEMPTS = 10
+RPC_SYNC_DELAY = 2  # seconds between polls
+
+
+async def _wait_for_rpc(read_fn, check_fn, label: str) -> None:
+    """Poll an on-chain read until check_fn(result) is True.
+
+    Handles the drpc.live load balancer returning stale data after writes.
+    """
+    for attempt in range(RPC_SYNC_ATTEMPTS):
+        result = await asyncio.to_thread(read_fn)
+        if check_fn(result):
+            return
+        logger.debug(f"RPC sync waiting ({label}): attempt {attempt + 1}/{RPC_SYNC_ATTEMPTS}")
+        await asyncio.sleep(RPC_SYNC_DELAY)
+    raise HTTPException(500, f"RPC sync timeout: {label}")
 
 
 class SettleRequest(BaseModel):
@@ -163,7 +222,33 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
     already_set = await asyncio.to_thread(
         oracle.functions.getExpiryPrice(weth, expiry).call,
     )
-    if not already_set[1]:  # isFinalized == False → not yet finalized, safe to set
+    needs_reset = already_set[1] and body.force_itm is not None and already_set[0] != oracle_price_8dec
+    needs_set = not already_set[1] or needs_reset
+
+    if needs_reset:
+        # force_itm needs a different price — reset first (beta mode only)
+        try:
+            logger.info(
+                f"Resetting Oracle price for expiry {expiry} "
+                f"(locked={already_set[0]}, wanted={oracle_price_8dec})"
+            )
+            tx_fn = oracle.functions.resetExpiryPrice(weth, expiry)
+            await asyncio.to_thread(build_and_send_tx, tx_fn, account)
+
+            # Wait for reset to propagate before setting new price
+            await _wait_for_rpc(
+                oracle.functions.getExpiryPrice(weth, expiry).call,
+                lambda r: not r[1],  # isFinalized == False
+                "Oracle reset propagation",
+            )
+            logger.info(f"Oracle price reset confirmed for expiry {expiry}")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Failed to reset Oracle expiry price")
+            raise HTTPException(500, "Failed to reset Oracle expiry price")
+
+    if needs_set:
         try:
             tx_fn = oracle.functions.setExpiryPrice(weth, expiry, oracle_price_8dec)
             await asyncio.to_thread(build_and_send_tx, tx_fn, account)
@@ -171,46 +256,45 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
         except Exception as e:
             if "PriceAlreadySet" in str(e):
                 logger.info(f"Expiry price already set for {expiry}, reading on-chain value")
-                on_chain = await asyncio.to_thread(
-                    oracle.functions.getExpiryPrice(weth, expiry).call,
-                )
-                oracle_price_8dec = on_chain[0]
             else:
                 logger.exception("Failed to set expiry price")
                 raise HTTPException(500, "Failed to set expiry price on Oracle")
 
-        # Wait for RPC nodes to sync the Oracle price update before settling
-        for _attempt in range(5):
-            check = await asyncio.to_thread(
-                oracle.functions.getExpiryPrice(weth, expiry).call,
-            )
-            if check[1]:  # isFinalized
-                oracle_price_8dec = check[0]
-                break
-            await asyncio.sleep(1)
-        else:
-            raise HTTPException(500, "Oracle price set but not yet visible (RPC sync issue)")
+        # Wait for price to be visible
+        await _wait_for_rpc(
+            oracle.functions.getExpiryPrice(weth, expiry).call,
+            lambda r: r[1] and r[0] > 0,  # isFinalized and price > 0
+            "Oracle price propagation",
+        )
+        confirmed = await asyncio.to_thread(oracle.functions.getExpiryPrice(weth, expiry).call)
+        oracle_price_8dec = confirmed[0]
     else:
-        # Oracle price already locked from a previous settlement on this expiry
-        locked_price = already_set[0]
-        if body.force_itm is not None and locked_price != oracle_price_8dec:
-            # force_itm requested but we can't override the locked price
-            would_be_itm = (is_put and oracle_price_8dec < strike_price) or (
-                not is_put and oracle_price_8dec > strike_price
-            )
-            actual_itm = (is_put and locked_price < strike_price) or (
-                not is_put and locked_price > strike_price
-            )
-            if would_be_itm != actual_itm:
-                raise HTTPException(
-                    409,
-                    f"Cannot force {'ITM' if body.force_itm else 'OTM'}: Oracle price "
-                    f"already locked at {locked_price} for this expiry from a previous "
-                    f"settlement. Use a position with a different expiry to test "
-                    f"{'ITM' if body.force_itm else 'OTM'} settlement."
-                )
-        oracle_price_8dec = locked_price
+        # Price already finalized and matches (or no force_itm)
+        oracle_price_8dec = already_set[0]
         logger.info(f"Expiry price already finalized for {expiry}: {oracle_price_8dec}")
+
+    # --- Step 3b: sync MockChainlinkFeed so MockSwapRouter uses the same price ---
+    if settings.mock_chainlink_feed_address:
+        try:
+            w3 = get_w3()
+            mock_feed = w3.eth.contract(
+                address=Web3.to_checksum_address(settings.mock_chainlink_feed_address),
+                abi=MOCK_CHAINLINK_FEED_ABI,
+            )
+            tx_fn = mock_feed.functions.setPrice(oracle_price_8dec)
+            await asyncio.to_thread(build_and_send_tx, tx_fn, account)
+
+            await _wait_for_rpc(
+                mock_feed.functions.price().call,
+                lambda p: p == oracle_price_8dec,
+                "MockChainlinkFeed price propagation",
+            )
+            logger.info(f"Synced MockChainlinkFeed price to {oracle_price_8dec}")
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Failed to sync MockChainlinkFeed price")
+            raise HTTPException(500, "Failed to sync swap router price feed")
 
     # --- Step 4: batchSettleVaults ---
     settler = get_batch_settler()
@@ -218,6 +302,14 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
         tx_fn = settler.functions.batchSettleVaults([user], [vault_id])
         settle_tx_hash = await asyncio.to_thread(build_and_send_tx, tx_fn, account)
         logger.info(f"Settled vault {vault_id} for {user}, tx: {settle_tx_hash}")
+
+        await _wait_for_rpc(
+            controller.functions.vaultSettled(user, vault_id).call,
+            lambda settled: settled is True,
+            "batchSettleVaults propagation",
+        )
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("batchSettleVaults failed")
         raise HTTPException(500, "Vault settlement failed")
@@ -241,6 +333,26 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             "otoken_address": otoken_addr,
         }
         try:
+            # Approve oToken to BatchSettler if needed (operator must allow pull)
+            w3 = get_w3()
+            otoken_erc20 = w3.eth.contract(
+                address=Web3.to_checksum_address(otoken_addr), abi=ERC20_APPROVE_ABI,
+            )
+            settler_addr = Web3.to_checksum_address(settings.batch_settler_address)
+            allowance = await asyncio.to_thread(
+                otoken_erc20.functions.allowance(account.address, settler_addr).call,
+            )
+            if allowance < short_amount:
+                approve_fn = otoken_erc20.functions.approve(settler_addr, MAX_UINT256)
+                await asyncio.to_thread(build_and_send_tx, approve_fn, account)
+
+                await _wait_for_rpc(
+                    otoken_erc20.functions.allowance(account.address, settler_addr).call,
+                    lambda a: a >= short_amount,
+                    "oToken approve propagation",
+                )
+                logger.info(f"Approved oToken {otoken_addr} to BatchSettler")
+
             max_collateral, contra_amount = await asyncio.to_thread(
                 compute_max_collateral_spent, position, oracle_price_8dec,
             )
