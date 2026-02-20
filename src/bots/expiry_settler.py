@@ -129,10 +129,15 @@ def _beta_compute_max_collateral(
 ) -> int:
     """Compute maxCollateralSpent from Oracle price with a 10% buffer (beta mode).
 
-    No Uniswap Quoter needed — uses the mock Oracle price for conversion.
+    No Uniswap Quoter needed — converts directly using the oracle price.
+    Buffer is intentionally wider than production slippage (1%) since we
+    lack a real DEX quote to anchor the estimate.
 
     oracle_price_8dec is ETH/USD in 8 decimals (e.g., $2500 = 250000000000).
     """
+    if oracle_price_8dec <= 0:
+        raise ValueError(f"oracle_price_8dec must be positive, got {oracle_price_8dec}")
+
     if is_put:
         # PUT: collateral is USDC (6-dec), contra is WETH (18-dec)
         # max_collateral_usdc = contra_weth * oracle_price / 1e(18 + 8 - 6) = contra * price / 1e20
@@ -155,8 +160,9 @@ def compute_max_collateral_spent(
 ) -> tuple[int, int]:
     """Compute maxCollateralSpent for physicalRedeem.
 
-    In beta mode (oracle_price_8dec provided), uses Oracle price + 10% buffer.
-    In production mode, queries Uniswap Quoter for an exact swap quote.
+    In beta mode (settings.beta_mode=True and oracle_price_8dec provided),
+    uses Oracle price + 10% buffer. Otherwise, queries Uniswap Quoter for
+    an exact swap quote.
 
     Returns (max_collateral_spent, contra_amount).
     """
@@ -167,7 +173,11 @@ def compute_max_collateral_spent(
     contra_amount, token_in, token_out = _compute_contra_amount(amount_raw, strike, is_put)
 
     # Beta mode: use Oracle price instead of Quoter
-    if settings.beta_mode and oracle_price_8dec is not None:
+    if settings.beta_mode:
+        if oracle_price_8dec is None:
+            raise ValueError(
+                "oracle_price_8dec is required in beta mode (no Uniswap Quoter available)"
+            )
         max_collateral = _beta_compute_max_collateral(contra_amount, is_put, oracle_price_8dec)
         return max_collateral, contra_amount
 
