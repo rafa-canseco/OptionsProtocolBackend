@@ -19,7 +19,7 @@ from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 logger = logging.getLogger(__name__)
 
 BLOCK_RANGE = 2000  # max blocks per getLogs query
-CONFIRMATION_BLOCKS = 10  # wait N blocks before indexing to avoid RPC sync issues
+CONFIRMATION_BLOCKS = 2  # wait N blocks before indexing (Base has fast finality)
 RESCAN_BLOCKS = 50  # re-scan last N blocks each cycle to catch missed events
 
 
