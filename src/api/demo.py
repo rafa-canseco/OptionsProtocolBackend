@@ -45,6 +45,7 @@ class SettleRequest(BaseModel):
     user_address: str
     vault_id: int = Field(ge=1)
     otoken_address: str
+    force_itm: bool | None = None  # None = real price, True = force ITM, False = force OTM
 
     @field_validator("user_address", "otoken_address")
     @classmethod
@@ -124,21 +125,35 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
         logger.exception(f"Failed to read oToken details for {otoken_addr}")
         raise HTTPException(500, "Failed to read oToken details from chain")
 
-    # --- Step 2: read current ETH price from Chainlink ---
-    try:
-        raw_answer, decimals, _updated_at = await asyncio.to_thread(get_eth_price_raw)
-    except Exception:
-        logger.exception("Failed to read ETH price from Chainlink")
-        raise HTTPException(500, "Failed to read ETH price from Chainlink")
-
-    # Scale to 8-decimal integer (Oracle format) without float round-trip
-    if decimals == 8:
-        oracle_price_8dec = raw_answer
+    # --- Step 2: determine Oracle expiry price ---
+    if body.force_itm is not None:
+        # Manipulate price to force ITM or OTM outcome
+        # PUT ITM when price < strike, CALL ITM when price > strike
+        if body.force_itm:
+            # Force ITM: set price 10% below strike for puts, 10% above for calls
+            oracle_price_8dec = strike_price * 9 // 10 if is_put else strike_price * 11 // 10
+        else:
+            # Force OTM: set price 10% above strike for puts, 10% below for calls
+            oracle_price_8dec = strike_price * 11 // 10 if is_put else strike_price * 9 // 10
+        logger.info(
+            f"force_itm={body.force_itm}: using manipulated price {oracle_price_8dec} "
+            f"(strike={strike_price}, is_put={is_put})"
+        )
     else:
-        oracle_price_8dec = raw_answer * (10 ** (8 - decimals)) if decimals < 8 else raw_answer // (10 ** (decimals - 8))
+        # Use real Chainlink price
+        try:
+            raw_answer, decimals, _updated_at = await asyncio.to_thread(get_eth_price_raw)
+        except Exception:
+            logger.exception("Failed to read ETH price from Chainlink")
+            raise HTTPException(500, "Failed to read ETH price from Chainlink")
+
+        if decimals == 8:
+            oracle_price_8dec = raw_answer
+        else:
+            oracle_price_8dec = raw_answer * (10 ** (8 - decimals)) if decimals < 8 else raw_answer // (10 ** (decimals - 8))
 
     if oracle_price_8dec <= 0:
-        raise HTTPException(500, f"Chainlink returned invalid price: {oracle_price_8dec}")
+        raise HTTPException(500, f"Invalid oracle price: {oracle_price_8dec}")
 
     # --- Step 3: set expiry price on Oracle (idempotent) ---
     oracle = get_oracle()
