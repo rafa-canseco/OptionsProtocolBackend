@@ -3,7 +3,9 @@ import logging
 import re
 import time
 
-from fastapi import APIRouter, HTTPException
+from collections import defaultdict
+
+from fastapi import APIRouter, HTTPException, Request
 
 from src.config import settings
 from src.db.database import get_client
@@ -31,6 +33,40 @@ _OTOKEN_TTL = 120  # seconds
 _otoken_cache: dict[tuple, str] = {}
 _otoken_cached_at: float = 0.0
 _otoken_quote_keys: set[tuple] | None = None
+
+# --- Waitlist rate limit (in-memory, per IP) ---
+_WAITLIST_WINDOW = 60  # seconds
+_WAITLIST_MAX_REQUESTS = 5
+_WAITLIST_MAX_TRACKED_IPS = 10_000
+_waitlist_hits: dict[str, list[float]] = defaultdict(list)
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP, preferring X-Forwarded-For for proxied requests."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client is not None:
+        return request.client.host
+    return "unknown"
+
+
+def _check_rate_limit(ip: str) -> None:
+    """Raise 429 if ip exceeded _WAITLIST_MAX_REQUESTS in the last window."""
+    now = time.monotonic()
+
+    if len(_waitlist_hits) > _WAITLIST_MAX_TRACKED_IPS:
+        stale = [k for k, v in _waitlist_hits.items()
+                 if not v or now - v[-1] >= _WAITLIST_WINDOW]
+        for k in stale:
+            del _waitlist_hits[k]
+
+    hits = _waitlist_hits[ip]
+    _waitlist_hits[ip] = [t for t in hits if now - t < _WAITLIST_WINDOW]
+    if len(_waitlist_hits[ip]) >= _WAITLIST_MAX_REQUESTS:
+        logger.warning("Rate limit exceeded for IP %s", ip)
+        raise HTTPException(status_code=429, detail="Too many requests, try again later")
+    _waitlist_hits[ip].append(now)
 
 
 def _quote_key(q: PriceQuote) -> tuple:
@@ -191,8 +227,9 @@ async def get_prices():
 
 
 @router.post("/waitlist", response_model=WaitlistResponse)
-async def join_waitlist(body: WaitlistRequest):
+async def join_waitlist(body: WaitlistRequest, request: Request):
     """Add an email to the waitlist. Idempotent — duplicates return 200."""
+    _check_rate_limit(_get_client_ip(request))
     try:
         client = get_client()
         result = client.table("waitlist").upsert(
@@ -206,6 +243,22 @@ async def join_waitlist(body: WaitlistRequest):
         logger.error("Waitlist upsert returned empty data")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
     return WaitlistResponse(ok=True)
+
+
+@router.get("/waitlist/count")
+async def get_waitlist_count():
+    """Return the number of emails on the waitlist."""
+    client = get_client()
+    try:
+        result = client.table("waitlist").select("id", count="exact").execute()
+        count = result.count
+    except Exception:
+        logger.exception("Waitlist count failed")
+        raise HTTPException(status_code=502, detail="Could not fetch waitlist count")
+    if count is None:
+        logger.error("Waitlist count returned None")
+        raise HTTPException(status_code=502, detail="Could not fetch waitlist count")
+    return {"count": count}
 
 
 def _compute_outcome(position: dict) -> str | None:
