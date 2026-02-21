@@ -22,17 +22,19 @@ BOTS = {
     "event_indexer": "src.bots.event_indexer",
     "expiry_settler": "src.bots.expiry_settler",
     "circuit_breaker": "src.bots.circuit_breaker_bot",
+    "weekly_aggregator": "src.bots.weekly_aggregator",
 }
 
 
 async def main(bot_name: str):
     if bot_name == "all":
-        from src.bots import price_publisher, event_indexer, expiry_settler, circuit_breaker_bot
+        from src.bots import price_publisher, event_indexer, expiry_settler, circuit_breaker_bot, weekly_aggregator
         await asyncio.gather(
             price_publisher.run(),
             event_indexer.run(),
             expiry_settler.run(),
             circuit_breaker_bot.run(),
+            weekly_aggregator.run(),
         )
     elif bot_name in BOTS:
         import importlib
