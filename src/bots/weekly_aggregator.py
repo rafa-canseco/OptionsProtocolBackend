@@ -1,0 +1,257 @@
+"""
+Weekly Aggregator Bot
+
+Runs every Friday at 12:00 UTC. Aggregates all testnet activity for the week:
+  1. Query order_events for positions opened this week
+  2. Fetch ETH price history for the week
+  3. For each user: compute simulated premium, check assignments, compute P&L
+  4. Upsert rows into user_weekly_results
+  5. Aggregate into weekly_reports with narrative_data JSON
+"""
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+
+from src.config import settings
+from src.db.database import get_client
+from src.pricing.deribit import get_eth_iv
+from src.pricing.historical import get_eth_price_history
+
+logger = logging.getLogger(__name__)
+
+
+def _week_boundaries() -> tuple[datetime, datetime]:
+    """Return (Monday 00:00 UTC, Sunday 23:59:59 UTC) for the week that just ended."""
+    now = datetime.now(timezone.utc)
+    # Go back to the most recent Sunday
+    days_since_sunday = (now.weekday() + 1) % 7
+    if days_since_sunday == 0:
+        days_since_sunday = 7  # if today is Sunday, use last Sunday
+    week_end = (now - timedelta(days=days_since_sunday)).replace(
+        hour=23, minute=59, second=59, microsecond=0,
+    )
+    week_start = (week_end - timedelta(days=6)).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    return week_start, week_end
+
+
+def _get_week_positions(week_start: datetime, week_end: datetime) -> list[dict]:
+    """Get all order_events created during the week."""
+    client = get_client()
+    result = (
+        client.table("order_events")
+        .select("*")
+        .gte("indexed_at", week_start.isoformat())
+        .lte("indexed_at", week_end.isoformat())
+        .execute()
+    )
+    return result.data or []
+
+
+def _group_by_user(positions: list[dict]) -> dict[str, list[dict]]:
+    """Group positions by user_address."""
+    grouped: dict[str, list[dict]] = {}
+    for pos in positions:
+        addr = pos.get("user_address", "").lower()
+        if addr:
+            grouped.setdefault(addr, []).append(pos)
+    return grouped
+
+
+def _compute_user_week(
+    user_addr: str,
+    positions: list[dict],
+    eth_close: float,
+    prev_cumulative: float,
+) -> dict:
+    """Compute a user's weekly aggregated results."""
+    total_premium = 0.0
+    assignments = 0
+
+    for pos in positions:
+        net = pos.get("net_premium") or pos.get("premium")
+        if net is not None:
+            try:
+                total_premium += float(net) / 1e18  # premium stored in wei
+            except (ValueError, TypeError):
+                pass
+
+        if pos.get("is_settled") and pos.get("is_itm"):
+            assignments += 1
+
+    # Simulated P&L: premium earned minus any assignment losses
+    # For simplicity: premium is profit, assignment loss = (strike - eth_close) * amount
+    pnl = total_premium  # base case: all premium is profit
+    for pos in positions:
+        if pos.get("is_settled") and pos.get("is_itm") and pos.get("is_put"):
+            try:
+                strike = float(pos["strike_price"]) / 1e8
+                amount = float(pos["amount"]) / 1e8
+                loss = (strike - eth_close) * amount
+                if loss > 0:
+                    pnl -= loss
+            except (ValueError, TypeError, KeyError):
+                pass
+
+    cumulative = prev_cumulative + pnl
+
+    return {
+        "user_address": user_addr,
+        "positions_opened": len(positions),
+        "total_simulated_premium": round(total_premium, 4),
+        "assignments": assignments,
+        "simulated_pnl": round(pnl, 4),
+        "cumulative_pnl": round(cumulative, 4),
+    }
+
+
+def _get_prev_cumulative(user_addr: str) -> float:
+    """Get the most recent cumulative_pnl for a user, or 0."""
+    client = get_client()
+    result = (
+        client.table("user_weekly_results")
+        .select("cumulative_pnl")
+        .eq("user_address", user_addr)
+        .order("week_start", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        return float(result.data[0].get("cumulative_pnl", 0))
+    return 0.0
+
+
+def _build_narrative(
+    user_results: list[dict],
+    eth_open: float,
+    eth_close: float,
+) -> dict:
+    """Build narrative_data JSON for the weekly report."""
+    if not user_results:
+        return {}
+
+    highest_premium = max(user_results, key=lambda r: r["total_simulated_premium"])
+    most_positions = max(user_results, key=lambda r: r["positions_opened"])
+
+    narrative = {
+        "highest_premium_earned": highest_premium["total_simulated_premium"],
+        "most_active_positions": most_positions["positions_opened"],
+        "total_unique_users": len(user_results),
+        "eth_week_change_pct": round(
+            (eth_close - eth_open) / eth_open * 100 if eth_open > 0 else 0, 2,
+        ),
+    }
+
+    # Find closest-to-assignment: user with smallest positive (strike - eth_low) margin
+    assigned_count = sum(1 for r in user_results if r["assignments"] > 0)
+    narrative["total_assignments"] = assigned_count
+
+    return narrative
+
+
+async def aggregate_once():
+    """Single aggregation cycle."""
+    week_start, week_end = _week_boundaries()
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = week_end.strftime("%Y-%m-%d")
+
+    logger.info(f"Aggregating week {week_start_str} → {week_end_str}")
+
+    positions = _get_week_positions(week_start, week_end)
+    if not positions:
+        logger.info("No positions this week, skipping aggregation")
+        return
+
+    # Fetch ETH price data for the week
+    try:
+        history = await get_eth_price_history(days=7)
+    except Exception:
+        logger.exception("Failed to fetch ETH price history for aggregation")
+        raise
+
+    eth_open = history[0].price if history else 0
+    eth_close = history[-1].price if history else 0
+    eth_high = max(p.price for p in history) if history else 0
+    eth_low = min(p.price for p in history) if history else 0
+
+    # Group by user and compute per-user results
+    grouped = _group_by_user(positions)
+    user_results = []
+
+    for user_addr, user_positions in grouped.items():
+        prev_cumulative = _get_prev_cumulative(user_addr)
+        result = _compute_user_week(user_addr, user_positions, eth_close, prev_cumulative)
+        result["week_start"] = week_start_str
+        result["week_end"] = week_end_str
+        user_results.append(result)
+
+    # Upsert user_weekly_results
+    client = get_client()
+    for result in user_results:
+        try:
+            client.table("user_weekly_results").upsert(
+                result, on_conflict="user_address,week_start",
+            ).execute()
+        except Exception:
+            logger.exception(f"Failed to upsert user_weekly_results for {result['user_address']}")
+
+    # Build and upsert weekly_reports
+    narrative = _build_narrative(user_results, eth_open, eth_close)
+    report = {
+        "week_start": week_start_str,
+        "week_end": week_end_str,
+        "total_users": len(grouped),
+        "total_positions": len(positions),
+        "total_simulated_premium": round(sum(r["total_simulated_premium"] for r in user_results), 4),
+        "total_assignments": sum(r["assignments"] for r in user_results),
+        "eth_open": round(eth_open, 2),
+        "eth_close": round(eth_close, 2),
+        "eth_high": round(eth_high, 2),
+        "eth_low": round(eth_low, 2),
+        "narrative_data": narrative,
+    }
+
+    try:
+        client.table("weekly_reports").upsert(
+            report, on_conflict="week_start",
+        ).execute()
+        logger.info(f"Weekly report saved: {len(grouped)} users, {len(positions)} positions")
+    except Exception:
+        logger.exception("Failed to upsert weekly_reports")
+        raise
+
+
+async def _wait_until_target():
+    """Sleep until the next Friday at the configured hour (default 12:00 UTC)."""
+    now = datetime.now(timezone.utc)
+
+    # Find next target day (default: Friday = weekday 4)
+    days_ahead = (settings.weekly_aggregation_day - now.weekday()) % 7
+    if days_ahead == 0:
+        # It's the target day — check if we've passed the hour
+        target = now.replace(
+            hour=settings.weekly_aggregation_hour_utc,
+            minute=0, second=0, microsecond=0,
+        )
+        if target <= now:
+            days_ahead = 7
+    target = (now + timedelta(days=days_ahead)).replace(
+        hour=settings.weekly_aggregation_hour_utc,
+        minute=0, second=0, microsecond=0,
+    )
+
+    wait_seconds = (target - now).total_seconds()
+    logger.info(f"Weekly aggregator waiting {wait_seconds:.0f}s until {target.isoformat()}")
+    await asyncio.sleep(wait_seconds)
+
+
+async def run():
+    """Main loop: aggregate every Friday at 12:00 UTC."""
+    logger.info("Weekly aggregator starting")
+    while True:
+        await _wait_until_target()
+        try:
+            await aggregate_once()
+        except Exception:
+            logger.exception("Weekly aggregation failed")
