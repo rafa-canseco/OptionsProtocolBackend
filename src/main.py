@@ -28,7 +28,6 @@ async def lifespan(app: FastAPI):
             event_indexer,
             expiry_settler,
             circuit_breaker_bot,
-            weekly_aggregator,
         )
 
         tasks.append(asyncio.create_task(price_publisher.run()))
@@ -38,10 +37,14 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Beta mode: expiry_settler disabled (settlement is user-triggered)")
         tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
-        tasks.append(asyncio.create_task(weekly_aggregator.run()))
-        logger.info(f"Started {len(tasks)} background bots")
+        logger.info("Started %d on-chain bots", len(tasks))
     else:
-        logger.info("Bots not started: contract addresses or operator key not configured")
+        logger.info("On-chain bots not started: contract addresses or operator key not configured")
+
+    # Weekly aggregator only needs DB access, not on-chain config
+    from src.bots import weekly_aggregator
+    tasks.append(asyncio.create_task(weekly_aggregator.run()))
+    logger.info("Weekly aggregator started")
 
     yield
 

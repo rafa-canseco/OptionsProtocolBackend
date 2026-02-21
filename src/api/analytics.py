@@ -1,6 +1,7 @@
 import logging
+from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 from src.db.database import get_client
@@ -8,6 +9,11 @@ from src.db.database import get_client
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+
+EVENT_TYPES = Literal[
+    "slider_use", "signup", "first_trade",
+    "return_visit", "share_result", "settle",
+]
 
 
 class SliderInteraction(BaseModel):
@@ -20,13 +26,13 @@ class SliderInteraction(BaseModel):
 
 class EngagementEvent(BaseModel):
     user_address: str | None = None
-    event_type: str  # slider_use, signup, first_trade, return_visit, share_result, settle
+    event_type: EVENT_TYPES
     metadata: dict = {}
 
 
 @router.post("/slider", status_code=202)
 async def log_slider(body: SliderInteraction):
-    """Log a slider interaction. Fire-and-forget — never fails the request."""
+    """Log a slider interaction. DB write is fire-and-forget (errors logged, not raised)."""
     try:
         client = get_client()
         client.table("slider_interactions").insert({
@@ -37,14 +43,14 @@ async def log_slider(body: SliderInteraction):
             "converted_to_signup": body.converted_to_signup,
         }).execute()
     except Exception:
-        logger.warning("Failed to log slider interaction", exc_info=True)
+        logger.error("Failed to log slider interaction", exc_info=True)
 
     return {"ok": True}
 
 
 @router.post("/event", status_code=202)
 async def log_event(body: EngagementEvent):
-    """Log an engagement event. Fire-and-forget — never fails the request."""
+    """Log an engagement event. DB write is fire-and-forget (errors logged, not raised)."""
     try:
         client = get_client()
         client.table("engagement_events").insert({
@@ -53,6 +59,6 @@ async def log_event(body: EngagementEvent):
             "metadata": body.metadata,
         }).execute()
     except Exception:
-        logger.warning("Failed to log engagement event", exc_info=True)
+        logger.error("Failed to log engagement event", exc_info=True)
 
     return {"ok": True}

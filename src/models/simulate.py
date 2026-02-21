@@ -2,13 +2,13 @@ from pydantic import BaseModel
 
 
 class ComparisonData(BaseModel):
-    hold_return: float  # % return from holding ETH
-    stake_return: float  # % return from staking ETH
-    dca_return: float  # % return from daily DCA
+    hold_return: float  # fractional return from holding ETH (0.05 = 5%)
+    stake_return: float  # fractional return from staking ETH (0.05 = 5%)
+    dca_return: float  # fractional return from daily DCA (0.05 = 5%)
 
 
 class SimulateResponse(BaseModel):
-    premium_earned: float  # USD premium for 1 ETH notional
+    premium_earned: float  # USD premium for 1-contract put (net of protocol fee)
     was_assigned: bool  # did ETH close below strike (put)?
     eth_low_of_week: float
     eth_close: float
@@ -28,7 +28,7 @@ class WeeklyReport(BaseModel):
     eth_close: float
     eth_high: float
     eth_low: float
-    narrative_data: dict  # highest_premium, closest_to_assignment, etc.
+    narrative_data: dict
 
 
 class UserWeeklyResult(BaseModel):

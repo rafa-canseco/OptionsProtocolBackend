@@ -21,12 +21,13 @@ class PricePoint:
     price: float  # USD
 
 
-async def get_eth_price_history(days: int = 7) -> list[PricePoint]:
-    """Fetch daily ETH/USD prices for the last N days.
+async def get_eth_price_history() -> list[PricePoint]:
+    """Fetch daily ETH/USD prices for the last 7 days.
 
     Primary: CoinGecko (free, no API key).
     Fallback: Deribit OHLC.
     Returns one PricePoint per day, sorted chronologically.
+    Cached for 30 minutes.
     """
     global _cache, _cache_ts
 
@@ -35,24 +36,37 @@ async def get_eth_price_history(days: int = 7) -> list[PricePoint]:
         return _cache
 
     try:
-        points = await _fetch_coingecko(days)
-    except Exception:
-        logger.warning("CoinGecko failed, trying Deribit fallback", exc_info=True)
-        points = await _fetch_deribit(days)
+        points = await _fetch_coingecko()
+    except (httpx.HTTPError, ValueError) as cg_err:
+        logger.error("CoinGecko failed (%s), trying Deribit fallback", cg_err, exc_info=True)
+        try:
+            points = await _fetch_deribit()
+        except (httpx.HTTPError, ValueError) as db_err:
+            logger.error(
+                "Both CoinGecko and Deribit failed. CoinGecko: %s, Deribit: %s",
+                cg_err, db_err,
+            )
+            # Serve stale cache if available
+            if _cache is not None:
+                logger.warning("Serving stale cache (age: %.0fs)", now - _cache_ts)
+                return _cache
+            raise RuntimeError(
+                f"All price sources failed. CoinGecko: {cg_err}, Deribit: {db_err}"
+            ) from db_err
 
-    if not points:
-        raise RuntimeError("No historical ETH price data available")
+    if len(points) < 2:
+        raise RuntimeError(f"Insufficient price data: got {len(points)} points, need at least 2")
 
     _cache = points
     _cache_ts = time.monotonic()
     return points
 
 
-async def _fetch_coingecko(days: int) -> list[PricePoint]:
-    """CoinGecko market_chart — returns daily prices when days > 1."""
+async def _fetch_coingecko() -> list[PricePoint]:
+    """CoinGecko market_chart — returns daily prices for 7 days."""
     resp = await _client.get(
         f"{settings.coingecko_api_url}/coins/ethereum/market_chart",
-        params={"vs_currency": "usd", "days": days, "interval": "daily"},
+        params={"vs_currency": "usd", "days": 7, "interval": "daily"},
     )
     resp.raise_for_status()
     data = resp.json()
@@ -67,10 +81,10 @@ async def _fetch_coingecko(days: int) -> list[PricePoint]:
     ]
 
 
-async def _fetch_deribit(days: int) -> list[PricePoint]:
-    """Deribit OHLC candles as fallback (1-day resolution)."""
+async def _fetch_deribit() -> list[PricePoint]:
+    """Deribit OHLC candles as fallback (1-day resolution, 7 days)."""
     end_ts = int(time.time()) * 1000
-    start_ts = end_ts - (days * 86_400_000)
+    start_ts = end_ts - (7 * 86_400_000)
 
     resp = await _client.get(
         "https://www.deribit.com/api/v2/public/get_tradingview_chart_data",

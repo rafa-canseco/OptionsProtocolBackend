@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# --- Cache for simulate ---
+# --- Cache for simulate (bounded, with eviction) ---
 _SIM_TTL = 300  # 5 minutes
+_SIM_MAX_SIZE = 256
 _sim_cache: dict[tuple, tuple[float, SimulateResponse]] = {}
 
 # --- Cache for weekly report ---
@@ -35,11 +36,12 @@ _weekly_cache_ts: float = 0.0
 @router.get("/prices/simulate", response_model=SimulateResponse)
 async def simulate(
     strike: float = Query(gt=0, description="Strike price in USD"),
-    side: str = Query(default="buy", pattern="^buy$", description="Side (buy only for CSP)"),
+    side: str = Query(default="buy", pattern="^buy$", description="Side (buy only, reserved for future expansion)"),
 ):
     """Simulate selling a cash-secured put at the given strike over the last 7 days."""
-    # Round strike to nearest $50 for cache key
-    cache_key = (round(strike / 50) * 50,)
+    # Round strike to nearest $50 and use rounded value for both cache key and computation
+    rounded_strike = round(strike / 50) * 50
+    cache_key = (rounded_strike,)
     now = time.monotonic()
 
     cached = _sim_cache.get(cache_key)
@@ -48,14 +50,22 @@ async def simulate(
 
     try:
         history, iv = await asyncio.gather(
-            get_eth_price_history(days=7),
+            get_eth_price_history(),
             get_eth_iv(),
         )
     except Exception:
         logger.exception("Failed to fetch market data for simulation")
         raise HTTPException(502, "Market data unavailable")
 
-    result = simulate_pnl(strike=strike, spot_history=history, iv=iv)
+    result = simulate_pnl(strike=rounded_strike, spot_history=history, iv=iv)
+
+    # Evict stale entries before inserting
+    stale_keys = [k for k, (ts, _) in _sim_cache.items() if (now - ts) >= _SIM_TTL]
+    for k in stale_keys:
+        del _sim_cache[k]
+    if len(_sim_cache) >= _SIM_MAX_SIZE:
+        oldest_key = min(_sim_cache, key=lambda k: _sim_cache[k][0])
+        del _sim_cache[oldest_key]
 
     _sim_cache[cache_key] = (time.monotonic(), result)
     return result
@@ -123,7 +133,7 @@ async def get_user_weekly(address: str):
             .execute()
         )
     except Exception:
-        logger.exception(f"Failed to fetch weekly result for {address}")
+        logger.exception("Failed to fetch weekly result for %s", address)
         raise HTTPException(502, "Could not fetch user weekly result")
 
     if not result.data:
@@ -158,7 +168,7 @@ async def get_user_stats(address: str):
             .execute()
         )
     except Exception:
-        logger.exception(f"Failed to fetch stats for {address}")
+        logger.exception("Failed to fetch stats for %s", address)
         raise HTTPException(502, "Could not fetch user stats")
 
     if not result.data:
