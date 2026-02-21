@@ -3,7 +3,9 @@ import logging
 import re
 import time
 
-from fastapi import APIRouter, HTTPException
+from collections import defaultdict
+
+from fastapi import APIRouter, HTTPException, Request
 
 from src.config import settings
 from src.db.database import get_client
@@ -31,6 +33,22 @@ _OTOKEN_TTL = 120  # seconds
 _otoken_cache: dict[tuple, str] = {}
 _otoken_cached_at: float = 0.0
 _otoken_quote_keys: set[tuple] | None = None
+
+# --- Waitlist rate limit (in-memory, per IP) ---
+_WAITLIST_WINDOW = 60  # seconds
+_WAITLIST_MAX_REQUESTS = 5
+_waitlist_hits: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(ip: str) -> None:
+    """Raise 429 if ip exceeded _WAITLIST_MAX_REQUESTS in the last window."""
+    now = time.monotonic()
+    hits = _waitlist_hits[ip]
+    # Prune old entries
+    _waitlist_hits[ip] = [t for t in hits if now - t < _WAITLIST_WINDOW]
+    if len(_waitlist_hits[ip]) >= _WAITLIST_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests, try again later")
+    _waitlist_hits[ip].append(now)
 
 
 def _quote_key(q: PriceQuote) -> tuple:
@@ -191,8 +209,9 @@ async def get_prices():
 
 
 @router.post("/waitlist", response_model=WaitlistResponse)
-async def join_waitlist(body: WaitlistRequest):
+async def join_waitlist(body: WaitlistRequest, request: Request):
     """Add an email to the waitlist. Idempotent — duplicates return 200."""
+    _check_rate_limit(request.client.host)
     try:
         client = get_client()
         result = client.table("waitlist").upsert(
