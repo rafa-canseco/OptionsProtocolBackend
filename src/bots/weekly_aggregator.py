@@ -88,11 +88,14 @@ def _compute_user_week(
 
     pnl = total_premium
     for pos in positions:
-        if pos.get("is_settled") and pos.get("is_itm") and pos.get("is_put"):
+        if pos.get("is_settled") and pos.get("is_itm"):
             try:
                 strike = float(pos["strike_price"]) / 1e8
                 amount = float(pos["amount"]) / 1e8
-                loss = (strike - eth_close) * amount
+                if pos.get("is_put"):
+                    loss = (strike - eth_close) * amount
+                else:
+                    loss = (eth_close - strike) * amount
                 if loss > 0:
                     pnl -= loss
             except (ValueError, TypeError, KeyError):
@@ -148,7 +151,7 @@ def _build_narrative(
     }
 
     assigned_count = sum(1 for r in user_results if r["assignments"] > 0)
-    narrative["total_assignments"] = assigned_count
+    narrative["users_with_assignments"] = assigned_count
 
     return narrative
 
@@ -167,7 +170,10 @@ async def aggregate_once():
         return
 
     try:
-        history = await get_eth_price_history()
+        history = await get_eth_price_history(
+            start_ts=week_start.timestamp(),
+            end_ts=week_end.timestamp(),
+        )
     except Exception:
         logger.exception("Failed to fetch ETH price history for aggregation")
         raise

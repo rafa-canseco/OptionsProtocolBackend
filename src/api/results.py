@@ -39,8 +39,8 @@ async def simulate(
     side: str = Query(default="buy", pattern="^buy$", description="Side (buy only, reserved for future expansion)"),
 ):
     """Simulate selling a cash-secured put at the given strike over the last 7 days."""
-    # Round strike to nearest $50 and use rounded value for both cache key and computation
-    rounded_strike = round(strike / 50) * 50
+    # Round strike to nearest $50 (minimum $50)
+    rounded_strike = max(50, round(strike / 50) * 50)
     cache_key = (rounded_strike,)
     now = time.monotonic()
 
@@ -57,7 +57,10 @@ async def simulate(
         logger.exception("Failed to fetch market data for simulation")
         raise HTTPException(502, "Market data unavailable")
 
-    result = simulate_pnl(strike=rounded_strike, spot_history=history, iv=iv)
+    try:
+        result = simulate_pnl(strike=rounded_strike, spot_history=history, iv=iv)
+    except ValueError as e:
+        raise HTTPException(422, f"Simulation failed: {e}")
 
     # Evict stale entries before inserting
     stale_keys = [k for k, (ts, _) in _sim_cache.items() if (now - ts) >= _SIM_TTL]
