@@ -12,3 +12,4 @@ class WaitlistRequest(BaseModel):
 
 class WaitlistResponse(BaseModel):
     ok: bool
+    new: bool

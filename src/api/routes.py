@@ -232,6 +232,8 @@ async def join_waitlist(body: WaitlistRequest, request: Request):
     _check_rate_limit(_get_client_ip(request))
     try:
         client = get_client()
+        existing = client.table("waitlist").select("id").eq("email", body.email).execute()
+        is_new = not existing.data
         result = client.table("waitlist").upsert(
             {"email": body.email},
             on_conflict="email",
@@ -242,7 +244,7 @@ async def join_waitlist(body: WaitlistRequest, request: Request):
     if not result.data:
         logger.error("Waitlist upsert returned empty data")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
-    return WaitlistResponse(ok=True)
+    return WaitlistResponse(ok=True, new=is_new)
 
 
 @router.get("/waitlist/count")
