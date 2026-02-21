@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     demo_api_key: str = ""
     mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
+    # Historical P&L / engagement
+    coingecko_api_url: str = "https://api.coingecko.com/api/v3"
+    weekly_aggregation_day: int = 4  # 0=Monday, 4=Friday
+    weekly_aggregation_hour_utc: int = 12  # 12:00 UTC
+    eth_staking_apy: float = 0.035  # 3.5% annualized
+
     model_config = {"env_file": ".env"}
 
 
