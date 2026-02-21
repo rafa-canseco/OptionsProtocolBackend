@@ -208,6 +208,18 @@ async def join_waitlist(body: WaitlistRequest):
     return WaitlistResponse(ok=True)
 
 
+@router.get("/waitlist/count")
+async def get_waitlist_count():
+    """Return the number of emails on the waitlist."""
+    try:
+        client = get_client()
+        result = client.table("waitlist").select("id", count="exact").execute()
+    except Exception:
+        logger.exception("Waitlist count failed")
+        raise HTTPException(status_code=502, detail="Could not fetch waitlist count")
+    return {"count": result.count or 0}
+
+
 def _compute_outcome(position: dict) -> str | None:
     """Compute human-readable outcome for settled positions.
 

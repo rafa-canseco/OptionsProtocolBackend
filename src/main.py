@@ -58,6 +58,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:3001",
         "https://frontend-seven-psi-40.vercel.app",
         "https://frontend-git-main-rcsc1s-projects.vercel.app",
     ],
