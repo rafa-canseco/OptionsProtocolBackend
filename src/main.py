@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
+from src.api.results import router as results_router
+from src.api.analytics import router as analytics_router
 from src.config import settings
 
 logging.basicConfig(
@@ -26,6 +28,7 @@ async def lifespan(app: FastAPI):
             event_indexer,
             expiry_settler,
             circuit_breaker_bot,
+            weekly_aggregator,
         )
 
         tasks.append(asyncio.create_task(price_publisher.run()))
@@ -35,6 +38,7 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("Beta mode: expiry_settler disabled (settlement is user-triggered)")
         tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
+        tasks.append(asyncio.create_task(weekly_aggregator.run()))
         logger.info(f"Started {len(tasks)} background bots")
     else:
         logger.info("Bots not started: contract addresses or operator key not configured")
@@ -60,6 +64,8 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(results_router)
+app.include_router(analytics_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
