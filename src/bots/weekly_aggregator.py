@@ -21,19 +21,22 @@ logger = logging.getLogger(__name__)
 
 
 def _week_boundaries() -> tuple[datetime, datetime]:
-    """Return (Monday 00:00 UTC, Sunday 23:59:59 UTC) for the week that just ended."""
+    """Return (prev Friday 08:00 UTC, this Friday 08:00 UTC) for the expiry cycle that just ended.
+
+    b1nary options expire Friday 08:00 UTC, so the "week" is Friday-to-Friday.
+    This runs on Friday after 12:00 UTC, so "this Friday" = today.
+    """
     now = datetime.now(timezone.utc)
-    # Go back to the most recent Sunday
-    days_since_sunday = (now.weekday() + 1) % 7
-    if days_since_sunday == 0:
-        days_since_sunday = 7  # if today is Sunday, use last Sunday
-    week_end = (now - timedelta(days=days_since_sunday)).replace(
-        hour=23, minute=59, second=59, microsecond=0,
+    # Find the most recent Friday (today if it's Friday)
+    days_since_friday = (now.weekday() - 4) % 7
+    this_friday = (now - timedelta(days=days_since_friday)).replace(
+        hour=8, minute=0, second=0, microsecond=0,
     )
-    week_start = (week_end - timedelta(days=6)).replace(
-        hour=0, minute=0, second=0, microsecond=0,
-    )
-    return week_start, week_end
+    # If we haven't passed 08:00 UTC on Friday yet, use last week's Friday
+    if this_friday > now:
+        this_friday -= timedelta(days=7)
+    prev_friday = this_friday - timedelta(days=7)
+    return prev_friday, this_friday
 
 
 def _get_week_positions(week_start: datetime, week_end: datetime) -> list[dict]:
