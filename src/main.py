@@ -61,6 +61,8 @@ app.add_middleware(
         "http://localhost:3001",
         "https://frontend-seven-psi-40.vercel.app",
         "https://frontend-git-main-rcsc1s-projects.vercel.app",
+        "https://b1nary.app",
+        "https://www.b1nary.app",
     ],
     allow_origin_regex=r"https://frontend-git-.*-rcsc1s-projects\.vercel\.app",
     allow_methods=["*"],
