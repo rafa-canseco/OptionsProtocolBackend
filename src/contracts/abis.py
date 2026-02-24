@@ -323,6 +323,20 @@ WHITELIST_ABI = [
     },
 ]
 
+MOCK_ERC20_MINT_ABI = [
+    # mint(address to, uint256 amount) — permissionless on MockERC20
+    {
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "mint",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
 UNISWAP_V3_QUOTER_ABI = [
     # quoteExactOutputSingle — estimate how much input is needed for exact output
     {
