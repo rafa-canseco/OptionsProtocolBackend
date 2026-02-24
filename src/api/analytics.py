@@ -2,7 +2,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.db.database import get_client
 
@@ -17,17 +17,17 @@ EVENT_TYPES = Literal[
 
 
 class SliderInteraction(BaseModel):
-    session_id: str
-    selected_price: float
-    side: str = "buy"
-    shown_premium: float | None = None
-    converted_to_signup: bool = False
+    session_id: str = Field(description="Unique session identifier from the frontend", examples=["sess_abc123"])
+    selected_price: float = Field(description="Strike price the user selected on the slider (USD)", examples=[2400.0])
+    side: str = Field(default="buy", description="Side of the trade shown (currently always 'buy')", examples=["buy"])
+    shown_premium: float | None = Field(default=None, description="Premium displayed to the user at time of interaction (USD)", examples=[42.15])
+    converted_to_signup: bool = Field(default=False, description="Whether this slider interaction led to a waitlist signup", examples=[False])
 
 
 class EngagementEvent(BaseModel):
-    user_address: str | None = None
-    event_type: EVENT_TYPES
-    metadata: dict = {}
+    user_address: str | None = Field(default=None, description="Ethereum address of the user (if connected)", examples=["0xabcdef0123456789abcdef0123456789abcdef01"])
+    event_type: EVENT_TYPES = Field(description="Type of engagement event", examples=["signup"])
+    metadata: dict = Field(default={}, description="Arbitrary key-value metadata for the event", examples=[{"source": "landing_page"}])
 
 
 @router.post("/slider", status_code=202, summary="Log slider interaction")
