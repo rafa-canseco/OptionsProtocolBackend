@@ -1,7 +1,7 @@
 """
 Testnet faucet endpoint.
 
-POST /faucet — mints test tokens (LETH + LUSD) and sends gas ETH to a given address.
+POST /faucet — sends gas ETH and mints test tokens (LETH + LUSD) to a given address.
 Only available when beta_mode is enabled (testnet).
 """
 import asyncio
@@ -15,6 +15,7 @@ from web3 import Web3
 from src.config import settings
 from src.contracts.abis import MOCK_ERC20_MINT_ABI
 from src.contracts.web3_client import get_w3, get_operator_account, build_and_send_tx, build_and_send_eth_transfer
+from src.db.database import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -27,22 +28,34 @@ MINT_LUSD = 100_000 * 10**6    # 100,000 LUSD (6 decimals)
 MINT_LETH = 50 * 10**18        # 50 LETH (18 decimals)
 MINT_ETH = 5 * 10**15          # 0.005 ETH for gas (18 decimals)
 
-# 1 claim per wallet (permanent, not time-based)
-_claimed_wallets: set[str] = set()
+
+def _has_already_claimed(address: str) -> bool:
+    """Check Supabase for an existing faucet_claim event for this address."""
+    client = get_client()
+    result = (
+        client.table("engagement_events")
+        .select("id")
+        .eq("event_type", "faucet_claim")
+        .eq("user_address", address.lower())
+        .limit(1)
+        .execute()
+    )
+    return len(result.data) > 0
 
 
-def _check_already_claimed(address: str) -> None:
-    """Raise 409 if this wallet has already claimed."""
-    if address.lower() in _claimed_wallets:
-        raise HTTPException(
-            status_code=409,
-            detail="This wallet has already claimed faucet tokens",
-        )
+def _record_claim(address: str, metadata: dict | None = None) -> None:
+    """Insert a faucet_claim event into Supabase."""
+    client = get_client()
+    client.table("engagement_events").insert({
+        "user_address": address.lower(),
+        "event_type": "faucet_claim",
+        "metadata": metadata or {},
+    }).execute()
 
 
 class FaucetRequest(BaseModel):
     address: str = Field(
-        description="Ethereum address to receive test tokens",
+        description="Ethereum address to receive gas ETH and test tokens",
         examples=["0xAbC1230000000000000000000000000000000000"],
     )
 
@@ -80,8 +93,8 @@ class FaucetResponse(BaseModel):
 async def faucet(body: FaucetRequest):
     """Send 0.005 ETH (gas) + 50 LETH + 100,000 LUSD to the given address.
 
-    Each wallet can only claim once. Only available on testnet
-    (Base Sepolia) when beta mode is enabled.
+    Each wallet can only claim once (persisted in Supabase). Only available on
+    testnet (Base Sepolia) when beta mode is enabled.
 
     The operator wallet sends all transactions — the recipient does not
     need existing ETH for gas.
@@ -106,7 +119,28 @@ async def faucet(body: FaucetRequest):
         logger.exception("Faucet infrastructure setup failed")
         raise HTTPException(503, f"Faucet unavailable — configuration error: {type(exc).__name__}")
 
-    _check_already_claimed(body.address)
+    # Check persistent claim status in Supabase
+    try:
+        if _has_already_claimed(body.address):
+            raise HTTPException(
+                status_code=409,
+                detail="This wallet has already claimed faucet tokens",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Faucet claim check failed for %s", body.address)
+        raise HTTPException(503, f"Faucet unavailable — database error: {type(exc).__name__}")
+
+    # Pre-flight: ensure operator has enough ETH for the transfer + gas
+    operator_balance = w3.eth.get_balance(account.address)
+    min_balance = MINT_ETH + 21_000 * 3 * w3.eth.gas_price
+    if operator_balance < min_balance:
+        logger.error(
+            "Faucet operator balance too low: %s wei (need >= %s wei). Address: %s",
+            operator_balance, min_balance, account.address,
+        )
+        raise HTTPException(503, "Faucet temporarily unavailable — operator wallet needs refill")
 
     # Sequential sends to avoid nonce collisions: ETH → LETH → LUSD
     try:
@@ -117,6 +151,7 @@ async def faucet(body: FaucetRequest):
             account,
         )
     except Exception as exc:
+        # No assets sent — safe to retry
         logger.exception("ETH gas transfer failed for %s", body.address)
         raise HTTPException(502, f"ETH gas transfer failed: {type(exc).__name__}")
 
@@ -128,6 +163,8 @@ async def faucet(body: FaucetRequest):
         )
     except Exception as exc:
         logger.exception("LETH mint failed for %s (ETH succeeded: %s)", body.address, eth_tx)
+        # Mark as claimed — ETH already sent, partial state is not cleanly retryable
+        _record_claim(body.address, {"partial": True, "eth_tx": eth_tx})
         raise HTTPException(
             502,
             f"LETH mint failed ({type(exc).__name__}). "
@@ -143,15 +180,15 @@ async def faucet(body: FaucetRequest):
     except Exception as exc:
         logger.exception("LUSD mint failed for %s (ETH=%s, LETH=%s)", body.address, eth_tx, leth_tx)
         # Mark as claimed — ETH + LETH already sent, partial state is not retryable
-        _claimed_wallets.add(body.address.lower())
+        _record_claim(body.address, {"partial": True, "eth_tx": eth_tx, "leth_tx": leth_tx})
         raise HTTPException(
             502,
             f"LUSD mint failed ({type(exc).__name__}). "
             f"ETH gas (tx: {eth_tx}) and LETH (tx: {leth_tx}) were sent successfully.",
         )
 
-    # All 3 transactions succeeded — mark wallet as claimed
-    _claimed_wallets.add(body.address.lower())
+    # All 3 transactions succeeded — record claim in Supabase
+    _record_claim(body.address, {"eth_tx": eth_tx, "leth_tx": leth_tx, "lusd_tx": lusd_tx})
 
     logger.info(
         "Faucet: sent ETH + LETH + LUSD to %s (eth_tx=%s, leth_tx=%s, lusd_tx=%s)",

@@ -107,12 +107,18 @@ def get_uniswap_quoter() -> Contract:
     )
 
 
-def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 120) -> str:
-    """Send a plain ETH transfer. Returns tx hash hex.
+def _sign_send_and_confirm(
+    w3: Web3,
+    tx_dict: dict,
+    account,
+    label: str,
+    tx_timeout: int,
+) -> str:
+    """Sign, send with nonce-retry, and wait for receipt. Returns tx hash hex.
 
-    Uses the same nonce lock and retry logic as build_and_send_tx.
+    Caller builds tx_dict with all fields except nonce and gasPrice,
+    which this function manages under the global nonce lock.
     """
-    w3 = get_w3()
     base_gas_price = w3.eth.gas_price
     max_retries = 3
     forced_nonce: int | None = None
@@ -126,15 +132,9 @@ def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 
             else:
                 nonce = forced_nonce
             gas_price = int(base_gas_price * (1.15 ** attempt))
-            tx = {
-                "to": Web3.to_checksum_address(to),
-                "value": value,
-                "nonce": nonce,
-                "gas": 21_000,
-                "gasPrice": gas_price,
-                "chainId": settings.chain_id,
-            }
-            signed = account.sign_transaction(tx)
+            tx_dict["nonce"] = nonce
+            tx_dict["gasPrice"] = gas_price
+            signed = account.sign_transaction(tx_dict)
             try:
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 _local_nonce[account.address] = nonce + 1
@@ -153,18 +153,30 @@ def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 
                 raise
         if attempt > 0:
             logger.info(
-                f"ETH transfer sent after {attempt + 1} attempts: nonce={nonce}, "
+                f"{label} sent after {attempt + 1} attempts: nonce={nonce}, "
                 f"gas_price={gas_price}, tx_hash={tx_hash.hex()}"
             )
         break
     else:
-        raise RuntimeError(f"ETH transfer failed after {max_retries} attempts")
+        raise RuntimeError(f"{label} failed after {max_retries} attempts")
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
-        logger.error(f"ETH transfer reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
-        raise RuntimeError(f"ETH transfer reverted: {tx_hash.hex()}")
+        logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
+        raise RuntimeError(f"{label} reverted: {tx_hash.hex()}")
     return tx_hash.hex()
+
+
+def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 120) -> str:
+    """Send a plain ETH transfer. Returns tx hash hex."""
+    w3 = get_w3()
+    tx_dict = {
+        "to": Web3.to_checksum_address(to),
+        "value": value,
+        "gas": 21_000,
+        "chainId": settings.chain_id,
+    }
+    return _sign_send_and_confirm(w3, tx_dict, account, "ETH transfer", tx_timeout)
 
 
 def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
@@ -182,54 +194,9 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     gas_limit = int(gas_estimate * 1.2)
 
     w3 = get_w3()
-    base_gas_price = w3.eth.gas_price
-    max_retries = 3
-    forced_nonce: int | None = None
-
-    for attempt in range(max_retries):
-        with _nonce_lock:
-            if forced_nonce is None:
-                chain_nonce = w3.eth.get_transaction_count(account.address, "pending")
-                tracked_nonce = _local_nonce.get(account.address, 0)
-                nonce = max(chain_nonce, tracked_nonce)
-            else:
-                nonce = forced_nonce
-            gas_price = int(base_gas_price * (1.15 ** attempt))
-            tx = contract_fn.build_transaction({
-                "from": account.address,
-                "nonce": nonce,
-                "gas": gas_limit,
-                "gasPrice": gas_price,
-                "chainId": settings.chain_id,
-            })
-            signed = account.sign_transaction(tx)
-            try:
-                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                _local_nonce[account.address] = nonce + 1
-            except Exception as e:
-                if "replacement transaction underpriced" in str(e).lower() and attempt < max_retries - 1:
-                    forced_nonce = nonce
-                    logger.warning(
-                        f"Nonce {nonce} has stuck pending tx, retrying with bumped gas "
-                        f"(attempt {attempt + 1}/{max_retries}, gas_price={gas_price})"
-                    )
-                    continue
-                logger.error(
-                    f"send_raw_transaction failed: nonce={nonce}, gas_price={gas_price}, "
-                    f"attempt={attempt + 1}/{max_retries}, error={e}"
-                )
-                raise
-        if attempt > 0:
-            logger.info(
-                f"Transaction sent after {attempt + 1} attempts: nonce={nonce}, "
-                f"gas_price={gas_price}, tx_hash={tx_hash.hex()}"
-            )
-        break
-    else:
-        raise RuntimeError(f"Transaction send failed after {max_retries} attempts")
-
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
-    if receipt.status != 1:
-        logger.error(f"Transaction reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
-        raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}")
-    return tx_hash.hex()
+    tx_dict = contract_fn.build_transaction({
+        "from": account.address,
+        "gas": gas_limit,
+        "chainId": settings.chain_id,
+    })
+    return _sign_send_and_confirm(w3, tx_dict, account, "Transaction", tx_timeout)
