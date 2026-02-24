@@ -8,7 +8,7 @@ from src.db.database import get_client
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/analytics", tags=["analytics"])
+router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 EVENT_TYPES = Literal[
     "slider_use", "signup", "first_trade",
@@ -30,9 +30,13 @@ class EngagementEvent(BaseModel):
     metadata: dict = {}
 
 
-@router.post("/slider", status_code=202)
+@router.post("/slider", status_code=202, summary="Log slider interaction")
 async def log_slider(body: SliderInteraction):
-    """Log a slider interaction. DB write is fire-and-forget (errors logged, not raised)."""
+    """Record a landing-page slider interaction for analytics.
+
+    Fire-and-forget — always returns 202. DB errors are logged server-side
+    but never surfaced to the caller.
+    """
     try:
         client = get_client()
         client.table("slider_interactions").insert({
@@ -48,9 +52,13 @@ async def log_slider(body: SliderInteraction):
     return {"ok": True}
 
 
-@router.post("/event", status_code=202)
+@router.post("/event", status_code=202, summary="Log engagement event")
 async def log_event(body: EngagementEvent):
-    """Log an engagement event. DB write is fire-and-forget (errors logged, not raised)."""
+    """Record a generic engagement event (signup, first trade, share, etc.).
+
+    Fire-and-forget — always returns 202. DB errors are logged server-side
+    but never surfaced to the caller.
+    """
     try:
         client = get_client()
         client.table("engagement_events").insert({

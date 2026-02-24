@@ -77,7 +77,7 @@ MAX_UINT256 = 2**256 - 1
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/demo", tags=["demo"])
+router = APIRouter(prefix="/demo", tags=["Demo"])
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _settle_lock = asyncio.Lock()
@@ -133,10 +133,10 @@ def _verify_api_key(x_demo_key: str | None) -> None:
         raise HTTPException(401, "Invalid or missing X-Demo-Key")
 
 
-@router.post("/settle", response_model=SettleResponse)
+@router.post("/settle", response_model=SettleResponse, summary="Trigger instant settlement (beta)")
 async def demo_settle(
     body: SettleRequest,
-    x_demo_key: str | None = Header(None),
+    x_demo_key: str | None = Header(None, description="API key for demo settlement (required)"),
 ):
     _verify_api_key(x_demo_key)
 

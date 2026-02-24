@@ -159,9 +159,23 @@ async def _get_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
     return otoken_map
 
 
-@router.get("/prices", response_model=list[PriceResponse])
+@router.get(
+    "/prices",
+    response_model=list[PriceResponse],
+    tags=["Market Data"],
+    summary="Get current option price menu",
+)
 async def get_prices():
-    """Get current price menu for ETH options."""
+    """Return the live ETH options price sheet.
+
+    Each entry represents a single option quote with strike, expiry, premium,
+    greeks, and the on-chain oToken address (if already created).
+
+    Prices are computed via Black-Scholes using real-time Chainlink spot and
+    Deribit implied volatility. The response is cached for ~15 s.
+
+    Returns **503** if the circuit breaker has paused pricing (>2 % ETH move).
+    """
     global _prices_cache, _prices_cached_at
 
     if circuit_breaker.is_paused:
@@ -226,9 +240,18 @@ async def get_prices():
     return result
 
 
-@router.post("/waitlist", response_model=WaitlistResponse)
+@router.post(
+    "/waitlist",
+    response_model=WaitlistResponse,
+    tags=["Waitlist"],
+    summary="Join the waitlist",
+)
 async def join_waitlist(body: WaitlistRequest, request: Request):
-    """Add an email to the waitlist. Idempotent — duplicates return 200."""
+    """Add an email to the b1nary waitlist.
+
+    Idempotent — submitting the same email twice returns 200 with `new: false`.
+    Rate-limited to 5 requests per IP per 60 s window.
+    """
     _check_rate_limit(_get_client_ip(request))
     client = get_client()
     try:
@@ -251,9 +274,13 @@ async def join_waitlist(body: WaitlistRequest, request: Request):
     return WaitlistResponse(ok=True, new=is_new)
 
 
-@router.get("/waitlist/count")
+@router.get(
+    "/waitlist/count",
+    tags=["Waitlist"],
+    summary="Get waitlist size",
+)
 async def get_waitlist_count():
-    """Return the number of emails on the waitlist."""
+    """Return `{\"count\": N}` with the total number of emails on the waitlist."""
     client = get_client()
     try:
         result = client.table("waitlist").select("id", count="exact").execute()
@@ -307,9 +334,18 @@ def _compute_outcome(position: dict) -> str | None:
     return "Expired OTM — collateral returned"
 
 
-@router.get("/positions/{address}")
+@router.get(
+    "/positions/{address}",
+    tags=["Positions"],
+    summary="Get positions for a wallet",
+)
 async def get_positions(address: str):
-    """Get all positions for a user address (from indexed on-chain events)."""
+    """Return all option positions for the given Ethereum address.
+
+    Data comes from on-chain `OrderExecuted` events indexed into Supabase.
+    Each position includes strike, expiry, premium paid, settlement status,
+    and a human-readable `outcome` field for settled positions.
+    """
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
 
