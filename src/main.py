@@ -78,6 +78,10 @@ openapi_tags = [
         "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
     },
     {
+        "name": "Faucet",
+        "description": "Mint test tokens (LETH/LUSD) on Base Sepolia. Rate limited to 1 request per address per hour. Beta only — disabled in production.",
+    },
+    {
         "name": "Demo",
         "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
     },
@@ -120,8 +124,10 @@ app.include_router(analytics_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
+    from src.api.faucet import router as faucet_router
     app.include_router(demo_router)
-    logger.info("Beta mode: /demo/settle endpoint enabled")
+    app.include_router(faucet_router)
+    logger.info("Beta mode: /demo/settle and /faucet endpoints enabled")
 
 
 @app.get("/health", tags=["System"], summary="Health check")
