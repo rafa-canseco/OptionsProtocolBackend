@@ -107,21 +107,18 @@ def get_uniswap_quoter() -> Contract:
     )
 
 
-def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
-    """Build, sign, send, and confirm a transaction. Returns tx hash hex.
+def _sign_send_and_confirm(
+    w3: Web3,
+    tx_dict: dict,
+    account,
+    label: str,
+    tx_timeout: int,
+) -> str:
+    """Sign, send with nonce-retry, and wait for receipt. Returns tx hash hex.
 
-    Uses a lock + local nonce tracker to prevent nonce collisions.
-    Retries with bumped gas price to replace stuck pending transactions.
-    Waits for receipt and raises on revert.
+    Caller builds tx_dict with all fields except nonce and gasPrice,
+    which this function manages under the global nonce lock.
     """
-    try:
-        gas_estimate = contract_fn.estimate_gas({"from": account.address})
-    except Exception as e:
-        logger.error(f"Gas estimation failed for tx from {account.address}: {e}")
-        raise
-    gas_limit = int(gas_estimate * 1.2)
-
-    w3 = get_w3()
     base_gas_price = w3.eth.gas_price
     max_retries = 3
     forced_nonce: int | None = None
@@ -135,14 +132,9 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
             else:
                 nonce = forced_nonce
             gas_price = int(base_gas_price * (1.15 ** attempt))
-            tx = contract_fn.build_transaction({
-                "from": account.address,
-                "nonce": nonce,
-                "gas": gas_limit,
-                "gasPrice": gas_price,
-                "chainId": settings.chain_id,
-            })
-            signed = account.sign_transaction(tx)
+            tx_dict["nonce"] = nonce
+            tx_dict["gasPrice"] = gas_price
+            signed = account.sign_transaction(tx_dict)
             try:
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 _local_nonce[account.address] = nonce + 1
@@ -161,15 +153,50 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
                 raise
         if attempt > 0:
             logger.info(
-                f"Transaction sent after {attempt + 1} attempts: nonce={nonce}, "
+                f"{label} sent after {attempt + 1} attempts: nonce={nonce}, "
                 f"gas_price={gas_price}, tx_hash={tx_hash.hex()}"
             )
         break
     else:
-        raise RuntimeError(f"Transaction send failed after {max_retries} attempts")
+        raise RuntimeError(f"{label} failed after {max_retries} attempts")
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
-        logger.error(f"Transaction reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
-        raise RuntimeError(f"Transaction reverted: {tx_hash.hex()}")
+        logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
+        raise RuntimeError(f"{label} reverted: {tx_hash.hex()}")
     return tx_hash.hex()
+
+
+def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 120) -> str:
+    """Send a plain ETH transfer. Returns tx hash hex."""
+    w3 = get_w3()
+    tx_dict = {
+        "to": Web3.to_checksum_address(to),
+        "value": value,
+        "gas": 21_000,
+        "chainId": settings.chain_id,
+    }
+    return _sign_send_and_confirm(w3, tx_dict, account, "ETH transfer", tx_timeout)
+
+
+def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
+    """Build, sign, send, and confirm a transaction. Returns tx hash hex.
+
+    Uses a lock + local nonce tracker to prevent nonce collisions.
+    Retries with bumped gas price to replace stuck pending transactions.
+    Waits for receipt and raises on revert.
+    """
+    try:
+        gas_estimate = contract_fn.estimate_gas({"from": account.address})
+    except Exception as e:
+        logger.error(f"Gas estimation failed for tx from {account.address}: {e}")
+        raise
+    gas_limit = int(gas_estimate * 1.2)
+
+    w3 = get_w3()
+    tx_dict = contract_fn.build_transaction({
+        "from": account.address,
+        "gas": gas_limit,
+        "chainId": settings.chain_id,
+    })
+    return _sign_send_and_confirm(w3, tx_dict, account, "Transaction", tx_timeout)
