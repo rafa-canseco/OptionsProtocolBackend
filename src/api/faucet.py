@@ -1,5 +1,5 @@
 """
-Testnet faucet endpoint for AI agents.
+Testnet faucet endpoint.
 
 POST /faucet — mints test tokens (LETH + LUSD) to a given address.
 Only available when beta_mode is enabled (testnet).
@@ -23,13 +23,13 @@ router = APIRouter(tags=["Faucet"])
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-# Mint amounts — match frontend useFaucet.ts
+# Mint amounts — keep in sync with the frontend faucet hook
 MINT_LUSD = 100_000 * 10**6    # 100,000 LUSD (6 decimals)
 MINT_LETH = 50 * 10**18        # 50 LETH (18 decimals)
 
 # Rate limit: 1 request per address per hour
 _FAUCET_WINDOW = 3600  # seconds
-_FAUCET_MAX_TRACKED = 10_000
+_FAUCET_MAX_TRACKED = 10_000  # max tracked addresses before triggering stale-entry eviction
 _faucet_last_mint: dict[str, float] = {}
 
 
@@ -38,7 +38,7 @@ def _check_faucet_rate_limit(address: str) -> None:
     now = time.monotonic()
     key = address.lower()
 
-    # Evict stale entries
+    # Evict stale entries when map grows too large (memory bound)
     if len(_faucet_last_mint) > _FAUCET_MAX_TRACKED:
         stale = [k for k, ts in _faucet_last_mint.items() if now - ts >= _FAUCET_WINDOW]
         for k in stale:
@@ -72,8 +72,14 @@ class FaucetRequest(BaseModel):
 class FaucetResponse(BaseModel):
     leth_amount: str = Field(description="LETH minted (18 decimals, as string)", examples=["50000000000000000000"])
     lusd_amount: str = Field(description="LUSD minted (6 decimals, as string)", examples=["100000000000"])
-    leth_tx_hash: str = Field(description="Transaction hash for LETH mint", examples=["0xabc123..."])
-    lusd_tx_hash: str = Field(description="Transaction hash for LUSD mint", examples=["0xdef456..."])
+    leth_tx_hash: str = Field(
+        description="Transaction hash for LETH mint",
+        examples=["0xa1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"],
+    )
+    lusd_tx_hash: str = Field(
+        description="Transaction hash for LUSD mint",
+        examples=["0xf6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5"],
+    )
 
 
 @router.post(
@@ -93,19 +99,24 @@ async def faucet(body: FaucetRequest):
     if not settings.operator_private_key:
         raise HTTPException(503, "Faucet unavailable — operator wallet not configured")
 
+    # Setup infrastructure before consuming rate limit — config errors should
+    # not burn the user's hourly allowance
+    try:
+        w3 = get_w3()
+        account = get_operator_account()
+        leth_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(settings.weth_address),
+            abi=MOCK_ERC20_MINT_ABI,
+        )
+        lusd_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(settings.usdc_address),
+            abi=MOCK_ERC20_MINT_ABI,
+        )
+    except Exception as exc:
+        logger.exception("Faucet infrastructure setup failed")
+        raise HTTPException(503, f"Faucet unavailable — configuration error: {type(exc).__name__}")
+
     _check_faucet_rate_limit(body.address)
-
-    w3 = get_w3()
-    account = get_operator_account()
-
-    leth_contract = w3.eth.contract(
-        address=Web3.to_checksum_address(settings.weth_address),
-        abi=MOCK_ERC20_MINT_ABI,
-    )
-    lusd_contract = w3.eth.contract(
-        address=Web3.to_checksum_address(settings.usdc_address),
-        abi=MOCK_ERC20_MINT_ABI,
-    )
 
     # Sequential mints to avoid nonce collisions
     try:
@@ -114,11 +125,11 @@ async def faucet(body: FaucetRequest):
             leth_contract.functions.mint(body.address, MINT_LETH),
             account,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("LETH mint failed for %s", body.address)
         # Roll back rate limit so user can retry
         _faucet_last_mint.pop(body.address.lower(), None)
-        raise HTTPException(502, "LETH mint transaction failed")
+        raise HTTPException(502, f"LETH mint transaction failed: {type(exc).__name__}")
 
     try:
         lusd_tx = await asyncio.to_thread(
@@ -126,11 +137,14 @@ async def faucet(body: FaucetRequest):
             lusd_contract.functions.mint(body.address, MINT_LUSD),
             account,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("LUSD mint failed for %s (LETH succeeded: %s)", body.address, leth_tx)
+        # Do NOT roll back rate limit — LETH already minted successfully
         raise HTTPException(
             502,
-            f"LUSD mint failed. LETH was minted successfully (tx: {leth_tx}). Retry in 1 hour.",
+            f"LUSD mint failed ({type(exc).__name__}). "
+            f"LETH was minted successfully (tx: {leth_tx}). "
+            f"A retry after 1 hour will re-mint both tokens.",
         )
 
     logger.info("Faucet: minted LETH + LUSD to %s (leth_tx=%s, lusd_tx=%s)", body.address, leth_tx, lusd_tx)
