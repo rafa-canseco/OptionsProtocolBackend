@@ -1,17 +1,27 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.pricing.black_scholes import OptionType
 
 
 class PriceResponse(BaseModel):
-    option_type: OptionType
-    strike: float
-    expiry_days: int
-    premium: float
-    delta: float
-    iv: float
-    spot: float
-    ttl: int
-    expires_at: float
-    available_amount: float  # max notional available at this price
-    otoken_address: str | None = None  # on-chain oToken address, null if not yet created
+    option_type: OptionType = Field(description="PUT or CALL")
+    strike: float = Field(description="Strike price in USD", examples=[2400.0])
+    expiry_days: int = Field(description="Days until expiry (1, 7, or 30)", examples=[7])
+    premium: float = Field(
+        description="Net premium per contract in USD (after protocol fee)",
+        examples=[42.15],
+    )
+    delta: float = Field(description="Option delta (absolute value, 0-1)", examples=[0.25])
+    iv: float = Field(description="Implied volatility used for pricing (annualized, e.g. 0.65 = 65%)", examples=[0.65])
+    spot: float = Field(description="ETH spot price at time of quote (USD)", examples=[2650.0])
+    ttl: int = Field(description="Seconds until this quote expires", examples=[30])
+    expires_at: float = Field(description="Unix timestamp when this quote expires", examples=[1708776000.0])
+    available_amount: float = Field(
+        description="Maximum notional amount available at this price (in ETH)",
+        examples=[1000.0],
+    )
+    otoken_address: str | None = Field(
+        default=None,
+        description="On-chain oToken contract address (null if not yet created)",
+        examples=["0xAbC1230000000000000000000000000000000000"],
+    )

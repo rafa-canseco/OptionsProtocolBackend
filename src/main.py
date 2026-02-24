@@ -52,19 +52,64 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="Options Protocol", version="0.2.0", lifespan=lifespan)
+openapi_tags = [
+    {
+        "name": "Market Data",
+        "description": "Live ETH option prices computed via Black-Scholes. Prices refresh every ~15 s and include on-chain oToken addresses when available.",
+    },
+    {
+        "name": "Positions",
+        "description": "Query open and settled option positions for a given wallet address. Data is indexed from on-chain OrderExecuted events.",
+    },
+    {
+        "name": "Simulation",
+        "description": "Back-test selling a cash-secured put over the last 7 days of real ETH price history.",
+    },
+    {
+        "name": "Results",
+        "description": "Weekly performance reports and cumulative user statistics.",
+    },
+    {
+        "name": "Waitlist",
+        "description": "Join the b1nary waitlist. Idempotent — duplicate emails return 200.",
+    },
+    {
+        "name": "Analytics",
+        "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
+    },
+    {
+        "name": "Demo",
+        "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
+    },
+    {
+        "name": "System",
+        "description": "Health checks and operational status.",
+    },
+]
+
+app = FastAPI(
+    title="b1nary API",
+    summary="Simplified ETH options protocol on Base",
+    description=(
+        "b1nary lets users sell cash-secured puts and covered calls on ETH and earn premium. "
+        "A market maker is the counterparty; settlement is instant and on-chain.\n\n"
+        "## Quick start for AI agents\n\n"
+        "1. `GET /prices` — fetch the current option price menu\n"
+        "2. Pick a quote and call `executeOrder()` on the BatchSettler contract from the user's wallet\n"
+        "3. `GET /positions/{address}` — check the user's open and settled positions\n\n"
+        "All monetary values are in USD unless noted. On-chain amounts use the token's native decimals "
+        "(oToken = 8, USDC = 6, WETH = 18).\n\n"
+        "**Chain:** Base Sepolia (chain ID 84532)  \n"
+        "**Contracts:** see [BaseScan](https://sepolia.basescan.org)"
+    ),
+    version="0.3.0",
+    openapi_tags=openapi_tags,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "https://frontend-seven-psi-40.vercel.app",
-        "https://frontend-git-main-rcsc1s-projects.vercel.app",
-        "https://b1nary.app",
-        "https://www.b1nary.app",
-    ],
-    allow_origin_regex=r"https://frontend-git-.*-rcsc1s-projects\.vercel\.app",
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,6 +124,7 @@ if settings.beta_mode:
     logger.info("Beta mode: /demo/settle endpoint enabled")
 
 
-@app.get("/health")
+@app.get("/health", tags=["System"], summary="Health check")
 async def health():
+    """Returns `{\"status\": \"ok\"}` when the API is running."""
     return {"status": "ok"}

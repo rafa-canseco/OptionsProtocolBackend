@@ -33,12 +33,22 @@ _weekly_cache: WeeklyReport | None = None
 _weekly_cache_ts: float = 0.0
 
 
-@router.get("/prices/simulate", response_model=SimulateResponse)
+@router.get(
+    "/prices/simulate",
+    response_model=SimulateResponse,
+    tags=["Simulation"],
+    summary="Simulate a cash-secured put",
+)
 async def simulate(
-    strike: float = Query(gt=0, description="Strike price in USD"),
-    side: str = Query(default="buy", pattern="^buy$", description="Side (buy only, reserved for future expansion)"),
+    strike: float = Query(gt=0, description="Strike price in USD (rounded to nearest $50)"),
+    side: str = Query(default="buy", pattern="^buy$", description="Side — currently only 'buy' (reserved for future expansion)"),
 ):
-    """Simulate selling a cash-secured put at the given strike over the last 7 days."""
+    """Back-test selling a 7-day cash-secured put at the given strike using
+    real ETH price history from CoinGecko and current Deribit IV.
+
+    Returns the premium earned, whether assignment occurred, and a comparison
+    against buy-and-hold, staking, and DCA strategies over the same period.
+    """
     # Round strike to nearest $50 (minimum $50)
     rounded_strike = max(50, round(strike / 50) * 50)
     cache_key = (rounded_strike,)
@@ -74,9 +84,18 @@ async def simulate(
     return result
 
 
-@router.get("/results/weekly", response_model=WeeklyReport | None)
+@router.get(
+    "/results/weekly",
+    response_model=WeeklyReport | None,
+    tags=["Results"],
+    summary="Get latest weekly report",
+)
 async def get_weekly_report():
-    """Get the latest weekly report."""
+    """Return the most recent platform-wide weekly report.
+
+    Includes aggregate stats (total users, positions, premium, assignments)
+    and ETH price data for the week. Returns `null` if no report exists yet.
+    """
     global _weekly_cache, _weekly_cache_ts
 
     now = time.monotonic()
@@ -119,9 +138,18 @@ async def get_weekly_report():
     return report
 
 
-@router.get("/results/weekly/{address}", response_model=UserWeeklyResult | None)
+@router.get(
+    "/results/weekly/{address}",
+    response_model=UserWeeklyResult | None,
+    tags=["Results"],
+    summary="Get user's weekly result",
+)
 async def get_user_weekly(address: str):
-    """Get a user's latest weekly result for shareable card."""
+    """Return the latest weekly performance result for a single user.
+
+    Designed for shareable result cards. Returns `null` if the user has no
+    weekly results yet.
+    """
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(400, "Invalid Ethereum address")
 
@@ -155,9 +183,18 @@ async def get_user_weekly(address: str):
     )
 
 
-@router.get("/results/stats/{address}", response_model=UserStats | None)
+@router.get(
+    "/results/stats/{address}",
+    response_model=UserStats | None,
+    tags=["Results"],
+    summary="Get user's cumulative stats",
+)
 async def get_user_stats(address: str):
-    """Get a user's cumulative track record."""
+    """Return the cumulative track record for a user across all weeks.
+
+    Includes total premium earned, total assignments, best week, and
+    cumulative P&L. Returns `null` if the user has no history.
+    """
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(400, "Invalid Ethereum address")
 

@@ -77,7 +77,7 @@ MAX_UINT256 = 2**256 - 1
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/demo", tags=["demo"])
+router = APIRouter(prefix="/demo", tags=["Demo"])
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _settle_lock = asyncio.Lock()
@@ -101,10 +101,10 @@ async def _wait_for_rpc(read_fn, check_fn, label: str) -> None:
 
 
 class SettleRequest(BaseModel):
-    user_address: str
-    vault_id: int = Field(ge=1)
-    otoken_address: str
-    force_itm: bool | None = None  # None = real price, True = force ITM, False = force OTM
+    user_address: str = Field(description="Ethereum address of the vault owner", examples=["0xAbC1230000000000000000000000000000000000"])
+    vault_id: int = Field(ge=1, description="On-chain vault ID to settle", examples=[1])
+    otoken_address: str = Field(description="Address of the oToken contract for this vault", examples=["0xDeF4560000000000000000000000000000000000"])
+    force_itm: bool | None = Field(default=None, description="Force settlement outcome: null = real price, true = force ITM, false = force OTM", examples=[None])
 
     @field_validator("user_address", "otoken_address")
     @classmethod
@@ -115,15 +115,15 @@ class SettleRequest(BaseModel):
 
 
 class SettleResponse(BaseModel):
-    settled: bool
-    is_itm: bool
-    settlement_type: Literal["physical", "cash", "physical_failed"]
-    expiry_price: str  # 8 decimals, as string
-    settle_tx_hash: str
-    delivered_asset: str | None = None
-    delivered_amount: str | None = None
-    delivery_tx_hash: str | None = None
-    warning: str | None = None
+    settled: bool = Field(description="Whether the vault was successfully settled", examples=[True])
+    is_itm: bool = Field(description="Whether the option expired in-the-money", examples=[True])
+    settlement_type: Literal["physical", "cash", "physical_failed"] = Field(description="How the position was settled", examples=["physical"])
+    expiry_price: str = Field(description="Oracle ETH price at expiry (8 decimals, as string)", examples=["265000000000"])
+    settle_tx_hash: str = Field(description="Transaction hash of the batchSettleVaults call", examples=["0xabc123..."])
+    delivered_asset: str | None = Field(default=None, description="Address of asset delivered to user (physical settlement only)", examples=["0x4200000000000000000000000000000000000006"])
+    delivered_amount: str | None = Field(default=None, description="Amount delivered in native decimals (as string)", examples=["1000000000000000000"])
+    delivery_tx_hash: str | None = Field(default=None, description="Transaction hash of the physical delivery", examples=["0xdef456..."])
+    warning: str | None = Field(default=None, description="Warning message if settlement partially failed (e.g. physical delivery failed)")
 
 
 def _verify_api_key(x_demo_key: str | None) -> None:
@@ -133,10 +133,10 @@ def _verify_api_key(x_demo_key: str | None) -> None:
         raise HTTPException(401, "Invalid or missing X-Demo-Key")
 
 
-@router.post("/settle", response_model=SettleResponse)
+@router.post("/settle", response_model=SettleResponse, summary="Trigger instant settlement (beta)")
 async def demo_settle(
     body: SettleRequest,
-    x_demo_key: str | None = Header(None),
+    x_demo_key: str | None = Header(None, description="API key for demo settlement (required)"),
 ):
     _verify_api_key(x_demo_key)
 
