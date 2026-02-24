@@ -11,8 +11,7 @@ End-to-end guide for an AI agent to trade ETH options on b1nary programmatically
 ## Prerequisites
 
 1. An Ethereum wallet with a private key (for signing transactions)
-2. Base Sepolia ETH for gas (use a [Base Sepolia faucet](https://www.alchemy.com/faucets/base-sepolia))
-3. Test tokens — mint via the b1nary faucet:
+2. Gas ETH + test tokens — claim everything in one call via the b1nary faucet:
 
 ```
 POST {API_BASE}/faucet
@@ -24,14 +23,16 @@ Content-Type: application/json
 Response:
 ```json
 {
+  "eth_amount": "5000000000000000",
   "leth_amount": "50000000000000000000",
   "lusd_amount": "100000000000",
+  "eth_tx_hash": "0x...",
   "leth_tx_hash": "0x...",
   "lusd_tx_hash": "0x..."
 }
 ```
 
-This mints **50 LETH** (test WETH) and **100,000 LUSD** (test USDC). Rate limited to 1 request per address per hour.
+This sends **0.005 ETH** (gas for dozens of L2 transactions), **50 LETH** (test WETH), and **100,000 LUSD** (test USDC). Each wallet can only claim once.
 
 ---
 
@@ -329,7 +330,7 @@ If `GET /prices` returns **503**, the circuit breaker has paused pricing due to 
 ## Full Example: Sell a PUT
 
 ```python
-# 1. Get test tokens
+# 1. Get gas ETH + test tokens (one-time, 1 claim per wallet)
 requests.post(f"{API}/faucet", json={"address": MY_ADDRESS})
 
 # 2. Read prices
@@ -371,6 +372,6 @@ positions = requests.get(f"{API}/positions/{MY_ADDRESS}").json()
 | `GET` | `/prices/simulate?strike=2400` | Back-test a PUT over last 7 days |
 | `GET` | `/positions/{address}` | User's open and settled positions |
 | `GET` | `/results/stats/{address}` | Cumulative user track record |
-| `POST` | `/faucet` | Mint test tokens (testnet only) |
+| `POST` | `/faucet` | Gas ETH + test tokens, 1 claim per wallet (testnet only) |
 | `GET` | `/openapi.json` | Full OpenAPI 3.x spec |
 | `GET` | `/docs` | Interactive Swagger UI |

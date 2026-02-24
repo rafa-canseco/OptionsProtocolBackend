@@ -79,7 +79,7 @@ openapi_tags = [
     },
     {
         "name": "Faucet",
-        "description": "Mint test tokens (LETH/LUSD) on Base Sepolia. Rate limited to 1 request per address per hour. Beta only — disabled in production.",
+        "description": "Send gas ETH + test tokens (LETH/LUSD) on Base Sepolia. 1 claim per wallet (permanent). Beta only — disabled in production.",
     },
     {
         "name": "Demo",

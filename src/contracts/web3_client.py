@@ -107,6 +107,66 @@ def get_uniswap_quoter() -> Contract:
     )
 
 
+def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 120) -> str:
+    """Send a plain ETH transfer. Returns tx hash hex.
+
+    Uses the same nonce lock and retry logic as build_and_send_tx.
+    """
+    w3 = get_w3()
+    base_gas_price = w3.eth.gas_price
+    max_retries = 3
+    forced_nonce: int | None = None
+
+    for attempt in range(max_retries):
+        with _nonce_lock:
+            if forced_nonce is None:
+                chain_nonce = w3.eth.get_transaction_count(account.address, "pending")
+                tracked_nonce = _local_nonce.get(account.address, 0)
+                nonce = max(chain_nonce, tracked_nonce)
+            else:
+                nonce = forced_nonce
+            gas_price = int(base_gas_price * (1.15 ** attempt))
+            tx = {
+                "to": Web3.to_checksum_address(to),
+                "value": value,
+                "nonce": nonce,
+                "gas": 21_000,
+                "gasPrice": gas_price,
+                "chainId": settings.chain_id,
+            }
+            signed = account.sign_transaction(tx)
+            try:
+                tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                _local_nonce[account.address] = nonce + 1
+            except Exception as e:
+                if "replacement transaction underpriced" in str(e).lower() and attempt < max_retries - 1:
+                    forced_nonce = nonce
+                    logger.warning(
+                        f"Nonce {nonce} has stuck pending tx, retrying with bumped gas "
+                        f"(attempt {attempt + 1}/{max_retries}, gas_price={gas_price})"
+                    )
+                    continue
+                logger.error(
+                    f"send_raw_transaction failed: nonce={nonce}, gas_price={gas_price}, "
+                    f"attempt={attempt + 1}/{max_retries}, error={e}"
+                )
+                raise
+        if attempt > 0:
+            logger.info(
+                f"ETH transfer sent after {attempt + 1} attempts: nonce={nonce}, "
+                f"gas_price={gas_price}, tx_hash={tx_hash.hex()}"
+            )
+        break
+    else:
+        raise RuntimeError(f"ETH transfer failed after {max_retries} attempts")
+
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
+    if receipt.status != 1:
+        logger.error(f"ETH transfer reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
+        raise RuntimeError(f"ETH transfer reverted: {tx_hash.hex()}")
+    return tx_hash.hex()
+
+
 def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
