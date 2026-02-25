@@ -155,6 +155,22 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # makerNonce(address) → uint256 — current nonce for a market maker
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "makerNonce",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # incrementMakerNonce() — invalidates all outstanding quotes for msg.sender
+    {
+        "inputs": [],
+        "name": "incrementMakerNonce",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
 ]
 
 OTOKEN_FACTORY_ABI = [

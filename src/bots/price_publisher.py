@@ -1,8 +1,9 @@
 """
-Price Publisher Bot
+Price Publisher Bot (Internal MM)
 
-Generates Black-Scholes prices, ensures oTokens exist on-chain
-for each quote, then publishes quotes to PriceSheet.
+Generates Black-Scholes prices, ensures oTokens exist on-chain,
+then signs EIP-712 quotes with the operator key and stores them
+in the mm_quotes table. No more on-chain gas for publishing prices.
 """
 import asyncio
 import logging
@@ -12,12 +13,14 @@ from datetime import datetime, timezone, timedelta
 from web3 import Web3
 
 from src.config import settings
+from src.crypto.eip712 import sign_quote
+from src.db.database import get_client
 from src.pricing.chainlink import get_eth_price
 from src.pricing.deribit import get_eth_iv
 from src.pricing.price_sheet import generate_price_sheet, PriceQuote
 from src.pricing.black_scholes import OptionType
 from src.contracts.web3_client import (
-    get_price_sheet,
+    get_batch_settler,
     get_otoken_factory,
     get_whitelist,
     get_operator_account,
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 SPREAD = 0.01  # 1% bid-ask spread
 USDC_DECIMALS = 6
 STRIKE_DECIMALS = 8
+OTOKEN_DECIMALS = 8
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
@@ -186,37 +190,93 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
     return results
 
 
+def _get_maker_nonce(mm_address: str) -> int:
+    """Read makerNonce for an address from BatchSettler."""
+    settler = get_batch_settler()
+    return settler.functions.makerNonce(Web3.to_checksum_address(mm_address)).call()
+
+
 async def publish_once():
-    """Single publish cycle: generate prices, ensure oTokens, publish on-chain."""
+    """Single publish cycle: generate prices, ensure oTokens, sign and store quotes."""
     eth_price, _ = get_eth_price()
     iv = await get_eth_iv()
     quotes = generate_price_sheet(spot=eth_price, iv=iv)
 
-    paired = ensure_otokens_exist(quotes)
+    paired = await asyncio.to_thread(ensure_otokens_exist, quotes)
     if not paired:
         logger.warning("No quotes to publish, skipping")
         return
 
-    now = int(time.time())
-    addresses = []
-    bids = []
-    asks = []
-    deadlines = []
-    max_amounts = []
-
-    for otoken_addr, quote in paired:
-        addresses.append(otoken_addr)
-        bids.append(premium_to_usdc(quote.premium * (1 - SPREAD)))
-        asks.append(premium_to_usdc(quote.premium * (1 + SPREAD)))
-        deadlines.append(now + settings.quote_deadline_seconds)
-        max_amounts.append(settings.default_max_amount_wei)
-
-    ps = get_price_sheet()
     account = get_operator_account()
+    mm_address = account.address.lower()
 
-    tx_fn = ps.functions.publishQuotes(addresses, bids, asks, deadlines, max_amounts)
-    tx_hash = build_and_send_tx(tx_fn, account)
-    logger.info(f"Published {len(paired)} quotes, tx: {tx_hash}")
+    # Read current makerNonce from contract
+    maker_nonce = await asyncio.to_thread(_get_maker_nonce, account.address)
+
+    now = int(time.time())
+    deadline = now + settings.quote_deadline_seconds
+    rows = []
+
+    for idx, (otoken_addr, quote) in enumerate(paired):
+        is_put = quote.option_type == OptionType.PUT
+        bid_price = premium_to_usdc(quote.premium * (1 - SPREAD))
+        # Use a deterministic quote_id: timestamp-based + index
+        quote_id = now * 1000 + idx
+        max_amount = settings.default_max_amount_wei // (10 ** (18 - OTOKEN_DECIMALS))
+
+        try:
+            sig = await asyncio.to_thread(
+                sign_quote,
+                settings.operator_private_key,
+                otoken_addr,
+                bid_price,
+                deadline,
+                quote_id,
+                max_amount,
+                maker_nonce,
+            )
+        except Exception:
+            logger.exception(f"Failed to sign quote for {otoken_addr}")
+            continue
+
+        rows.append(
+            {
+                "mm_address": mm_address,
+                "otoken_address": otoken_addr.lower(),
+                "bid_price": str(bid_price),
+                "deadline": deadline,
+                "quote_id": str(quote_id),
+                "max_amount": str(max_amount),
+                "maker_nonce": maker_nonce,
+                "signature": sig,
+                "strike_price": quote.strike,
+                "expiry": expiry_days_to_timestamp(quote.expiry_days),
+                "is_put": is_put,
+                "is_active": True,
+            }
+        )
+
+    if not rows:
+        logger.warning("No quotes signed successfully, skipping DB write")
+        return
+
+    try:
+        client = get_client()
+        # Upsert new quotes first (so a crash doesn't leave zero quotes active)
+        client.table("mm_quotes").upsert(
+            rows, on_conflict="mm_address,quote_id"
+        ).execute()
+
+        # Then deactivate old quotes from this MM that aren't in the new batch
+        new_quote_ids = [r["quote_id"] for r in rows]
+        client.table("mm_quotes").update({"is_active": False}).eq(
+            "mm_address", mm_address
+        ).eq("is_active", True).not_.in_("quote_id", new_quote_ids).execute()
+
+        logger.info(f"Published {len(rows)} signed quotes to DB (maker_nonce={maker_nonce})")
+    except Exception:
+        logger.exception("Failed to write quotes to DB")
+        raise
 
 
 async def run():
@@ -226,6 +286,9 @@ async def run():
         return
     if not settings.operator_private_key:
         logger.error("operator_private_key not configured, price publisher cannot start")
+        return
+    if not settings.batch_settler_address:
+        logger.error("batch_settler_address not configured, price publisher cannot start")
         return
 
     logger.info(f"Price publisher starting (interval={settings.price_publish_interval_seconds}s)")

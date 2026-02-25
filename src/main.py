@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import router
 from src.api.results import router as results_router
 from src.api.analytics import router as analytics_router
+from src.api.mm_routes import router as mm_router
 from src.config import settings
 
 logging.basicConfig(
@@ -22,7 +23,7 @@ async def lifespan(app: FastAPI):
     """Start background bots when contract addresses are configured."""
     tasks = []
 
-    if settings.price_sheet_address and settings.operator_private_key:
+    if settings.batch_settler_address and settings.operator_private_key:
         from src.bots import (
             price_publisher,
             event_indexer,
@@ -55,7 +56,11 @@ async def lifespan(app: FastAPI):
 openapi_tags = [
     {
         "name": "Market Data",
-        "description": "Live ETH option prices computed via Black-Scholes. Prices refresh every ~15 s and include on-chain oToken addresses when available.",
+        "description": "Live ETH option prices from all market makers. Picks the best bid per oToken and includes EIP-712 signature data for on-chain execution.",
+    },
+    {
+        "name": "Market Making",
+        "description": "MM quote management: submit, retrieve, and cancel EIP-712 signed quotes. Requires X-API-Key header.",
     },
     {
         "name": "Positions",
@@ -98,15 +103,15 @@ app = FastAPI(
         "b1nary lets users sell cash-secured puts and covered calls on ETH and earn premium. "
         "A market maker is the counterparty; settlement is instant and on-chain.\n\n"
         "## Quick start for AI agents\n\n"
-        "1. `GET /prices` — fetch the current option price menu\n"
-        "2. Pick a quote and call `executeOrder()` on the BatchSettler contract from the user's wallet\n"
+        "1. `GET /prices` — fetch the current option price menu (best bid across all MMs)\n"
+        "2. Pick a quote and call `executeOrder()` on the BatchSettler contract with the included signature\n"
         "3. `GET /positions/{address}` — check the user's open and settled positions\n\n"
         "All monetary values are in USD unless noted. On-chain amounts use the token's native decimals "
         "(oToken = 8, USDC = 6, WETH = 18).\n\n"
         "**Chain:** Base Sepolia (chain ID 84532)  \n"
         "**Contracts:** see [BaseScan](https://sepolia.basescan.org)"
     ),
-    version="0.3.0",
+    version="0.4.0",
     openapi_tags=openapi_tags,
     lifespan=lifespan,
 )
@@ -121,6 +126,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(results_router)
 app.include_router(analytics_router)
+app.include_router(mm_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router

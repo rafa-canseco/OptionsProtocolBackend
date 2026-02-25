@@ -25,3 +25,32 @@ class PriceResponse(BaseModel):
         description="On-chain oToken contract address (null if not yet created)",
         examples=["0xAbC1230000000000000000000000000000000000"],
     )
+    # EIP-712 signed quote fields (needed by frontend for executeOrder)
+    signature: str | None = Field(
+        default=None,
+        description="EIP-712 signature for this quote (hex, 0x-prefixed)",
+    )
+    mm_address: str | None = Field(
+        default=None,
+        description="Market maker address that signed this quote",
+    )
+    bid_price_raw: int | None = Field(
+        default=None,
+        description="Bid price in USDC on-chain units (6 decimals)",
+    )
+    deadline: int | None = Field(
+        default=None,
+        description="Quote deadline as Unix timestamp",
+    )
+    quote_id: str | None = Field(
+        default=None,
+        description="Unique quote identifier (maps to quoteId in the contract)",
+    )
+    max_amount_raw: int | None = Field(
+        default=None,
+        description="Maximum oToken amount in on-chain units (8 decimals)",
+    )
+    maker_nonce: int | None = Field(
+        default=None,
+        description="MM's makerNonce at time of signing",
+    )
