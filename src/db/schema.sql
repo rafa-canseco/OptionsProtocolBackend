@@ -130,3 +130,46 @@ create table if not exists waitlist (
   email text not null unique,
   created_at timestamptz not null default now()
 );
+
+-- ============================================================
+-- Market Maker quotes (EIP-712 signed, stored off-chain)
+-- ============================================================
+
+create table if not exists mm_quotes (
+  id uuid primary key default gen_random_uuid(),
+  mm_address text not null,
+  otoken_address text not null,
+  bid_price numeric not null,
+  deadline bigint not null,
+  quote_id text not null,
+  max_amount numeric not null,
+  maker_nonce bigint not null,
+  signature text not null,
+  -- Denormalized oToken metadata (for display / filtering)
+  strike_price numeric,
+  expiry bigint,
+  is_put boolean,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (mm_address, quote_id)
+);
+
+create index if not exists idx_mm_quotes_active
+  on mm_quotes (is_active, deadline) where is_active = true;
+create index if not exists idx_mm_quotes_otoken
+  on mm_quotes (otoken_address) where is_active = true;
+create index if not exists idx_mm_quotes_mm
+  on mm_quotes (mm_address) where is_active = true;
+
+-- ============================================================
+-- Market Maker API keys
+-- ============================================================
+
+create table if not exists mm_api_keys (
+  id uuid primary key default gen_random_uuid(),
+  mm_address text not null unique,
+  api_key text not null unique,
+  label text,
+  is_active boolean not null default true,
+  created_at timestamptz not null default now()
+);

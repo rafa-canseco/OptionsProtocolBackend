@@ -2,19 +2,21 @@
 Circuit Breaker Bot
 
 Monitors ETH price. When the circuit breaker trips (>2% move),
-calls PriceSheet.invalidateQuotes() to cancel all on-chain quotes.
+calls BatchSettler.incrementMakerNonce() to invalidate all on-chain
+quotes for the operator, and deactivates all DB quotes for the
+internal MM.
 """
 import asyncio
 import logging
-import time
+
+from web3 import Web3
 
 from src.config import settings
+from src.db.database import get_client
 from src.pricing.chainlink import get_eth_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.contracts.web3_client import (
-    get_price_sheet,
-    get_otoken_factory,
-    get_otoken,
+    get_batch_settler,
     get_operator_account,
     build_and_send_tx,
 )
@@ -22,43 +24,47 @@ from src.contracts.web3_client import (
 logger = logging.getLogger(__name__)
 
 
-def get_active_otoken_addresses() -> list[str]:
-    """Get addresses of all non-expired oTokens."""
-    factory = get_otoken_factory()
-    count = factory.functions.getOTokensLength().call()
-    now = int(time.time())
-    active = []
-    for i in range(count):
-        addr = factory.functions.oTokens(i).call()
-        ot = get_otoken(addr)
-        expiry = ot.functions.expiry().call()
-        if expiry > now:
-            active.append(addr)
-    return active
-
-
-async def invalidate_all_quotes():
-    """Invalidate all active quotes on PriceSheet."""
-    addresses = get_active_otoken_addresses()
-    if not addresses:
-        logger.info("No active oTokens to invalidate")
-        return
-
-    ps = get_price_sheet()
+async def invalidate_quotes():
+    """Invalidate all quotes: increment on-chain makerNonce + deactivate DB quotes."""
     account = get_operator_account()
+    mm_address = account.address.lower()
 
-    tx_fn = ps.functions.invalidateQuotes(addresses)
-    tx_hash = build_and_send_tx(tx_fn, account)
-    logger.warning(f"Circuit breaker: invalidated {len(addresses)} quotes, tx: {tx_hash}")
+    # 1. On-chain: increment makerNonce (invalidates all outstanding signed quotes)
+    try:
+        settler = get_batch_settler()
+        tx_fn = settler.functions.incrementMakerNonce()
+        tx_hash = await asyncio.to_thread(build_and_send_tx, tx_fn, account)
+        logger.warning(
+            f"Circuit breaker: incremented makerNonce on-chain, tx: {tx_hash}"
+        )
+    except Exception:
+        logger.exception("Circuit breaker: failed to increment makerNonce on-chain")
+
+    # 2. Off-chain: deactivate all DB quotes for the internal MM
+    try:
+        client = get_client()
+        result = (
+            client.table("mm_quotes")
+            .update({"is_active": False})
+            .eq("mm_address", mm_address)
+            .eq("is_active", True)
+            .execute()
+        )
+        deactivated = len(result.data) if result.data else 0
+        logger.warning(
+            f"Circuit breaker: deactivated {deactivated} DB quotes for {mm_address}"
+        )
+    except Exception:
+        logger.exception("Circuit breaker: failed to deactivate DB quotes")
 
 
 async def check_once():
-    """Single circuit breaker check. If tripped, invalidates quotes on-chain."""
+    """Single circuit breaker check. If tripped, invalidates quotes."""
     eth_price, _ = get_eth_price()
 
     if circuit_breaker.check(eth_price):
         logger.warning(f"Circuit breaker tripped: {circuit_breaker.pause_reason}")
-        await invalidate_all_quotes()
+        await invalidate_quotes()
         circuit_breaker.update_reference(eth_price)
 
 

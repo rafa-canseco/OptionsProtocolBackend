@@ -1,5 +1,5 @@
-import asyncio
 import logging
+import math
 import re
 import time
 
@@ -11,28 +11,20 @@ from src.config import settings
 from src.db.database import get_client
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
-from src.pricing.chainlink import get_eth_price
 from src.pricing.circuit_breaker import circuit_breaker
-from src.pricing.deribit import get_eth_iv
-from src.pricing.price_sheet import PriceQuote, generate_price_sheet
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-DEFAULT_AVAILABLE_AMOUNT = settings.default_max_amount_wei / 10**18
-ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+USDC_DECIMALS = 6
+OTOKEN_DECIMALS = 8
 
 # --- Caches ---
 _PRICES_TTL = 15  # seconds
 _prices_cache: list | None = None
 _prices_cached_at: float = 0.0
-
-_OTOKEN_TTL = 120  # seconds
-_otoken_cache: dict[tuple, str] = {}
-_otoken_cached_at: float = 0.0
-_otoken_quote_keys: set[tuple] | None = None
 
 # --- Waitlist rate limit (in-memory, per IP) ---
 _WAITLIST_WINDOW = 60  # seconds
@@ -69,94 +61,86 @@ def _check_rate_limit(ip: str) -> None:
     _waitlist_hits[ip].append(now)
 
 
-def _quote_key(q: PriceQuote) -> tuple:
-    """Key to match a BS quote to an oToken: (type, strike, expiry_days)."""
-    return (q.option_type.value, q.strike, q.expiry_days)
-
-
-def _build_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
-    """Map (type, strike, expiry_days) → oToken address via exact hash lookup.
-
-    Uses the same params hash as the contracts (keccak256 of packed params)
-    to look up oToken addresses from OTokenFactory. Read-only — does not create.
-    Returns empty dict on failure.
-    """
-    try:
-        from src.bots.price_publisher import (
-            compute_params_hash,
-            strike_to_8_decimals,
-            expiry_days_to_timestamp,
-        )
-        from src.pricing.black_scholes import OptionType
-        from src.contracts.web3_client import get_otoken_factory
-        from src.config import settings
-        from web3 import Web3
-
-        factory = get_otoken_factory()
-        weth = Web3.to_checksum_address(settings.weth_address)
-        usdc = Web3.to_checksum_address(settings.usdc_address)
-    except Exception:
-        logger.exception("Failed to initialize oToken lookup")
-        return {}
-
-    result: dict[tuple, str] = {}
-    # Cache lookups: None = failed/not found, str = address
-    seen: dict[tuple, str | None] = {}
-
-    for q in quotes:
-        key = _quote_key(q)
-        if key in seen:
-            if seen[key] is not None:
-                result[key] = seen[key]
-            continue
-
-        is_put = q.option_type == OptionType.PUT
-        collateral = usdc if is_put else weth
-        strike_price = strike_to_8_decimals(q.strike)
-        expiry = expiry_days_to_timestamp(q.expiry_days)
-
-        try:
-            params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
-            addr = factory.functions.getOToken(params_hash).call()
-        except Exception:
-            logger.exception(f"Failed to look up oToken for {key}")
-            seen[key] = None
-            continue
-
-        if addr != ZERO_ADDRESS:
-            result[key] = addr
-            seen[key] = addr
-        else:
-            seen[key] = None
-
-    return result
-
-
-async def _get_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
-    """Return otoken_map, using a 120s cache that invalidates when quotes change."""
-    global _otoken_cache, _otoken_cached_at, _otoken_quote_keys
-
-    current_keys = {_quote_key(q) for q in quotes}
-    now = time.monotonic()
-    cache_valid = (
-        (now - _otoken_cached_at) < _OTOKEN_TTL
-        and _otoken_quote_keys == current_keys
+def _fetch_active_quotes() -> list[dict]:
+    """Read all active, non-expired quotes from mm_quotes."""
+    now_ts = int(time.time())
+    client = get_client()
+    result = (
+        client.table("mm_quotes")
+        .select("*")
+        .eq("is_active", True)
+        .gt("deadline", now_ts)
+        .execute()
     )
-    if cache_valid:
-        logger.debug("otoken_map cache hit (age=%.1fs)", now - _otoken_cached_at)
-        return _otoken_cache
+    return result.data or []
 
-    logger.info("otoken_map cache miss — refreshing")
-    otoken_map = await asyncio.to_thread(_build_otoken_map, quotes)
 
-    if not otoken_map and quotes:
-        logger.warning("otoken_map empty for %d quotes — not caching", len(quotes))
-        return _otoken_cache or otoken_map
+def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
+    """For each oToken, pick the quote with the highest bid price.
 
-    _otoken_cache = otoken_map
-    _otoken_cached_at = now
-    _otoken_quote_keys = current_keys
-    return otoken_map
+    When users sell options, they want the highest premium — so we pick
+    the MM offering the best (highest) bid for each oToken.
+    """
+    by_otoken: dict[str, dict] = {}
+    for q in quotes:
+        otoken = q["otoken_address"]
+        bid = float(q["bid_price"])
+        if otoken not in by_otoken or bid > float(by_otoken[otoken]["bid_price"]):
+            by_otoken[otoken] = q
+    return list(by_otoken.values())
+
+
+def _quote_to_price_response(q: dict) -> PriceResponse | None:
+    """Convert a mm_quotes DB row to a PriceResponse for the frontend."""
+    try:
+        bid_price_raw = int(float(q["bid_price"]))
+        max_amount_raw = int(float(q["max_amount"]))
+        deadline = q["deadline"]
+        strike = q.get("strike_price")
+        expiry = q.get("expiry")
+        is_put = q.get("is_put")
+
+        # Compute human-readable fields
+        premium_usd = bid_price_raw / (10**USDC_DECIMALS)
+        # Apply protocol fee (same as before: user sees net premium)
+        fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
+        net_premium = premium_usd * fee_mult
+
+        available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
+
+        # Compute expiry_days from expiry timestamp
+        now_ts = int(time.time())
+        expiry_days = max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
+
+        # TTL = seconds until deadline
+        ttl = max(0, deadline - now_ts)
+
+        from src.pricing.black_scholes import OptionType
+        option_type = OptionType.PUT if is_put else OptionType.CALL
+
+        return PriceResponse(
+            option_type=option_type,
+            strike=strike or 0,
+            expiry_days=expiry_days,
+            premium=net_premium,
+            delta=0,  # Not available from MM quotes
+            iv=0,     # Not available from MM quotes
+            spot=0,   # Will be enriched below if possible
+            ttl=ttl,
+            expires_at=float(deadline),
+            available_amount=available_eth,
+            otoken_address=q["otoken_address"],
+            signature=q["signature"],
+            mm_address=q["mm_address"],
+            bid_price_raw=bid_price_raw,
+            deadline=deadline,
+            quote_id=q["quote_id"],
+            max_amount_raw=max_amount_raw,
+            maker_nonce=q["maker_nonce"],
+        )
+    except Exception:
+        logger.exception("Failed to convert quote to PriceResponse: %s", q.get("id"))
+        return None
 
 
 @router.get(
@@ -168,11 +152,10 @@ async def _get_otoken_map(quotes: list[PriceQuote]) -> dict[tuple, str]:
 async def get_prices():
     """Return the live ETH options price sheet.
 
-    Each entry represents a single option quote with strike, expiry, premium,
-    greeks, and the on-chain oToken address (if already created).
-
-    Prices are computed via Black-Scholes using real-time Chainlink spot and
-    Deribit implied volatility. The response is cached for ~15 s.
+    Reads all active signed quotes from market makers, picks the best
+    bid for each oToken, and returns enriched PriceResponse objects.
+    The response includes EIP-712 signature data needed by the frontend
+    to call executeOrder on BatchSettler.
 
     Returns **503** if the circuit breaker has paused pricing (>2 % ETH move).
     """
@@ -189,51 +172,45 @@ async def get_prices():
         logger.debug("prices cache hit (age=%.1fs)", now - _prices_cached_at)
         return _prices_cache
 
-    logger.info("prices cache miss — recalculating")
+    logger.info("prices cache miss — fetching from mm_quotes")
 
-    # Parallelize Chainlink (sync, in thread) and Deribit (async)
     try:
-        (eth_price, _), iv = await asyncio.gather(
-            asyncio.to_thread(get_eth_price),
-            get_eth_iv(),
-        )
+        all_quotes = _fetch_active_quotes()
     except Exception:
-        logger.exception("Failed to fetch market data from Chainlink/Deribit")
-        raise HTTPException(502, "Market data unavailable — Chainlink or Deribit may be down")
+        logger.exception("Failed to fetch active quotes from DB")
+        raise HTTPException(502, "Quote data unavailable")
 
-    if circuit_breaker.check(eth_price):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Pricing paused: {circuit_breaker.pause_reason}",
-        )
+    if not all_quotes:
+        logger.info("No active quotes in mm_quotes")
+        _prices_cache = []
+        _prices_cached_at = time.monotonic()
+        return []
 
-    circuit_breaker.update_reference(eth_price)
-    quotes = generate_price_sheet(spot=eth_price, iv=iv)
+    best_quotes = _best_quotes_by_otoken(all_quotes)
 
-    otoken_map = await _get_otoken_map(quotes)
+    # Enrich with spot price if available (best effort)
+    spot = 0.0
+    try:
+        from src.pricing.chainlink import get_eth_price
+        spot, _ = get_eth_price()
+        if circuit_breaker.check(spot):
+            raise HTTPException(
+                status_code=503,
+                detail=f"Pricing paused: {circuit_breaker.pause_reason}",
+            )
+        circuit_breaker.update_reference(spot)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Could not fetch spot price for enrichment", exc_info=True)
 
-    if not (0 <= settings.protocol_fee_bps < 10_000):
-        raise HTTPException(
-            status_code=500,
-            detail="Server misconfiguration: invalid protocol_fee_bps",
-        )
-    fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
-    result = [
-        PriceResponse(
-            option_type=q.option_type,
-            strike=q.strike,
-            expiry_days=q.expiry_days,
-            premium=q.premium * fee_mult,
-            delta=q.delta,
-            iv=q.iv,
-            spot=q.spot,
-            ttl=q.ttl,
-            expires_at=q.expires_at,
-            available_amount=DEFAULT_AVAILABLE_AMOUNT,
-            otoken_address=otoken_map.get(_quote_key(q)),
-        )
-        for q in quotes
-    ]
+    result = []
+    for q in best_quotes:
+        pr = _quote_to_price_response(q)
+        if pr is not None:
+            if spot > 0:
+                pr.spot = spot
+            result.append(pr)
 
     _prices_cache = result
     _prices_cached_at = time.monotonic()
