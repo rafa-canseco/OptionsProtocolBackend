@@ -79,7 +79,7 @@ def _compute_user_week(
         net = pos.get("net_premium") or pos.get("premium")
         if net is not None:
             try:
-                total_premium += float(net) / 1e18  # premium stored in wei
+                total_premium += float(net) / 1e6  # premium stored in USDC (6 decimals)
             except (ValueError, TypeError):
                 logger.warning("Could not parse premium for position %s: %s", pos.get("id", "unknown"), net)
 
