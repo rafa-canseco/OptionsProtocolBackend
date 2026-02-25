@@ -26,9 +26,10 @@ def _refresh_api_key_cache() -> None:
             .execute()
         )
         _API_KEY_CACHE = {row["api_key"]: row["mm_address"] for row in (result.data or [])}
-        _API_KEY_CACHE_AT = time.monotonic()
     except Exception:
-        logger.exception("Failed to refresh MM API key cache")
+        logger.exception("Failed to refresh MM API key cache — clearing stale entries")
+        _API_KEY_CACHE = {}
+    _API_KEY_CACHE_AT = time.monotonic()
 
 
 def require_mm_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str:

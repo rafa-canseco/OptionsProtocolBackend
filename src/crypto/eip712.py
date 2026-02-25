@@ -12,15 +12,6 @@ from web3 import Web3
 from src.config import settings
 
 
-DOMAIN_DATA = {
-    "name": "b1nary",
-    "version": "1",
-    "chainId": settings.chain_id,
-    "verifyingContract": Web3.to_checksum_address(settings.batch_settler_address)
-    if settings.batch_settler_address
-    else "0x0000000000000000000000000000000000000000",
-}
-
 QUOTE_TYPES = {
     "Quote": [
         {"name": "oToken", "type": "address"},
@@ -52,12 +43,19 @@ def _build_quote_message(
 
 
 def get_domain() -> dict:
-    """Return the EIP-712 domain, refreshing verifyingContract if needed."""
-    if settings.batch_settler_address:
-        DOMAIN_DATA["verifyingContract"] = Web3.to_checksum_address(
-            settings.batch_settler_address
+    """Return a fresh EIP-712 domain dict. Raises if batch_settler_address is not configured."""
+    if not settings.batch_settler_address:
+        raise RuntimeError(
+            "batch_settler_address is not configured. "
+            "EIP-712 signatures require a valid verifyingContract. "
+            "Set BATCH_SETTLER_ADDRESS in your environment."
         )
-    return DOMAIN_DATA
+    return {
+        "name": "b1nary",
+        "version": "1",
+        "chainId": settings.chain_id,
+        "verifyingContract": Web3.to_checksum_address(settings.batch_settler_address),
+    }
 
 
 def sign_quote(
@@ -80,7 +78,7 @@ def sign_quote(
         message_data=message,
     )
     signed = Account.sign_message(signable, private_key=private_key)
-    return signed.signature.hex()
+    return "0x" + signed.signature.hex()
 
 
 def recover_quote_signer(

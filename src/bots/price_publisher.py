@@ -248,7 +248,7 @@ async def publish_once():
                 "quote_id": str(quote_id),
                 "max_amount": str(max_amount),
                 "maker_nonce": maker_nonce,
-                "signature": sig if sig.startswith("0x") else f"0x{sig}",
+                "signature": sig,
                 "strike_price": quote.strike,
                 "expiry": expiry_days_to_timestamp(quote.expiry_days),
                 "is_put": is_put,
@@ -262,18 +262,21 @@ async def publish_once():
 
     try:
         client = get_client()
-        # Deactivate old quotes from this MM before inserting new batch
-        client.table("mm_quotes").update({"is_active": False}).eq(
-            "mm_address", mm_address
-        ).eq("is_active", True).execute()
-
-        # Insert new quotes
+        # Upsert new quotes first (so a crash doesn't leave zero quotes active)
         client.table("mm_quotes").upsert(
             rows, on_conflict="mm_address,quote_id"
         ).execute()
+
+        # Then deactivate old quotes from this MM that aren't in the new batch
+        new_quote_ids = [r["quote_id"] for r in rows]
+        client.table("mm_quotes").update({"is_active": False}).eq(
+            "mm_address", mm_address
+        ).eq("is_active", True).not_.in_("quote_id", new_quote_ids).execute()
+
         logger.info(f"Published {len(rows)} signed quotes to DB (maker_nonce={maker_nonce})")
     except Exception:
         logger.exception("Failed to write quotes to DB")
+        raise
 
 
 async def run():

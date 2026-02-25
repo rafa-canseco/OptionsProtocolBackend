@@ -83,8 +83,12 @@ def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
     """
     by_otoken: dict[str, dict] = {}
     for q in quotes:
-        otoken = q["otoken_address"]
-        bid = float(q["bid_price"])
+        try:
+            otoken = q["otoken_address"]
+            bid = float(q["bid_price"])
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning("Skipping malformed quote %s: %s", q.get("id"), e)
+            continue
         if otoken not in by_otoken or bid > float(by_otoken[otoken]["bid_price"]):
             by_otoken[otoken] = q
     return list(by_otoken.values())
@@ -93,8 +97,8 @@ def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
 def _quote_to_price_response(q: dict) -> PriceResponse | None:
     """Convert a mm_quotes DB row to a PriceResponse for the frontend."""
     try:
-        bid_price_raw = int(float(q["bid_price"]))
-        max_amount_raw = int(float(q["max_amount"]))
+        bid_price_raw = int(q["bid_price"])
+        max_amount_raw = int(q["max_amount"])
         deadline = q["deadline"]
         strike = q.get("strike_price")
         expiry = q.get("expiry")

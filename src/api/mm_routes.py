@@ -90,10 +90,11 @@ async def submit_quotes(
             continue
 
         if recovered.lower() != mm_address.lower():
-            errors.append(
-                f"{label}: signer mismatch (recovered {recovered}, "
-                f"expected {mm_address})"
+            logger.warning(
+                "%s: signer mismatch (recovered %s, expected %s)",
+                label, recovered, mm_address,
             )
+            errors.append(f"{label}: signature does not match authenticated MM address")
             continue
 
         rows_to_upsert.append(
@@ -105,7 +106,7 @@ async def submit_quotes(
                 "quote_id": str(q.quote_id),
                 "max_amount": str(q.max_amount),
                 "maker_nonce": q.maker_nonce,
-                "signature": q.signature if q.signature.startswith("0x") else f"0x{q.signature}",
+                "signature": q.signature,
                 "strike_price": q.strike_price,
                 "expiry": q.expiry,
                 "is_put": q.is_put,
