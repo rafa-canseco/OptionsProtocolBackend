@@ -42,6 +42,15 @@ class UserWeeklyResult(BaseModel):
     cumulative_pnl: float = Field(description="Running total P&L across all weeks (USD)", examples=[450.30])
 
 
+class EarningsSnapshot(BaseModel):
+    week_start: str = Field(description="Start of the week (ISO date)", examples=["2026-01-06"])
+    week_end: str = Field(description="End of the week (ISO date)", examples=["2026-01-12"])
+    premium_earned: float = Field(description="Premium earned this week (USD)", examples=[124.50])
+    assignments: int = Field(description="Number of positions assigned this week", examples=[0])
+    pnl: float = Field(description="Net P&L for this week (USD, can be negative)", examples=[124.50])
+    cumulative_pnl: float = Field(description="Running total P&L across all weeks (USD)", examples=[124.50])
+
+
 class UserStats(BaseModel):
     user_address: str = Field(description="Ethereum address (lowercase)", examples=["0xabcdef0123456789abcdef0123456789abcdef01"])
     weeks_active: int = Field(description="Number of weeks with at least one position", examples=[5])
