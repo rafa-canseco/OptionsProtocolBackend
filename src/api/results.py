@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query
 from src.config import settings
 from src.db.database import get_client
 from src.models.simulate import (
+    EarningsSnapshot,
     SimulateResponse,
     UserStats,
     UserWeeklyResult,
@@ -224,3 +225,45 @@ async def get_user_stats(address: str):
         total_assignments=sum(r.get("assignments", 0) for r in rows),
         total_positions=sum(r.get("positions_opened", 0) for r in rows),
     )
+
+
+@router.get(
+    "/results/history/{address}",
+    response_model=list[EarningsSnapshot],
+    tags=["Results"],
+    summary="Get user's weekly earnings history",
+)
+async def get_earnings_history(address: str):
+    """Return all weekly earnings snapshots for a user, sorted chronologically.
+
+    Each entry represents one week of activity with premium earned, assignments,
+    weekly P&L, and cumulative P&L. Used by the frontend earnings chart.
+    Returns an empty array if the user has no history.
+    """
+    if not ETH_ADDRESS_RE.match(address):
+        raise HTTPException(400, "Invalid Ethereum address")
+
+    try:
+        client = get_client()
+        result = (
+            client.table("user_weekly_results")
+            .select("week_start,week_end,total_simulated_premium,assignments,simulated_pnl,cumulative_pnl")
+            .eq("user_address", address.lower())
+            .order("week_start", desc=False)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to fetch earnings history for %s", address)
+        raise HTTPException(502, "Could not fetch earnings history")
+
+    return [
+        EarningsSnapshot(
+            week_start=row["week_start"],
+            week_end=row["week_end"],
+            premium_earned=row.get("total_simulated_premium", 0),
+            assignments=row.get("assignments", 0),
+            pnl=row.get("simulated_pnl", 0),
+            cumulative_pnl=row.get("cumulative_pnl", 0),
+        )
+        for row in (result.data or [])
+    ]
