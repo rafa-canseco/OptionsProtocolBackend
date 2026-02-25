@@ -85,6 +85,46 @@ insert into indexer_state (last_indexed_block) values (0)
 -- Waitlist
 -- ============================================================
 
+-- ============================================================
+-- Weekly aggregation (populated by weekly_aggregator bot)
+-- ============================================================
+
+create table if not exists user_weekly_results (
+  id uuid primary key default gen_random_uuid(),
+  user_address text not null,
+  week_start text not null,
+  week_end text not null,
+  positions_opened integer not null,
+  total_simulated_premium numeric not null,
+  assignments integer not null,
+  simulated_pnl numeric not null,
+  cumulative_pnl numeric not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_address, week_start)
+);
+
+create table if not exists weekly_reports (
+  id uuid primary key default gen_random_uuid(),
+  week_start text not null unique,
+  week_end text not null,
+  total_users integer not null,
+  total_positions integer not null,
+  total_simulated_premium numeric not null,
+  total_assignments integer not null,
+  eth_open numeric not null,
+  eth_close numeric not null,
+  eth_high numeric not null,
+  eth_low numeric not null,
+  narrative_data jsonb default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- ============================================================
+-- Waitlist
+-- ============================================================
+
 create table if not exists waitlist (
   id bigint generated always as identity primary key,
   email text not null unique,
