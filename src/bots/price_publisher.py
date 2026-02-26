@@ -64,28 +64,6 @@ def expiry_days_to_timestamp(days: int) -> int:
     return int(expiry_dt.timestamp())
 
 
-def compute_params_hash(
-    underlying: str,
-    strike_asset: str,
-    collateral_asset: str,
-    strike_price: int,
-    expiry: int,
-    is_put: bool,
-) -> bytes:
-    """Reproduce Solidity's keccak256(abi.encodePacked(...)) in Python."""
-    return Web3.solidity_keccak(
-        ["address", "address", "address", "uint256", "uint256", "bool"],
-        [
-            Web3.to_checksum_address(underlying),
-            Web3.to_checksum_address(strike_asset),
-            Web3.to_checksum_address(collateral_asset),
-            strike_price,
-            expiry,
-            is_put,
-        ],
-    )
-
-
 def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote]]:
     """For each quote, ensure the corresponding oToken exists on-chain.
 
@@ -118,17 +96,19 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
         expiry = expiry_days_to_timestamp(quote.expiry_days)
         collateral = usdc if is_put else weth
 
-        # Step 1: check if oToken already exists
+        # Step 1: compute deterministic CREATE2 address and check existence
         try:
-            params_hash = compute_params_hash(weth, usdc, collateral, strike_price, expiry, is_put)
-            existing = factory.functions.getOToken(params_hash).call()
+            target_addr = factory.functions.getTargetOTokenAddress(
+                weth, usdc, collateral, strike_price, expiry, is_put
+            ).call()
+            exists = factory.functions.isOToken(target_addr).call()
         except Exception:
             logger.exception(f"Failed to check oToken existence: {label}")
             seen[key] = None
             continue
 
-        if existing != ZERO_ADDRESS:
-            otoken_addr = existing
+        if exists:
+            otoken_addr = target_addr
             logger.debug(f"oToken exists: {label} → {otoken_addr}")
         else:
             # Step 2: create the oToken
@@ -140,32 +120,38 @@ def ensure_otokens_exist(quotes: list[PriceQuote]) -> list[tuple[str, PriceQuote
             except Exception:
                 # Handle OTokenAlreadyExists (race condition: another actor created it)
                 try:
-                    addr = factory.functions.getOToken(params_hash).call()
-                    if addr != ZERO_ADDRESS:
-                        logger.info(f"oToken already existed (race condition): {label} → {addr}")
-                        otoken_addr = addr
+                    is_created = factory.functions.isOToken(target_addr).call()
+                    if is_created:
+                        logger.info(f"oToken already existed (race condition): {label} → {target_addr}")
+                        otoken_addr = target_addr
                     else:
                         logger.exception(f"Failed to create oToken: {label}")
                         seen[key] = None
                         continue
                 except Exception:
-                    logger.debug(f"Recovery getOToken also failed for {label}", exc_info=True)
+                    logger.debug(f"Recovery isOToken check failed for {label}", exc_info=True)
                     logger.exception(f"Failed to create oToken: {label}")
                     seen[key] = None
                     continue
             else:
-                # Step 3: read back the newly created address
+                # Step 3: get the deterministic CREATE2 address
+                # Uses getTargetOTokenAddress (pure computation) instead of
+                # getOToken(hash) which can return zero on stale RPC nodes.
                 try:
-                    otoken_addr = factory.functions.getOToken(params_hash).call()
+                    otoken_addr = factory.functions.getTargetOTokenAddress(
+                        weth, usdc, collateral, strike_price, expiry, is_put
+                    ).call()
                 except Exception:
-                    logger.exception(f"oToken created (tx: {tx_hash}) but failed to read address: {label}")
+                    logger.exception(f"oToken created (tx: {tx_hash}) but failed to compute address: {label}")
                     seen[key] = None
                     continue
 
                 if otoken_addr == ZERO_ADDRESS:
-                    logger.error(f"oToken creation tx succeeded ({tx_hash}) but getOToken returned zero: {label}")
+                    logger.error(f"oToken creation tx succeeded ({tx_hash}) but getTargetOTokenAddress returned zero: {label}")
                     seen[key] = None
                     continue
+
+                logger.info(f"oToken address resolved: {label} → {otoken_addr}")
 
         # Ensure oToken is whitelisted (runs for both new and existing oTokens)
         if settings.whitelist_address:

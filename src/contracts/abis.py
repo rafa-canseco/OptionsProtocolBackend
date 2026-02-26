@@ -212,6 +212,29 @@ OTOKEN_FACTORY_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # isOToken(address) → bool — check if an address is a factory-created oToken
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "isOToken",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # getTargetOTokenAddress — deterministic CREATE2 address (no storage read)
+    {
+        "inputs": [
+            {"name": "_underlying", "type": "address"},
+            {"name": "_strikeAsset", "type": "address"},
+            {"name": "_collateralAsset", "type": "address"},
+            {"name": "_strikePrice", "type": "uint256"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_isPut", "type": "bool"},
+        ],
+        "name": "getTargetOTokenAddress",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
 
 OTOKEN_ABI = [

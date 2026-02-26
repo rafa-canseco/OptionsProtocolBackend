@@ -7,9 +7,7 @@ from src.bots.price_publisher import (
     premium_to_usdc,
     strike_to_8_decimals,
     expiry_days_to_timestamp,
-    compute_params_hash,
     ensure_otokens_exist,
-    SPREAD,
     ZERO_ADDRESS,
 )
 from src.config import settings
@@ -53,49 +51,11 @@ def test_expiry_days_to_timestamp_is_future():
 
 
 def test_expiry_days_ordering():
-    """Longer expiry → later timestamp."""
+    """Longer expiry -> later timestamp."""
     ts7 = expiry_days_to_timestamp(7)
     ts14 = expiry_days_to_timestamp(14)
     ts30 = expiry_days_to_timestamp(30)
     assert ts7 < ts14 < ts30
-
-
-def test_compute_params_hash_deterministic():
-    """Same inputs → same hash."""
-    args = (WETH, USDC, USDC, 200_000_000_000, 1771833600, True)
-    h1 = compute_params_hash(*args)
-    h2 = compute_params_hash(*args)
-    assert h1 == h2
-    assert len(h1) == 32
-
-
-def test_compute_params_hash_different_for_put_vs_call():
-    """Put and call with same strike/expiry should produce different hashes."""
-    common = (WETH, USDC, USDC, 200_000_000_000, 1771833600)
-    h_put = compute_params_hash(*common, True)
-    h_call = compute_params_hash(*common, False)
-    assert h_put != h_call
-
-
-def test_compute_params_hash_different_collateral():
-    """Different collateral (WETH vs USDC) produces different hashes."""
-    h_usdc_collateral = compute_params_hash(WETH, USDC, USDC, 200_000_000_000, 1771833600, True)
-    h_weth_collateral = compute_params_hash(WETH, USDC, WETH, 200_000_000_000, 1771833600, True)
-    assert h_usdc_collateral != h_weth_collateral
-
-
-def test_compute_params_hash_different_strike():
-    """Different strike prices produce different hashes."""
-    h1 = compute_params_hash(WETH, USDC, USDC, 200_000_000_000, 1771833600, True)
-    h2 = compute_params_hash(WETH, USDC, USDC, 250_000_000_000, 1771833600, True)
-    assert h1 != h2
-
-
-def test_compute_params_hash_different_expiry():
-    """Different expiry timestamps produce different hashes."""
-    h1 = compute_params_hash(WETH, USDC, USDC, 200_000_000_000, 1771833600, True)
-    h2 = compute_params_hash(WETH, USDC, USDC, 200_000_000_000, 1772438400, True)
-    assert h1 != h2
 
 
 def _make_quote(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
@@ -112,6 +72,15 @@ def _make_quote(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
     )
 
 
+def _setup_factory_mock(target_addr, exists=True):
+    """Create a factory mock with getTargetOTokenAddress and isOToken."""
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = target_addr
+    factory.functions.isOToken.return_value.call.return_value = exists
+    factory.functions.createOToken.return_value = MagicMock()
+    return factory
+
+
 @patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
@@ -119,8 +88,7 @@ def _make_quote(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
 def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """When oToken already exists, no creation tx is sent."""
     existing_addr = "0x1111111111111111111111111111111111111111"
-    factory = MagicMock()
-    factory.functions.getOToken.return_value.call.return_value = existing_addr
+    factory = _setup_factory_mock(existing_addr, exists=True)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     whitelist = MagicMock()
@@ -140,12 +108,9 @@ def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
 def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx, mock_wl):
-    """When oToken doesn't exist, createOToken is called and address is read back."""
+    """When oToken doesn't exist, createOToken is called."""
     new_addr = "0x2222222222222222222222222222222222222222"
-    factory = MagicMock()
-    # First call returns zero (doesn't exist), second call returns new address
-    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, new_addr]
-    factory.functions.createOToken.return_value = MagicMock()
+    factory = _setup_factory_mock(new_addr, exists=False)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
@@ -168,8 +133,7 @@ def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx
 def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
     """Two quotes with same (strike, expiry, type) should only do one lookup."""
     existing_addr = "0x3333333333333333333333333333333333333333"
-    factory = MagicMock()
-    factory.functions.getOToken.return_value.call.return_value = existing_addr
+    factory = _setup_factory_mock(existing_addr, exists=True)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
 
@@ -179,8 +143,8 @@ def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
     assert len(results) == 2
     assert results[0][0] == existing_addr
     assert results[1][0] == existing_addr
-    # Only one getOToken call (second quote uses cache)
-    assert factory.functions.getOToken.return_value.call.call_count == 1
+    # Only one getTargetOTokenAddress call (second quote uses cache)
+    assert factory.functions.getTargetOTokenAddress.return_value.call.call_count == 1
 
 
 @patch("src.bots.price_publisher.build_and_send_tx")
@@ -188,10 +152,11 @@ def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
 @patch("src.bots.price_publisher.get_otoken_factory")
 def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, mock_tx):
     """If createOToken fails and oToken doesn't exist, quote is skipped."""
-    factory = MagicMock()
-    # getOToken returns zero (doesn't exist) on all calls
-    factory.functions.getOToken.return_value.call.return_value = ZERO_ADDRESS
-    factory.functions.createOToken.return_value = MagicMock()
+    factory = _setup_factory_mock(
+        "0x0000000000000000000000000000000000000001", exists=False
+    )
+    # isOToken returns False on recovery check too
+    factory.functions.isOToken.return_value.call.return_value = False
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.side_effect = RuntimeError("tx reverted")
@@ -209,10 +174,9 @@ def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, 
 def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """If createOToken fails with OTokenAlreadyExists, reads existing address."""
     existing_addr = "0x4444444444444444444444444444444444444444"
-    factory = MagicMock()
-    # First getOToken: zero (doesn't exist). After failed create: returns existing.
-    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, existing_addr]
-    factory.functions.createOToken.return_value = MagicMock()
+    factory = _setup_factory_mock(existing_addr, exists=False)
+    # After failed create, isOToken returns True (race condition: exists now)
+    factory.functions.isOToken.return_value.call.side_effect = [False, True]
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     # Only the create tx fails; whitelist tx succeeds
@@ -233,11 +197,8 @@ def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_accoun
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
 def test_ensure_otokens_rejects_zero_address_after_creation(mock_factory_fn, mock_account, mock_tx):
-    """If getOToken returns zero after successful creation, quote is skipped."""
-    factory = MagicMock()
-    # First getOToken: zero. After create: still zero (shouldn't happen but we guard).
-    factory.functions.getOToken.return_value.call.return_value = ZERO_ADDRESS
-    factory.functions.createOToken.return_value = MagicMock()
+    """If getTargetOTokenAddress returns zero after creation, quote is skipped."""
+    factory = _setup_factory_mock(ZERO_ADDRESS, exists=False)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
@@ -255,17 +216,19 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
     """One quote failing doesn't prevent others from succeeding."""
     addr1 = "0x5555555555555555555555555555555555555555"
     factory = MagicMock()
-    # First quote lookup succeeds, second fails
-    factory.functions.getOToken.return_value.call.side_effect = [
-        addr1,              # quote 1 exists
+    # First quote: getTargetOTokenAddress succeeds, isOToken returns True
+    # Second quote: getTargetOTokenAddress raises
+    factory.functions.getTargetOTokenAddress.return_value.call.side_effect = [
+        addr1,              # quote 1
         Exception("RPC"),   # quote 2 lookup fails
     ]
+    factory.functions.isOToken.return_value.call.return_value = True
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
 
     quotes = [
         _make_quote(strike=2000.0),
-        _make_quote(strike=2050.0),  # different strike → different key
+        _make_quote(strike=2050.0),  # different strike -> different key
     ]
     results = ensure_otokens_exist(quotes)
 
@@ -280,9 +243,7 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
 def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """CALL options must use WETH as collateral."""
     new_addr = "0x6666666666666666666666666666666666666666"
-    factory = MagicMock()
-    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, new_addr]
-    factory.functions.createOToken.return_value = MagicMock()
+    factory = _setup_factory_mock(new_addr, exists=False)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
@@ -306,9 +267,7 @@ def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account,
 def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """PUT options must use USDC as collateral."""
     new_addr = "0x7777777777777777777777777777777777777777"
-    factory = MagicMock()
-    factory.functions.getOToken.return_value.call.side_effect = [ZERO_ADDRESS, new_addr]
-    factory.functions.createOToken.return_value = MagicMock()
+    factory = _setup_factory_mock(new_addr, exists=False)
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
