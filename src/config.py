@@ -27,7 +27,7 @@ class Settings(BaseSettings):
 
     # Bot intervals
     price_publish_interval_seconds: int = 300  # 5 minutes
-    event_poll_interval_seconds: int = 5
+    event_poll_interval_seconds: int = 30
     circuit_breaker_poll_seconds: int = 10
 
     # Quote settings
