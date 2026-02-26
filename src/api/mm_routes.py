@@ -1,25 +1,43 @@
 """
-Market Maker quote management endpoints.
+Market Maker endpoints.
 
-POST /mm/quotes — submit signed quotes
-GET  /mm/quotes — retrieve active quotes
-DELETE /mm/quotes — cancel all active quotes
+Quote management:
+  POST /mm/quotes — submit signed quotes
+  GET  /mm/quotes — retrieve active quotes
+  DELETE /mm/quotes — cancel all active quotes
+
+Monitoring:
+  GET /mm/fills     — filled trades
+  GET /mm/positions — open positions grouped by oToken
+  GET /mm/exposure  — aggregated risk summary
+  GET /mm/market    — market data for pricing engine
 """
 import logging
 import time
+from collections import defaultdict
+from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from web3 import Web3
 
 from src.api.deps import require_mm_api_key
-from src.contracts.web3_client import get_batch_settler
+from src.config import settings
+from src.contracts.web3_client import get_batch_settler, get_w3
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
 from src.models.mm import (
+    ExpiryBucket,
+    ExposureResponse,
+    FillResponse,
+    MarketDataResponse,
+    OTokenInfo,
+    PositionGroup,
     QuoteBatchRequest,
     QuoteBatchResponse,
     QuoteResponse,
 )
+from src.pricing.chainlink import get_eth_price
+from src.pricing.deribit import get_eth_iv
 
 logger = logging.getLogger(__name__)
 
@@ -200,3 +218,266 @@ async def cancel_quotes(mm_address: str = Depends(require_mm_api_key)):
         raise HTTPException(status_code=502, detail="Could not cancel quotes")
 
     return {"cancelled": cancelled}
+
+
+@router.get(
+    "/fills",
+    response_model=list[FillResponse],
+    summary="Get filled trades",
+    tags=["MM Monitoring"],
+)
+async def get_fills(
+    mm_address: str = Depends(require_mm_api_key),
+    since: int | None = Query(default=None, description="Unix ts filter"),
+    otoken: str | None = Query(default=None, description="oToken address filter"),
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    """Return trades executed against the MM's quotes."""
+    try:
+        client = get_client()
+        q = (
+            client.table("order_events")
+            .select("*")
+            .eq("mm_address", mm_address.lower())
+        )
+        if since is not None:
+            q = q.gte("indexed_at", _ts_to_iso(since))
+        if otoken is not None:
+            q = q.eq("otoken_address", otoken.lower())
+        result = q.order("indexed_at", desc=True).limit(limit).execute()
+    except Exception:
+        logger.exception("Failed to fetch fills for %s", mm_address)
+        raise HTTPException(status_code=502, detail="Could not fetch fills")
+
+    return [
+        FillResponse(
+            tx_hash=r["tx_hash"],
+            block_number=r["block_number"],
+            otoken_address=r["otoken_address"],
+            amount=str(r["amount"]),
+            gross_premium=str(r.get("gross_premium", r["premium"])),
+            net_premium=str(r.get("net_premium", "")),
+            protocol_fee=str(r.get("protocol_fee", "")),
+            collateral=str(r["collateral"]),
+            user_address=r["user_address"],
+            vault_id=r["vault_id"],
+            strike_price=_safe_float(r.get("strike_price")),
+            expiry=r.get("expiry"),
+            is_put=r.get("is_put"),
+            indexed_at=str(r["indexed_at"]),
+        )
+        for r in (result.data or [])
+    ]
+
+
+@router.get(
+    "/positions",
+    response_model=list[PositionGroup],
+    summary="Get open positions",
+    tags=["MM Monitoring"],
+)
+async def get_positions(mm_address: str = Depends(require_mm_api_key)):
+    """Return open positions grouped by oToken (not yet expired)."""
+    now_ts = int(time.time())
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select("*")
+            .eq("mm_address", mm_address.lower())
+            .gt("expiry", now_ts)
+            .order("expiry")
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to fetch positions for %s", mm_address)
+        raise HTTPException(status_code=502, detail="Could not fetch positions")
+
+    groups: dict[str, dict] = {}
+    for r in (result.data or []):
+        key = r["otoken_address"]
+        if key not in groups:
+            groups[key] = {
+                "otoken_address": key,
+                "strike_price": float(r.get("strike_price") or 0),
+                "expiry": r.get("expiry") or 0,
+                "is_put": r.get("is_put", False),
+                "total_amount": Decimal("0"),
+                "total_premium_earned": Decimal("0"),
+                "fill_count": 0,
+            }
+        g = groups[key]
+        g["total_amount"] += Decimal(str(r["amount"]))
+        g["total_premium_earned"] += Decimal(
+            str(r.get("gross_premium", r["premium"]))
+        )
+        g["fill_count"] += 1
+
+    return [
+        PositionGroup(
+            otoken_address=g["otoken_address"],
+            strike_price=g["strike_price"],
+            expiry=g["expiry"],
+            is_put=g["is_put"],
+            total_amount=str(g["total_amount"]),
+            total_premium_earned=str(g["total_premium_earned"]),
+            fill_count=g["fill_count"],
+        )
+        for g in groups.values()
+    ]
+
+
+@router.get(
+    "/exposure",
+    response_model=ExposureResponse,
+    summary="Get risk exposure",
+    tags=["MM Monitoring"],
+)
+async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
+    """Return aggregated risk summary for the MM."""
+    now_ts = int(time.time())
+    client = get_client()
+
+    try:
+        # Active quotes
+        quotes_result = (
+            client.table("mm_quotes")
+            .select("max_amount")
+            .eq("mm_address", mm_address.lower())
+            .eq("is_active", True)
+            .gt("deadline", now_ts)
+            .execute()
+        )
+        quotes = quotes_result.data or []
+        active_count = len(quotes)
+        active_notional = sum(
+            Decimal(str(q["max_amount"])) for q in quotes
+        )
+
+        # All fills for this MM
+        fills_result = (
+            client.table("order_events")
+            .select("expiry,amount,gross_premium,premium,is_settled")
+            .eq("mm_address", mm_address.lower())
+            .execute()
+        )
+        fills = fills_result.data or []
+    except Exception:
+        logger.exception("Failed to fetch exposure for %s", mm_address)
+        raise HTTPException(status_code=502, detail="Could not fetch exposure")
+
+    # Group open positions by expiry
+    expiry_buckets: dict[int, dict] = defaultdict(
+        lambda: {"count": 0, "amount": Decimal("0")}
+    )
+    total_premium = Decimal("0")
+    pending_settlement = 0
+
+    for f in fills:
+        prem = f.get("gross_premium") or f.get("premium", "0")
+        total_premium += Decimal(str(prem))
+
+        expiry = f.get("expiry")
+        if expiry and expiry > now_ts:
+            bucket = expiry_buckets[expiry]
+            bucket["count"] += 1
+            bucket["amount"] += Decimal(str(f["amount"]))
+
+        # Positions past expiry but not yet settled
+        if expiry and expiry <= now_ts and not f.get("is_settled"):
+            pending_settlement += 1
+
+    return ExposureResponse(
+        active_quotes_count=active_count,
+        active_quotes_notional=str(active_notional),
+        open_positions_by_expiry=[
+            ExpiryBucket(
+                expiry=exp,
+                position_count=b["count"],
+                total_amount=str(b["amount"]),
+            )
+            for exp, b in sorted(expiry_buckets.items())
+        ],
+        total_premium_earned=str(total_premium),
+        pending_settlement_count=pending_settlement,
+    )
+
+
+@router.get(
+    "/market",
+    response_model=MarketDataResponse,
+    summary="Get market data",
+    tags=["MM Monitoring"],
+)
+async def get_market(mm_address: str = Depends(require_mm_api_key)):
+    """Return market data for MM's pricing engine."""
+    try:
+        eth_spot, _ = get_eth_price()
+    except Exception:
+        logger.exception("Failed to fetch ETH spot price")
+        raise HTTPException(status_code=502, detail="Could not fetch ETH spot")
+
+    try:
+        iv = await get_eth_iv()
+    except Exception:
+        logger.exception("Failed to fetch ETH IV from Deribit")
+        raise HTTPException(status_code=502, detail="Could not fetch IV")
+
+    try:
+        w3 = get_w3()
+        gas_price_wei = w3.eth.gas_price
+        gas_price_gwei = gas_price_wei / 1e9
+    except Exception:
+        logger.exception("Failed to fetch gas price")
+        gas_price_gwei = 0.0
+
+    # Fetch available oTokens from active quotes
+    otokens: list[OTokenInfo] = []
+    now_ts = int(time.time())
+    try:
+        client = get_client()
+        result = (
+            client.table("mm_quotes")
+            .select("otoken_address,strike_price,expiry,is_put")
+            .eq("is_active", True)
+            .gt("deadline", now_ts)
+            .execute()
+        )
+        seen: set[str] = set()
+        for r in (result.data or []):
+            addr = r["otoken_address"]
+            if addr in seen:
+                continue
+            seen.add(addr)
+            if r.get("strike_price") and r.get("expiry") is not None:
+                otokens.append(OTokenInfo(
+                    address=addr,
+                    strike_price=float(r["strike_price"]),
+                    expiry=r["expiry"],
+                    is_put=r.get("is_put", False),
+                ))
+    except Exception:
+        logger.exception("Failed to fetch available oTokens")
+
+    return MarketDataResponse(
+        eth_spot=eth_spot,
+        eth_iv=iv,
+        protocol_fee_bps=settings.protocol_fee_bps,
+        gas_price_gwei=round(gas_price_gwei, 4),
+        available_otokens=otokens,
+    )
+
+
+def _ts_to_iso(ts: int) -> str:
+    """Convert unix timestamp to ISO 8601 string for Supabase gte filter."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _safe_float(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None

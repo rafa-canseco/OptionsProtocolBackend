@@ -52,6 +52,74 @@ class QuoteBatchResponse(BaseModel):
     errors: list[str] = Field(default_factory=list, description="Rejection reasons")
 
 
+class FillResponse(BaseModel):
+    """A single fill (OrderExecuted) for the MM."""
+
+    tx_hash: str
+    block_number: int
+    otoken_address: str
+    amount: str
+    gross_premium: str
+    net_premium: str
+    protocol_fee: str
+    collateral: str
+    user_address: str
+    vault_id: int
+    strike_price: float | None = None
+    expiry: int | None = None
+    is_put: bool | None = None
+    indexed_at: str
+
+
+class PositionGroup(BaseModel):
+    """Open positions grouped by oToken."""
+
+    otoken_address: str
+    strike_price: float
+    expiry: int
+    is_put: bool
+    total_amount: str
+    total_premium_earned: str
+    fill_count: int
+
+
+class ExpiryBucket(BaseModel):
+    """Positions grouped by expiry date."""
+
+    expiry: int
+    position_count: int
+    total_amount: str
+
+
+class ExposureResponse(BaseModel):
+    """Aggregated risk summary for the MM."""
+
+    active_quotes_count: int
+    active_quotes_notional: str
+    open_positions_by_expiry: list[ExpiryBucket]
+    total_premium_earned: str
+    pending_settlement_count: int
+
+
+class OTokenInfo(BaseModel):
+    """Available oToken metadata for pricing."""
+
+    address: str
+    strike_price: float
+    expiry: int
+    is_put: bool
+
+
+class MarketDataResponse(BaseModel):
+    """Market data for MM's pricing engine."""
+
+    eth_spot: float
+    eth_iv: float
+    protocol_fee_bps: int
+    gas_price_gwei: float
+    available_otokens: list[OTokenInfo]
+
+
 class QuoteResponse(BaseModel):
     """A single active quote as returned by GET /mm/quotes."""
 

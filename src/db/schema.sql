@@ -47,6 +47,7 @@ create table if not exists order_events (
   block_number bigint not null,
   log_index integer not null,
   user_address text not null,
+  mm_address text,
   otoken_address text not null,
   amount numeric not null,
   premium numeric not null,
@@ -64,6 +65,7 @@ create table if not exists order_events (
   indexed_at timestamptz not null default now()
 );
 
+create index if not exists idx_order_events_mm on order_events(mm_address);
 create index if not exists idx_order_events_user on order_events(user_address);
 create index if not exists idx_order_events_otoken on order_events(otoken_address);
 create index if not exists idx_order_events_block on order_events(block_number);

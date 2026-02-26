@@ -15,6 +15,7 @@ import logging
 from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
+from src.api.mm_ws import notify_mm_fill
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,7 @@ def _fetch_and_store_order_events(settler, from_block: int, to_block: int) -> in
             "block_number": ev.blockNumber,
             "log_index": ev.logIndex,
             "user_address": ev.args.user.lower(),
+            "mm_address": ev.args.mm.lower(),
             "otoken_address": ev.args.oToken.lower(),
             "amount": str(ev.args.amount),
             "premium": str(ev.args.grossPremium),
@@ -142,7 +144,20 @@ def _fetch_and_store_order_events(settler, from_block: int, to_block: int) -> in
         event_data = _enrich_with_otoken_metadata(event_data)
         events_to_store.append(event_data)
 
-    return _store_events(events_to_store)
+    stored = _store_events(events_to_store)
+
+    # Push fill notifications to connected WebSocket clients
+    for ev_data in events_to_store:
+        mm_addr = ev_data.get("mm_address")
+        if mm_addr:
+            try:
+                asyncio.get_event_loop().create_task(
+                    notify_mm_fill(mm_addr, ev_data)
+                )
+            except RuntimeError:
+                pass  # no event loop (e.g. tests)
+
+    return stored
 
 
 def _fetch_and_update_delivery_events(settler, from_block: int, to_block: int) -> int:
