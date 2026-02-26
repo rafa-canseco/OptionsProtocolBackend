@@ -116,10 +116,13 @@ def _sign_send_and_confirm(
 ) -> str:
     """Sign, send with nonce-retry, and wait for receipt. Returns tx hash hex.
 
-    Caller builds tx_dict with all fields except nonce and gasPrice,
-    which this function manages under the global nonce lock.
+    Caller builds tx_dict with all fields except nonce and EIP-1559 fee
+    fields, which this function manages under the global nonce lock.
+    Uses EIP-1559 (type 2) transactions — required on Base.
     """
-    base_gas_price = w3.eth.gas_price
+    latest_block = w3.eth.get_block("latest")
+    base_fee = latest_block.get("baseFeePerGas", 0)
+    priority_fee = w3.eth.max_priority_fee
     max_retries = 3
     forced_nonce: int | None = None
 
@@ -131,9 +134,12 @@ def _sign_send_and_confirm(
                 nonce = max(chain_nonce, tracked_nonce)
             else:
                 nonce = forced_nonce
-            gas_price = int(base_gas_price * (1.15 ** attempt))
+            bumped_priority = int(priority_fee * (1.15 ** attempt))
+            max_fee = int(base_fee * 2) + bumped_priority
             tx_dict["nonce"] = nonce
-            tx_dict["gasPrice"] = gas_price
+            tx_dict.pop("gasPrice", None)
+            tx_dict["maxPriorityFeePerGas"] = bumped_priority
+            tx_dict["maxFeePerGas"] = max_fee
             signed = account.sign_transaction(tx_dict)
             try:
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
@@ -142,19 +148,19 @@ def _sign_send_and_confirm(
                 if "replacement transaction underpriced" in str(e).lower() and attempt < max_retries - 1:
                     forced_nonce = nonce
                     logger.warning(
-                        f"Nonce {nonce} has stuck pending tx, retrying with bumped gas "
-                        f"(attempt {attempt + 1}/{max_retries}, gas_price={gas_price})"
+                        f"Nonce {nonce} has stuck pending tx, retrying with bumped fee "
+                        f"(attempt {attempt + 1}/{max_retries}, maxFee={max_fee})"
                     )
                     continue
                 logger.error(
-                    f"send_raw_transaction failed: nonce={nonce}, gas_price={gas_price}, "
+                    f"send_raw_transaction failed: nonce={nonce}, maxFee={max_fee}, "
                     f"attempt={attempt + 1}/{max_retries}, error={e}"
                 )
                 raise
         if attempt > 0:
             logger.info(
                 f"{label} sent after {attempt + 1} attempts: nonce={nonce}, "
-                f"gas_price={gas_price}, tx_hash={tx_hash.hex()}"
+                f"maxFee={max_fee}, tx_hash={tx_hash.hex()}"
             )
         break
     else:
