@@ -12,11 +12,12 @@ from src.bots.price_publisher import (
     SPREAD,
     ZERO_ADDRESS,
 )
+from src.config import settings
 from src.pricing.price_sheet import PriceQuote
 from src.pricing.black_scholes import OptionType
 
-WETH = "0x4200000000000000000000000000000000000006"
-USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+WETH = settings.weth_address
+USDC = settings.usdc_address
 
 
 def test_premium_to_usdc():
@@ -111,16 +112,20 @@ def _make_quote(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
     )
 
 
+@patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
-def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock_tx):
+def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """When oToken already exists, no creation tx is sent."""
     existing_addr = "0x1111111111111111111111111111111111111111"
     factory = MagicMock()
     factory.functions.getOToken.return_value.call.return_value = existing_addr
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
+    mock_wl.return_value = whitelist
 
     quotes = [_make_quote()]
     results = ensure_otokens_exist(quotes)
@@ -130,10 +135,11 @@ def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock
     mock_tx.assert_not_called()
 
 
+@patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
-def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx):
+def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """When oToken doesn't exist, createOToken is called and address is read back."""
     new_addr = "0x2222222222222222222222222222222222222222"
     factory = MagicMock()
@@ -143,6 +149,9 @@ def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
+    mock_wl.return_value = whitelist
 
     quotes = [_make_quote()]
     results = ensure_otokens_exist(quotes)
@@ -193,10 +202,11 @@ def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, 
     assert len(results) == 0  # quote skipped, not crash
 
 
+@patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
-def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_account, mock_tx):
+def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """If createOToken fails with OTokenAlreadyExists, reads existing address."""
     existing_addr = "0x4444444444444444444444444444444444444444"
     factory = MagicMock()
@@ -205,7 +215,12 @@ def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_accoun
     factory.functions.createOToken.return_value = MagicMock()
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
-    mock_tx.side_effect = RuntimeError("OTokenAlreadyExists")
+    # Only the create tx fails; whitelist tx succeeds
+    mock_tx.side_effect = [RuntimeError("OTokenAlreadyExists"), "0xwl_hash"]
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = False
+    whitelist.functions.whitelistOToken.return_value = MagicMock()
+    mock_wl.return_value = whitelist
 
     quotes = [_make_quote()]
     results = ensure_otokens_exist(quotes)
@@ -258,10 +273,11 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
     assert results[0][0] == addr1
 
 
+@patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
-def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account, mock_tx):
+def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """CALL options must use WETH as collateral."""
     new_addr = "0x6666666666666666666666666666666666666666"
     factory = MagicMock()
@@ -270,6 +286,9 @@ def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account,
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
+    mock_wl.return_value = whitelist
 
     quotes = [_make_quote(option_type=OptionType.CALL)]
     results = ensure_otokens_exist(quotes)
@@ -280,10 +299,11 @@ def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account,
     assert call_args[2] == Web3.to_checksum_address(WETH)
 
 
+@patch("src.bots.price_publisher.get_whitelist")
 @patch("src.bots.price_publisher.build_and_send_tx")
 @patch("src.bots.price_publisher.get_operator_account")
 @patch("src.bots.price_publisher.get_otoken_factory")
-def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, mock_tx):
+def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """PUT options must use USDC as collateral."""
     new_addr = "0x7777777777777777777777777777777777777777"
     factory = MagicMock()
@@ -292,6 +312,9 @@ def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, 
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
+    mock_wl.return_value = whitelist
 
     quotes = [_make_quote(option_type=OptionType.PUT)]
     results = ensure_otokens_exist(quotes)
