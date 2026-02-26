@@ -82,6 +82,7 @@ BATCH_SETTLER_ABI = [
         "inputs": [
             {"indexed": True, "name": "user", "type": "address"},
             {"indexed": True, "name": "oToken", "type": "address"},
+            {"indexed": True, "name": "mm", "type": "address"},
             {"indexed": False, "name": "amount", "type": "uint256"},
             {"indexed": False, "name": "grossPremium", "type": "uint256"},
             {"indexed": False, "name": "netPremium", "type": "uint256"},

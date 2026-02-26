@@ -9,6 +9,7 @@ from src.api.routes import router
 from src.api.results import router as results_router
 from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
+from src.api.mm_ws import router as mm_ws_router
 from src.config import settings
 
 logging.basicConfig(
@@ -61,6 +62,10 @@ openapi_tags = [
     {
         "name": "Market Making",
         "description": "MM quote management: submit, retrieve, and cancel EIP-712 signed quotes. Requires X-API-Key header.",
+    },
+    {
+        "name": "MM Monitoring",
+        "description": "MM monitoring: fills, open positions, risk exposure, market data, and real-time WebSocket notifications. Requires X-API-Key header.",
     },
     {
         "name": "Positions",
@@ -127,6 +132,7 @@ app.include_router(router)
 app.include_router(results_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)
+app.include_router(mm_ws_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
