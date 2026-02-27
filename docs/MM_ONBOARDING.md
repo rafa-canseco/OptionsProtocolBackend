@@ -37,7 +37,7 @@ b1nary is a fully-collateralized options protocol on Base. Users sell cash-secur
 5. In one transaction: user's collateral locks, oTokens mint to your wallet, and you pay premium in USDC.
 6. At expiry (weekly, 08:00 UTC), options settle automatically. OTM = collateral returns to user. ITM = physical delivery.
 
-**What you receive:** oTokens (ERC-20 option tokens). At expiry, you redeem them for the underlying asset (ITM) or they expire worthless (OTM).
+**What you receive:** oTokens (ERC-20 option tokens). At expiry, OTM oTokens expire worthless. ITM oTokens are consumed during physical delivery — the operator redeems your oTokens for the user's collateral (to repay a flash loan that delivers the contra-asset to the user).
 
 ---
 
@@ -563,7 +563,7 @@ User calls executeOrder(quote, signature, amount, collateral)
     ├─ 3. Verify deadline has not passed
     ├─ 4. Verify makerNonce matches on-chain
     ├─ 5. Check and update fill state (amount <= maxAmount - filledAmount)
-    ├─ 6. Calculate premium = (amount × bidPrice) / 1e8
+    ├─ 6. Compute total premium from signed quote: (amount × bidPrice) / 1e8
     ├─ 7. Open vault for user (Controller)
     ├─ 8. Lock user's collateral in MarginPool
     ├─ 9. Mint oTokens to MM's wallet
@@ -599,7 +599,7 @@ A single quote can be partially filled across multiple `executeOrder` calls. The
 
 ### Premium math
 
-All premium amounts use USDC units (6 decimals):
+The `bidPrice` in your signed quote is the per-oToken price (USDC, 6 decimals). It is fixed at signing time. At execution, the contract multiplies by the fill amount:
 
 ```
 grossPremium = (amount × bidPrice) / 1e8
@@ -607,7 +607,7 @@ protocolFee  = (grossPremium × 400) / 10000
 netPremium   = grossPremium - protocolFee
 ```
 
-The MM pays `grossPremium`. The user receives `netPremium`. The protocol takes `protocolFee` (4%).
+The MM pays `grossPremium`. The user receives `netPremium`. The protocol takes `protocolFee` (4%). The MM does not choose or influence the premium at execution time — it is fully determined by the signed quote.
 
 ---
 
@@ -677,7 +677,7 @@ Options expire weekly at **08:00 UTC**. Available expiry windows: 7, 14, and 30 
 
 2. **OTM outcome:** The user's collateral is returned. Your oTokens expire worthless (no value to redeem).
 
-3. **ITM outcome:** The user's collateral is held. You (or the operator) can redeem oTokens for the collateral, or physical delivery occurs (see [section 8](#8-physical-delivery)).
+3. **ITM outcome:** The user's collateral is held. The operator executes physical delivery: redeems your oTokens for the user's collateral, swaps it to repay a flash loan that delivers the contra-asset to the user (see [section 8](#8-physical-delivery)).
 
 ### batchRedeem
 
@@ -722,11 +722,11 @@ The operator calls `physicalRedeem` (or `batchPhysicalRedeem`). Under the hood:
 
 **Nothing.** Physical delivery is handled entirely by the operator. Your oTokens are consumed in the process, and you don't need to sign or approve anything beyond the initial USDC approval.
 
-### What the MM receives
+### What happens to the MM's oTokens
 
-After physical delivery, the trade is fully settled. For ITM puts, the user received ETH — your oTokens were the claim on the user's USDC collateral, which was swapped to ETH. For ITM calls, the reverse.
+During physical delivery, the operator redeems your oTokens for the user's locked collateral. That collateral is swapped on Uniswap to repay the Aave flash loan (which funded the contra-asset delivery to the user). Any surplus collateral after the swap goes to the operator, not the MM.
 
-The net effect: you paid premium to buy the option, and the option was exercised. Your P&L depends on the premium received vs. the intrinsic value at expiry.
+**Net effect for the MM:** Your oTokens are consumed. You do not receive additional assets at settlement. Your profit or loss on the trade is the premium you collected at execution time minus the intrinsic value of the option at expiry (which you implicitly paid by having your oTokens redeemed for the user's benefit).
 
 ---
 
@@ -736,7 +736,7 @@ The net effect: you paid premium to buy the option, and the option was exercised
 
 | Parameter | How |
 |-----------|-----|
-| **Bid price** | Set `bidPrice` in each quote. This is the premium users receive. |
+| **Bid price** | Set `bidPrice` in each quote. Fixed at signing time, multiplied by fill amount at execution. |
 | **Max size** | Set `maxAmount` per quote. Limits exposure per option. |
 | **Deadline** | Set `deadline` per quote. Short deadlines = less stale quote risk. |
 | **Strike selection** | Choose which oTokens to quote. You don't have to quote every strike. |
