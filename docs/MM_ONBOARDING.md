@@ -1,0 +1,820 @@
+# Market Maker Onboarding Guide
+
+Technical reference for integrating with the b1nary options protocol as a market maker.
+
+**Base URL:** `https://api.b1nary.app`
+**Chain:** Base Sepolia (chain ID `84532`)
+
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Authentication](#2-authentication)
+3. [EIP-712 Quote Signing](#3-eip-712-quote-signing)
+4. [API Endpoints](#4-api-endpoints)
+5. [On-chain Flow](#5-on-chain-flow)
+6. [makerNonce and Circuit Breaker](#6-makernonce-and-circuit-breaker)
+7. [Settlement](#7-settlement)
+8. [Physical Delivery](#8-physical-delivery)
+9. [Risk Parameters](#9-risk-parameters)
+10. [Contract Addresses](#10-contract-addresses)
+
+---
+
+## 1. Overview
+
+b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH and earn premium.
+
+**The MM's role:** You are the counterparty. You buy the options that users sell. When a user accepts a price, your signed quote is used on-chain to execute the trade atomically.
+
+**How it works:**
+
+1. You sign EIP-712 quotes off-chain (strike, premium, size, expiry).
+2. You submit quotes to the b1nary API.
+3. The API serves your best bids to users via `GET /prices`.
+4. When a user accepts, they call `executeOrder` on-chain with your signed quote.
+5. In one transaction: user's collateral locks, oTokens mint to your wallet, and you pay premium in USDC.
+6. At expiry (weekly, 08:00 UTC), options settle automatically. OTM = collateral returns to user. ITM = physical delivery.
+
+**What you receive:** oTokens (ERC-20 option tokens). At expiry, OTM oTokens expire worthless. ITM oTokens are consumed during physical delivery — the operator redeems your oTokens for the user's collateral (to repay a flash loan that delivers the contra-asset to the user).
+
+---
+
+## 2. Authentication
+
+All `/mm/*` endpoints require an API key in the `X-API-Key` header.
+
+```
+X-API-Key: your-api-key-here
+```
+
+Your API key is mapped to your Ethereum wallet address. All signature verification and position tracking is keyed to this address.
+
+**To get an API key:** Contact the b1nary team. We register your wallet address and issue a key. Your wallet must also be whitelisted on the BatchSettler contract (`setWhitelistedMM`).
+
+**Public endpoints** (`GET /prices`, `GET /positions/{address}`) do not require authentication.
+
+---
+
+## 3. EIP-712 Quote Signing
+
+Every quote you submit must be signed with EIP-712. The signature is verified both by the API (on submission) and by the BatchSettler contract (on execution).
+
+### Domain Separator
+
+```
+EIP712Domain(
+  string name,
+  string version,
+  uint256 chainId,
+  address verifyingContract
+)
+```
+
+| Field | Value |
+|-------|-------|
+| `name` | `"b1nary"` |
+| `version` | `"1"` |
+| `chainId` | `84532` (Base Sepolia) |
+| `verifyingContract` | `0xF87958fDE6F4D721b9C732DE79572E1937687eEF` (BatchSettler) |
+
+### Quote Struct
+
+```
+Quote(
+  address oToken,
+  uint256 bidPrice,
+  uint256 deadline,
+  uint256 quoteId,
+  uint256 maxAmount,
+  uint256 makerNonce
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `oToken` | `address` | oToken contract address (the specific option) |
+| `bidPrice` | `uint256` | Premium per oToken in USDC raw units (6 decimals). `1000000` = 1 USDC per oToken. |
+| `deadline` | `uint256` | Unix timestamp. Quote is invalid after this time. |
+| `quoteId` | `uint256` | Unique identifier per quote. Used for fill tracking and per-quote cancellation. |
+| `maxAmount` | `uint256` | Maximum oTokens fillable. 8 decimals: `100000000` = 1 ETH notional. |
+| `makerNonce` | `uint256` | Must match your current on-chain `makerNonce`. Read from `BatchSettler.makerNonce(yourAddress)`. |
+
+### Typehash
+
+```
+keccak256("Quote(address oToken,uint256 bidPrice,uint256 deadline,uint256 quoteId,uint256 maxAmount,uint256 makerNonce)")
+```
+
+### Python Signing Example
+
+```python
+from eth_account import Account
+from eth_account.messages import encode_typed_data
+
+DOMAIN = {
+    "name": "b1nary",
+    "version": "1",
+    "chainId": 84532,
+    "verifyingContract": "0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+}
+
+QUOTE_TYPES = {
+    "Quote": [
+        {"name": "oToken", "type": "address"},
+        {"name": "bidPrice", "type": "uint256"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "quoteId", "type": "uint256"},
+        {"name": "maxAmount", "type": "uint256"},
+        {"name": "makerNonce", "type": "uint256"},
+    ],
+}
+
+
+def sign_quote(private_key: str, quote: dict) -> str:
+    """Sign an EIP-712 quote. Returns hex signature."""
+    signable = encode_typed_data(
+        domain_data=DOMAIN,
+        message_types=QUOTE_TYPES,
+        message_data=quote,
+    )
+    signed = Account.sign_message(signable, private_key=private_key)
+    return "0x" + signed.signature.hex()
+
+
+# --- Example usage ---
+import time
+from web3 import Web3
+
+PRIVATE_KEY = "0x..."  # Your MM private key
+MM_ADDRESS = Account.from_key(PRIVATE_KEY).address
+API_KEY = "your-api-key"
+BASE_URL = "https://api.b1nary.app"
+
+# 1. Read your current makerNonce from chain
+w3 = Web3(Web3.HTTPProvider("https://sepolia.base.org"))
+SETTLER_ABI = [
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "makerNonce",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+settler = w3.eth.contract(
+    address="0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+    abi=SETTLER_ABI,
+)
+nonce = settler.functions.makerNonce(MM_ADDRESS).call()
+
+# 2. Build and sign a quote
+quote = {
+    "oToken": "0x...",           # oToken address for the option
+    "bidPrice": 5_000_000,       # 5 USDC premium per oToken
+    "deadline": int(time.time()) + 300,  # Valid for 5 minutes
+    "quoteId": 1,
+    "maxAmount": 1_00_000_000,   # 1 ETH notional (1e8)
+    "makerNonce": nonce,
+}
+signature = sign_quote(PRIVATE_KEY, quote)
+
+# 3. Submit to API
+import requests
+
+resp = requests.post(
+    f"{BASE_URL}/mm/quotes",
+    headers={"X-API-Key": API_KEY},
+    json={
+        "quotes": [
+            {
+                "otoken_address": quote["oToken"],
+                "bid_price": quote["bidPrice"],
+                "deadline": quote["deadline"],
+                "quote_id": quote["quoteId"],
+                "max_amount": quote["maxAmount"],
+                "maker_nonce": quote["makerNonce"],
+                "signature": signature,
+                # Optional metadata (for display only):
+                "strike_price": 2400.0,
+                "expiry": int(time.time()) + 7 * 86400,
+                "is_put": True,
+            }
+        ]
+    },
+)
+print(resp.json())
+# {"accepted": 1, "rejected": 0, "errors": []}
+```
+
+**Dependencies:** `pip install eth-account web3 requests`
+
+### JavaScript Signing Example
+
+```javascript
+import { ethers } from "ethers";
+
+const DOMAIN = {
+  name: "b1nary",
+  version: "1",
+  chainId: 84532,
+  verifyingContract: "0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+};
+
+const QUOTE_TYPES = {
+  Quote: [
+    { name: "oToken", type: "address" },
+    { name: "bidPrice", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+    { name: "quoteId", type: "uint256" },
+    { name: "maxAmount", type: "uint256" },
+    { name: "makerNonce", type: "uint256" },
+  ],
+};
+
+async function signQuote(signer, quote) {
+  return await signer.signTypedData(DOMAIN, QUOTE_TYPES, quote);
+}
+
+// Example usage
+const wallet = new ethers.Wallet("0x...");  // Your MM private key
+const quote = {
+  oToken: "0x...",
+  bidPrice: 5_000_000n,
+  deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
+  quoteId: 1n,
+  maxAmount: 100_000_000n,
+  makerNonce: 0n,  // Read from BatchSettler.makerNonce(yourAddress)
+};
+const signature = await signQuote(wallet, quote);
+```
+
+---
+
+## 4. API Endpoints
+
+### Quote Management (requires `X-API-Key`)
+
+#### `POST /mm/quotes` — Submit signed quotes
+
+Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the recovered signer must match the MM address associated with your API key.
+
+**Request body:**
+
+```json
+{
+  "quotes": [
+    {
+      "otoken_address": "0x...",
+      "bid_price": 5000000,
+      "deadline": 1740700000,
+      "quote_id": 1,
+      "max_amount": 100000000,
+      "maker_nonce": 0,
+      "signature": "0x...",
+      "strike_price": 2400.0,
+      "expiry": 1741200000,
+      "is_put": true
+    }
+  ]
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `otoken_address` | Yes | oToken contract address (checksummed or lowercase) |
+| `bid_price` | Yes | Premium per oToken, USDC raw (6 decimals). Must be >= 1 |
+| `deadline` | Yes | Unix timestamp. Must be in the future |
+| `quote_id` | Yes | Unique integer per quote (>= 0) |
+| `max_amount` | Yes | Max oTokens (8 decimals). Must be >= 1 |
+| `maker_nonce` | Yes | Must match on-chain `makerNonce` |
+| `signature` | Yes | EIP-712 signature, 0x-prefixed, 65 bytes (130 hex chars) |
+| `strike_price` | No | Strike in USD (for display) |
+| `expiry` | No | Expiry timestamp (for display) |
+| `is_put` | No | `true` for put, `false` for call (for display) |
+
+**Response:**
+
+```json
+{
+  "accepted": 1,
+  "rejected": 0,
+  "errors": []
+}
+```
+
+**Validation (per quote):**
+- `deadline` must be in the future
+- `maker_nonce` must match your current on-chain nonce
+- Signature must recover to the MM address associated with your API key
+
+**Batch size:** 1–100 quotes per request.
+
+**Upsert behavior:** Quotes are keyed by `(mm_address, quote_id)`. Submitting a new quote with the same `quote_id` replaces the previous one.
+
+---
+
+#### `GET /mm/quotes` — Retrieve active quotes
+
+Returns all your active, non-expired quotes.
+
+**Response:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "otoken_address": "0x...",
+    "bid_price": "5000000",
+    "deadline": 1740700000,
+    "quote_id": "1",
+    "max_amount": "100000000",
+    "maker_nonce": 0,
+    "signature": "0x...",
+    "strike_price": 2400.0,
+    "expiry": 1741200000,
+    "is_put": true,
+    "is_active": true,
+    "created_at": "2026-02-27T12:00:00Z"
+  }
+]
+```
+
+---
+
+#### `DELETE /mm/quotes` — Cancel all active quotes
+
+Sets `is_active=false` for all your quotes. The API immediately stops serving them in `GET /prices`.
+
+**Response:**
+
+```json
+{
+  "cancelled": 5
+}
+```
+
+**Important:** This only cancels quotes in the API database. On-chain, your signed quotes remain valid until:
+- The `deadline` passes, or
+- You call `incrementMakerNonce()` on BatchSettler (see [section 6](#6-makernonce-and-circuit-breaker)).
+
+To fully invalidate all outstanding quotes both off-chain and on-chain, call `DELETE /mm/quotes` *and* `incrementMakerNonce()`.
+
+---
+
+### Monitoring (requires `X-API-Key`)
+
+#### `GET /mm/fills` — Filled trades
+
+Returns trades executed against your quotes (indexed `OrderExecuted` events).
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `since` | `int` (optional) | Unix timestamp — only fills after this time |
+| `otoken` | `string` (optional) | Filter by oToken address |
+| `limit` | `int` (optional) | Max results, 1–1000. Default: 100 |
+
+**Response:**
+
+```json
+[
+  {
+    "tx_hash": "0x...",
+    "block_number": 12345678,
+    "otoken_address": "0x...",
+    "amount": "100000000",
+    "gross_premium": "5000000",
+    "net_premium": "4800000",
+    "protocol_fee": "200000",
+    "collateral": "2400000000",
+    "user_address": "0x...",
+    "vault_id": 1,
+    "strike_price": 2400.0,
+    "expiry": 1741200000,
+    "is_put": true,
+    "indexed_at": "2026-02-27T12:00:00Z"
+  }
+]
+```
+
+---
+
+#### `GET /mm/positions` — Open positions
+
+Returns your open positions (not yet expired), grouped by oToken.
+
+**Response:**
+
+```json
+[
+  {
+    "otoken_address": "0x...",
+    "strike_price": 2400.0,
+    "expiry": 1741200000,
+    "is_put": true,
+    "total_amount": "500000000",
+    "total_premium_earned": "25000000",
+    "fill_count": 5
+  }
+]
+```
+
+---
+
+#### `GET /mm/exposure` — Risk summary
+
+Aggregated view of your outstanding risk.
+
+**Response:**
+
+```json
+{
+  "active_quotes_count": 10,
+  "active_quotes_notional": "1000000000",
+  "open_positions_by_expiry": [
+    {
+      "expiry": 1741200000,
+      "position_count": 3,
+      "total_amount": "300000000"
+    }
+  ],
+  "total_premium_earned": "50000000",
+  "pending_settlement_count": 0
+}
+```
+
+---
+
+#### `GET /mm/market` — Market data
+
+Returns market data for your pricing engine.
+
+**Response:**
+
+```json
+{
+  "eth_spot": 2450.50,
+  "eth_iv": 0.65,
+  "protocol_fee_bps": 400,
+  "gas_price_gwei": 0.01,
+  "available_otokens": [
+    {
+      "address": "0x...",
+      "strike_price": 2400.0,
+      "expiry": 1741200000,
+      "is_put": true
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `eth_spot` | Current ETH/USD price from Chainlink |
+| `eth_iv` | Implied volatility from Deribit (annualized, decimal) |
+| `protocol_fee_bps` | Protocol fee in basis points (400 = 4%) |
+| `gas_price_gwei` | Current Base gas price |
+| `available_otokens` | oTokens with active quotes in the system |
+
+---
+
+### Public Endpoints (no auth)
+
+#### `GET /prices` — Best bids (price sheet)
+
+Returns the best bid for each oToken across all MMs. This is what users see.
+
+**Response:**
+
+```json
+[
+  {
+    "option_type": "put",
+    "strike": 2400.0,
+    "expiry_days": 7,
+    "premium": 4.80,
+    "spot": 2450.50,
+    "ttl": 280,
+    "expires_at": 1740700000.0,
+    "available_amount": 1.0,
+    "otoken_address": "0x...",
+    "signature": "0x...",
+    "mm_address": "0x...",
+    "bid_price_raw": 5000000,
+    "deadline": 1740700000,
+    "quote_id": "1",
+    "max_amount_raw": 100000000,
+    "maker_nonce": 0
+  }
+]
+```
+
+The `premium` field is the net premium after protocol fee (what the user receives). The `bid_price_raw` is your gross bid.
+
+Returns **503** if the circuit breaker is active (>2% ETH price move detected).
+
+**Cache:** Results are cached for 15 seconds.
+
+---
+
+#### `GET /positions/{address}` — Positions for a wallet
+
+Returns all positions for any Ethereum address. Useful for verifying your fills on-chain.
+
+**Response:**
+
+```json
+[
+  {
+    "tx_hash": "0x...",
+    "block_number": 12345678,
+    "otoken_address": "0x...",
+    "amount": "100000000",
+    "premium": "4800000",
+    "collateral": "2400000000",
+    "user_address": "0x...",
+    "vault_id": 1,
+    "strike_price": "2400",
+    "expiry": 1741200000,
+    "is_put": true,
+    "is_settled": false,
+    "is_itm": null,
+    "settlement_type": null,
+    "outcome": null,
+    "indexed_at": "2026-02-27T12:00:00Z"
+  }
+]
+```
+
+---
+
+## 5. On-chain Flow
+
+When a user accepts your quote, they call `executeOrder` on BatchSettler. Here is what happens in a single transaction:
+
+```
+User calls executeOrder(quote, signature, amount, collateral)
+    │
+    ├─ 1. Recover MM signer from EIP-712 signature
+    ├─ 2. Verify MM is whitelisted
+    ├─ 3. Verify deadline has not passed
+    ├─ 4. Verify makerNonce matches on-chain
+    ├─ 5. Check and update fill state (amount <= maxAmount - filledAmount)
+    ├─ 6. Compute total premium from signed quote: (amount × bidPrice) / 1e8
+    ├─ 7. Open vault for user (Controller)
+    ├─ 8. Lock user's collateral in MarginPool
+    ├─ 9. Mint oTokens to MM's wallet
+    └─ 10. Transfer premium:
+           grossPremium from MM → split into:
+             netPremium → user
+             protocolFee → treasury (4%)
+```
+
+### What the MM must do before any quote can execute
+
+**Approve USDC spending to BatchSettler.** When a user fills your quote, the contract calls `safeTransferFrom` to pull premium from your wallet. You must approve the BatchSettler contract to spend your USDC (the strike asset).
+
+```python
+# Approve BatchSettler to spend USDC
+usdc = w3.eth.contract(address=USDC_ADDRESS, abi=ERC20_ABI)
+tx = usdc.functions.approve(
+    BATCH_SETTLER_ADDRESS,
+    2**256 - 1,  # Max approval (or set a cap)
+).build_transaction({
+    "from": MM_ADDRESS,
+    "nonce": w3.eth.get_transaction_count(MM_ADDRESS),
+})
+signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+w3.eth.send_raw_transaction(signed.raw_transaction)
+```
+
+This is a one-time setup. Without this approval, all `executeOrder` calls using your quotes will revert.
+
+### Partial fills
+
+A single quote can be partially filled across multiple `executeOrder` calls. The contract tracks cumulative filled amount per quote (`quoteState`). If `filledAmount + amount > maxAmount`, the transaction reverts with `CapacityExceeded`.
+
+### Premium math
+
+The `bidPrice` in your signed quote is the per-oToken price (USDC, 6 decimals). It is fixed at signing time. At execution, the contract multiplies by the fill amount:
+
+```
+grossPremium = (amount × bidPrice) / 1e8
+protocolFee  = (grossPremium × 400) / 10000
+netPremium   = grossPremium - protocolFee
+```
+
+The MM pays `grossPremium`. The user receives `netPremium`. The protocol takes `protocolFee` (4%). The MM does not choose or influence the premium at execution time — it is fully determined by the signed quote.
+
+---
+
+## 6. makerNonce and Circuit Breaker
+
+### makerNonce
+
+Every quote you sign includes a `makerNonce` field. The contract maintains a per-MM nonce:
+
+```solidity
+mapping(address => uint256) public makerNonce;
+```
+
+During `executeOrder`, the contract checks `quote.makerNonce == makerNonce[mm]`. If they don't match, the transaction reverts with `StaleNonce`.
+
+### incrementMakerNonce — the panic button
+
+Calling `incrementMakerNonce()` on BatchSettler increments your nonce by 1. This instantly invalidates **every outstanding quote** you signed with the old nonce.
+
+```python
+settler = w3.eth.contract(
+    address=BATCH_SETTLER_ADDRESS,
+    abi=SETTLER_ABI,
+)
+tx = settler.functions.incrementMakerNonce().build_transaction({
+    "from": MM_ADDRESS,
+    "nonce": w3.eth.get_transaction_count(MM_ADDRESS),
+})
+signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+w3.eth.send_raw_transaction(signed.raw_transaction)
+```
+
+**When to use:**
+- Emergency: market moves sharply and you want to cancel everything instantly
+- Routine: rotating to a new set of quotes with a fresh nonce
+
+### Per-quote cancellation
+
+For surgical cancellation without invalidating all quotes:
+
+```solidity
+cancelQuote(bytes32 quoteHash)     // Cancel one quote
+cancelQuotes(bytes32[] quoteHashes) // Cancel multiple quotes
+```
+
+Compute `quoteHash` by calling `hashQuote(quote)` on the BatchSettler.
+
+### Automated circuit breaker
+
+The b1nary backend runs a circuit breaker bot that monitors ETH/USD via Chainlink every 10 seconds. If ETH moves more than 2% from a reference price:
+
+1. The bot calls `incrementMakerNonce()` for the protocol's own MM (if applicable).
+2. `GET /prices` returns **503** until the circuit breaker resets.
+3. Your quotes become unfillable via the API (users can't see them).
+
+**Your responsibility:** If you run your own circuit breaker logic, you can call `incrementMakerNonce()` independently. On-chain, your signed quotes remain valid until the nonce is incremented or the deadline passes — the API-level 503 does not invalidate on-chain signatures.
+
+---
+
+## 7. Settlement
+
+Options expire weekly at **08:00 UTC**. Available expiry windows: 7, 14, and 30 days.
+
+### Expiry flow
+
+1. **`batchSettleVaults`** (operator-only) — Called by the b1nary operator bot after expiry. Settles each vault: determines if the option is ITM or OTM based on the Oracle expiry price.
+
+2. **OTM outcome:** The user's collateral is returned. Your oTokens expire worthless (no value to redeem).
+
+3. **ITM outcome:** The user's collateral is held. The operator executes physical delivery: redeems your oTokens for the user's collateral, swaps it to repay a flash loan that delivers the contra-asset to the user (see [section 8](#8-physical-delivery)).
+
+### batchRedeem
+
+After settlement, oToken holders can redeem tokens for their payout:
+
+```solidity
+batchRedeem(address[] oTokens, uint256[] amounts)
+```
+
+This is permissionless — anyone holding oTokens can call it. Typically the operator handles this, but you can call it yourself if you prefer.
+
+### What the MM needs to do at expiry
+
+**Usually nothing.** The operator bot handles settlement and redemption automatically. Your oTokens will be redeemed and the payout (if any) sent to your wallet.
+
+If you want to self-redeem for faster settlement, call `batchRedeem` on BatchSettler after `batchSettleVaults` has run.
+
+---
+
+## 8. Physical Delivery
+
+ITM options settle via physical delivery. The user receives the contra-asset (the "other side" of the option) instead of a cash payout.
+
+### How it works
+
+| Option Type | Collateral (user locked) | ITM Delivery (user receives) |
+|-------------|--------------------------|------------------------------|
+| Put (ITM) | USDC | ETH (at strike price) |
+| Call (ITM) | WETH | USDC (at strike price) |
+
+### Mechanism
+
+The operator calls `physicalRedeem` (or `batchPhysicalRedeem`). Under the hood:
+
+1. Flash loan the contra-asset from Aave
+2. Deliver contra-asset to the user
+3. Redeem the MM's oTokens for collateral
+4. Swap collateral → contra-asset on Uniswap V3 to repay the flash loan
+5. Return any surplus collateral to the operator
+
+### What the MM needs to do
+
+**Nothing.** Physical delivery is handled entirely by the operator. Your oTokens are consumed in the process, and you don't need to sign or approve anything beyond the initial USDC approval.
+
+### What happens to the MM's oTokens
+
+During physical delivery, the operator redeems your oTokens for the user's locked collateral. That collateral is swapped on Uniswap to repay the Aave flash loan (which funded the contra-asset delivery to the user). Any surplus collateral after the swap goes to the operator, not the MM.
+
+**Net effect for the MM:** Your oTokens are consumed. You do not receive additional assets at settlement. Your profit or loss on the trade is the premium you collected at execution time minus the intrinsic value of the option at expiry (which you implicitly paid by having your oTokens redeemed for the user's benefit).
+
+---
+
+## 9. Risk Parameters
+
+### What you control
+
+| Parameter | How |
+|-----------|-----|
+| **Bid price** | Set `bidPrice` in each quote. Fixed at signing time, multiplied by fill amount at execution. |
+| **Max size** | Set `maxAmount` per quote. Limits exposure per option. |
+| **Deadline** | Set `deadline` per quote. Short deadlines = less stale quote risk. |
+| **Strike selection** | Choose which oTokens to quote. You don't have to quote every strike. |
+| **Quote cancellation** | `DELETE /mm/quotes` (API), `cancelQuote`/`cancelQuotes` (on-chain), or `incrementMakerNonce` (nuclear). |
+| **Quote refresh frequency** | Submit new quotes as often as you want. No rate limit on `/mm/quotes`. |
+
+### What you don't control
+
+| Parameter | Value | Set by |
+|-----------|-------|--------|
+| Protocol fee | 4% (400 bps) of gross premium | Protocol owner (max 20%) |
+| Collateral ratios | 100% (fully collateralized, no margin) | Protocol design |
+| Settlement timing | Weekly, 08:00 UTC | Operator bot |
+| Physical delivery execution | Aave flash loan + Uniswap swap | Operator bot |
+| oToken creation | Factory creates oTokens for each strike/expiry combo | OTokenFactory |
+| Circuit breaker threshold | 2% ETH price move | Backend config |
+
+### Decimal reference
+
+| Asset / Type | Decimals | Example |
+|--------------|----------|---------|
+| oToken amounts | 8 | `100000000` = 1 ETH notional |
+| Strike prices (on-chain) | 8 | `240000000000` = $2,400 |
+| USDC (bidPrice, premium) | 6 | `5000000` = 5 USDC |
+| WETH | 18 | `1000000000000000000` = 1 WETH |
+
+---
+
+## 10. Contract Addresses
+
+**Network:** Base Sepolia (chain ID `84532`)
+
+### Protocol Contracts (UUPS Proxies)
+
+| Contract | Address | BaseScan |
+|----------|---------|----------|
+| BatchSettler | `0xF87958fDE6F4D721b9C732DE79572E1937687eEF` | [View](https://sepolia.basescan.org/address/0xF87958fDE6F4D721b9C732DE79572E1937687eEF) |
+| Controller | `0x15945776Ff184e9798BC2505129e2E4f7f404D3F` | [View](https://sepolia.basescan.org/address/0x15945776Ff184e9798BC2505129e2E4f7f404D3F) |
+| MarginPool | `0x9193f3a8b875749d3d5e4342BB2BECb1B15dEbDf` | [View](https://sepolia.basescan.org/address/0x9193f3a8b875749d3d5e4342BB2BECb1B15dEbDf) |
+| OTokenFactory | `0x40A1CcA80b2E0408C72698e9a04777efe546bE0a` | [View](https://sepolia.basescan.org/address/0x40A1CcA80b2E0408C72698e9a04777efe546bE0a) |
+| Oracle | `0xea3Ae72b85C130798fdBFD23C817913cC884816f` | [View](https://sepolia.basescan.org/address/0xea3Ae72b85C130798fdBFD23C817913cC884816f) |
+| AddressBook | `0x87247F9378f966834Fc90fA38A4230d31786642f` | [View](https://sepolia.basescan.org/address/0x87247F9378f966834Fc90fA38A4230d31786642f) |
+| Whitelist | `0x43b512dA5b4938f4FE1B1Ae199Cd2324cA2478FC` | [View](https://sepolia.basescan.org/address/0x43b512dA5b4938f4FE1B1Ae199Cd2324cA2478FC) |
+
+### Mock Tokens (Testnet)
+
+| Token | Address | Decimals | BaseScan |
+|-------|---------|----------|----------|
+| LUSD (Mock USDC) | `0x7fC7F74e5ED3a4ff03eDc310919779DD59D9C17A` | 6 | [View](https://sepolia.basescan.org/address/0x7fC7F74e5ED3a4ff03eDc310919779DD59D9C17A) |
+| LETH (Mock WETH) | `0x45f3B57231bB03Ba7213a50FBe03f1B3De71412B` | 18 | [View](https://sepolia.basescan.org/address/0x45f3B57231bB03Ba7213a50FBe03f1B3De71412B) |
+
+### Key Addresses
+
+| Role | Address |
+|------|---------|
+| Operator (settlement bot) | `0x9386365F8c1aF88B4A7Bfb3DB71E5Fa6d1f20382` |
+
+All contracts are verified on BaseScan. ABIs are available from the verified source code.
+
+---
+
+## Appendix: Rate Limits and Operational Constraints
+
+| Endpoint | Rate Limit | Notes |
+|----------|-----------|-------|
+| `POST /mm/quotes` | None | Batch size capped at 100 quotes per request |
+| `GET /mm/quotes` | None | |
+| `DELETE /mm/quotes` | None | |
+| `GET /mm/fills` | None | Response capped at 1000 results via `limit` param |
+| `GET /mm/positions` | None | |
+| `GET /mm/exposure` | None | |
+| `GET /mm/market` | None | |
+| `GET /prices` | None | 15-second server-side cache |
+| `GET /positions/{address}` | None | |
+
+There are no rate limits on MM endpoints. You can refresh quotes as frequently as your pricing engine requires.
+
+**Operational notes:**
+- Submitting a quote with the same `quote_id` replaces the previous one (upsert on `mm_address + quote_id`).
+- Quotes with a past `deadline` are automatically filtered out of query results.
+- The `GET /prices` cache means user-facing prices update at most every 15 seconds.
