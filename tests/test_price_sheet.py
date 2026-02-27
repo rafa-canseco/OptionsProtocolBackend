@@ -1,4 +1,4 @@
-from src.pricing.price_sheet import generate_price_sheet, generate_strikes, PriceQuote
+from src.pricing.price_sheet import generate_price_sheet, generate_strikes
 
 
 def test_generate_strikes_centered():
@@ -17,12 +17,7 @@ def test_generate_strikes_spacing():
 def test_price_sheet_default_expiries():
     quotes = generate_price_sheet(spot=2000.0, iv=0.50)
     expiry_days = {q.expiry_days for q in quotes}
-    # Beta mode uses {15, 30, 60}; production uses {7, 14, 30}
-    from src.config import settings
-    if settings.beta_mode:
-        assert expiry_days == {15, 30, 60}
-    else:
-        assert expiry_days == {7, 14, 30}
+    assert expiry_days == {7, 14, 30}
 
 
 def test_price_sheet_both_types():
@@ -34,7 +29,7 @@ def test_price_sheet_both_types():
 def test_price_sheet_count():
     # 5 strikes × 3 expiries × 2 types = 30
     quotes = generate_price_sheet(spot=2000.0, iv=0.50)
-    assert len(quotes) == 30
+    assert len(quotes) == 5 * 3 * 2
 
 
 def test_price_sheet_premiums_positive():
@@ -54,3 +49,14 @@ def test_price_sheet_custom_expiries():
     quotes = generate_price_sheet(spot=2000.0, iv=0.50, expiry_days=[1, 3])
     expiry_days = {q.expiry_days for q in quotes}
     assert expiry_days == {1, 3}
+
+
+def test_7d_expiry_premiums_positive():
+    """7d options should produce valid (positive) premiums at realistic IV."""
+    quotes = generate_price_sheet(
+        spot=2500.0, iv=0.80, expiry_days=[7], num_strikes=5
+    )
+    assert len(quotes) == 10  # 5 strikes × 2 types
+    for q in quotes:
+        assert q.expiry_days == 7
+        assert q.premium >= 0
