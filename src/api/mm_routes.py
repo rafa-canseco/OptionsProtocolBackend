@@ -431,31 +431,24 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    # Fetch available oTokens from active quotes
+    # Fetch available oTokens created by the otoken_manager
     otokens: list[OTokenInfo] = []
     now_ts = int(time.time())
     try:
         client = get_client()
         result = (
-            client.table("mm_quotes")
+            client.table("available_otokens")
             .select("otoken_address,strike_price,expiry,is_put")
-            .eq("is_active", True)
-            .gt("deadline", now_ts)
+            .gt("expiry", now_ts)
             .execute()
         )
-        seen: set[str] = set()
         for r in (result.data or []):
-            addr = r["otoken_address"]
-            if addr in seen:
-                continue
-            seen.add(addr)
-            if r.get("strike_price") and r.get("expiry") is not None:
-                otokens.append(OTokenInfo(
-                    address=addr,
-                    strike_price=float(r["strike_price"]),
-                    expiry=r["expiry"],
-                    is_put=r.get("is_put", False),
-                ))
+            otokens.append(OTokenInfo(
+                address=r["otoken_address"],
+                strike_price=float(r["strike_price"]),
+                expiry=r["expiry"],
+                is_put=r["is_put"],
+            ))
     except Exception:
         logger.exception("Failed to fetch available oTokens")
 

@@ -2,7 +2,7 @@
 Standalone bot runner.
 
 Usage:
-    uv run python -m src.bots.runner price_publisher
+    uv run python -m src.bots.runner otoken_manager
     uv run python -m src.bots.runner event_indexer
     uv run python -m src.bots.runner expiry_settler
     uv run python -m src.bots.runner circuit_breaker
@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 
 BOTS = {
-    "price_publisher": "src.bots.price_publisher",
+    "otoken_manager": "src.bots.otoken_manager",
     "event_indexer": "src.bots.event_indexer",
     "expiry_settler": "src.bots.expiry_settler",
     "circuit_breaker": "src.bots.circuit_breaker_bot",
@@ -28,9 +28,15 @@ BOTS = {
 
 async def main(bot_name: str):
     if bot_name == "all":
-        from src.bots import price_publisher, event_indexer, expiry_settler, circuit_breaker_bot, weekly_aggregator
+        from src.bots import (
+            otoken_manager,
+            event_indexer,
+            expiry_settler,
+            circuit_breaker_bot,
+            weekly_aggregator,
+        )
         await asyncio.gather(
-            price_publisher.run(),
+            otoken_manager.run(),
             event_indexer.run(),
             expiry_settler.run(),
             circuit_breaker_bot.run(),

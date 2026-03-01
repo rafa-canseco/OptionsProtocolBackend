@@ -26,13 +26,13 @@ async def lifespan(app: FastAPI):
 
     if settings.batch_settler_address and settings.operator_private_key:
         from src.bots import (
-            price_publisher,
+            otoken_manager,
             event_indexer,
             expiry_settler,
             circuit_breaker_bot,
         )
 
-        tasks.append(asyncio.create_task(price_publisher.run()))
+        tasks.append(asyncio.create_task(otoken_manager.run()))
         tasks.append(asyncio.create_task(event_indexer.run()))
         if not settings.beta_mode:
             tasks.append(asyncio.create_task(expiry_settler.run()))

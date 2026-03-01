@@ -3,12 +3,14 @@ from unittest.mock import patch, MagicMock
 
 from web3 import Web3
 
-from src.bots.price_publisher import (
+from src.bots.otoken_manager import (
+    ensure_otokens_exist,
+    ZERO_ADDRESS,
+)
+from src.pricing.utils import (
     premium_to_usdc,
     strike_to_8_decimals,
     expiry_days_to_timestamp,
-    ensure_otokens_exist,
-    ZERO_ADDRESS,
 )
 from src.config import settings
 from src.pricing.price_sheet import PriceQuote
@@ -81,10 +83,10 @@ def _setup_factory_mock(target_addr, exists=True):
     return factory
 
 
-@patch("src.bots.price_publisher.get_whitelist")
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """When oToken already exists, no creation tx is sent."""
     existing_addr = "0x1111111111111111111111111111111111111111"
@@ -103,10 +105,10 @@ def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock
     mock_tx.assert_not_called()
 
 
-@patch("src.bots.price_publisher.get_whitelist")
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """When oToken doesn't exist, createOToken is called."""
     new_addr = "0x2222222222222222222222222222222222222222"
@@ -127,9 +129,9 @@ def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx
     mock_tx.assert_called_once()
 
 
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
     """Two quotes with same (strike, expiry, type) should only do one lookup."""
     existing_addr = "0x3333333333333333333333333333333333333333"
@@ -147,9 +149,9 @@ def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
     assert factory.functions.getTargetOTokenAddress.return_value.call.call_count == 1
 
 
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, mock_tx):
     """If createOToken fails and oToken doesn't exist, quote is skipped."""
     factory = _setup_factory_mock(
@@ -167,10 +169,10 @@ def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, 
     assert len(results) == 0  # quote skipped, not crash
 
 
-@patch("src.bots.price_publisher.get_whitelist")
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """If createOToken fails with OTokenAlreadyExists, reads existing address."""
     existing_addr = "0x4444444444444444444444444444444444444444"
@@ -193,9 +195,9 @@ def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_accoun
     assert results[0][0] == existing_addr
 
 
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_rejects_zero_address_after_creation(mock_factory_fn, mock_account, mock_tx):
     """If getTargetOTokenAddress returns zero after creation, quote is skipped."""
     factory = _setup_factory_mock(ZERO_ADDRESS, exists=False)
@@ -209,9 +211,9 @@ def test_ensure_otokens_rejects_zero_address_after_creation(mock_factory_fn, moc
     assert len(results) == 0  # zero address rejected
 
 
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
     """One quote failing doesn't prevent others from succeeding."""
     addr1 = "0x5555555555555555555555555555555555555555"
@@ -236,10 +238,10 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
     assert results[0][0] == addr1
 
 
-@patch("src.bots.price_publisher.get_whitelist")
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """CALL options must use WETH as collateral."""
     new_addr = "0x6666666666666666666666666666666666666666"
@@ -260,10 +262,10 @@ def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account,
     assert call_args[2] == Web3.to_checksum_address(WETH)
 
 
-@patch("src.bots.price_publisher.get_whitelist")
-@patch("src.bots.price_publisher.build_and_send_tx")
-@patch("src.bots.price_publisher.get_operator_account")
-@patch("src.bots.price_publisher.get_otoken_factory")
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
 def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, mock_tx, mock_wl):
     """PUT options must use USDC as collateral."""
     new_addr = "0x7777777777777777777777777777777777777777"
