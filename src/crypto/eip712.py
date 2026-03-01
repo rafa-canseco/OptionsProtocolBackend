@@ -66,9 +66,16 @@ def sign_quote(
     quote_id: int,
     max_amount: int,
     maker_nonce: int,
+    domain: dict | None = None,
 ) -> str:
-    """Sign a quote with EIP-712 and return the hex signature."""
-    domain = get_domain()
+    """Sign a quote with EIP-712 and return the hex signature.
+
+    Args:
+        domain: EIP-712 domain dict. If None, uses get_domain()
+            (requires settings.batch_settler_address to be set).
+    """
+    if domain is None:
+        domain = get_domain()
     message = _build_quote_message(
         otoken, bid_price, deadline, quote_id, max_amount, maker_nonce
     )
@@ -89,9 +96,16 @@ def recover_quote_signer(
     max_amount: int,
     maker_nonce: int,
     signature: str,
+    domain: dict | None = None,
 ) -> str:
-    """Recover the signer address from an EIP-712 quote signature."""
-    domain = get_domain()
+    """Recover the signer address from an EIP-712 quote signature.
+
+    Args:
+        domain: EIP-712 domain dict. If None, uses get_domain()
+            (requires settings.batch_settler_address to be set).
+    """
+    if domain is None:
+        domain = get_domain()
     message = _build_quote_message(
         otoken, bid_price, deadline, quote_id, max_amount, maker_nonce
     )

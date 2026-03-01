@@ -12,6 +12,7 @@ Monitoring:
   GET /mm/exposure  — aggregated risk summary
   GET /mm/market    — market data for pricing engine
 """
+
 import logging
 import time
 from collections import defaultdict
@@ -71,7 +72,9 @@ async def submit_quotes(
         ).call()
     except Exception:
         logger.exception("Failed to read makerNonce for %s", mm_address)
-        raise HTTPException(status_code=502, detail="Could not read on-chain makerNonce")
+        raise HTTPException(
+            status_code=502, detail="Could not read on-chain makerNonce"
+        )
 
     rows_to_upsert = []
 
@@ -110,7 +113,9 @@ async def submit_quotes(
         if recovered.lower() != mm_address.lower():
             logger.warning(
                 "%s: signer mismatch (recovered %s, expected %s)",
-                label, recovered, mm_address,
+                label,
+                recovered,
+                mm_address,
             )
             errors.append(f"{label}: signature does not match authenticated MM address")
             continue
@@ -294,7 +299,7 @@ async def get_positions(mm_address: str = Depends(require_mm_api_key)):
         raise HTTPException(status_code=502, detail="Could not fetch positions")
 
     groups: dict[str, dict] = {}
-    for r in (result.data or []):
+    for r in result.data or []:
         key = r["otoken_address"]
         if key not in groups:
             groups[key] = {
@@ -308,9 +313,7 @@ async def get_positions(mm_address: str = Depends(require_mm_api_key)):
             }
         g = groups[key]
         g["total_amount"] += Decimal(str(r["amount"]))
-        g["total_premium_earned"] += Decimal(
-            str(r.get("gross_premium", r["premium"]))
-        )
+        g["total_premium_earned"] += Decimal(str(r.get("gross_premium", r["premium"])))
         g["fill_count"] += 1
 
     return [
@@ -350,9 +353,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
         )
         quotes = quotes_result.data or []
         active_count = len(quotes)
-        active_notional = sum(
-            Decimal(str(q["max_amount"])) for q in quotes
-        )
+        active_notional = sum(Decimal(str(q["max_amount"])) for q in quotes)
 
         # All fills for this MM
         fills_result = (
@@ -431,33 +432,29 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    # Fetch available oTokens from active quotes
+    # Fetch available oTokens created by the otoken_manager
     otokens: list[OTokenInfo] = []
     now_ts = int(time.time())
     try:
         client = get_client()
         result = (
-            client.table("mm_quotes")
+            client.table("available_otokens")
             .select("otoken_address,strike_price,expiry,is_put")
-            .eq("is_active", True)
-            .gt("deadline", now_ts)
+            .gt("expiry", now_ts)
             .execute()
         )
-        seen: set[str] = set()
-        for r in (result.data or []):
-            addr = r["otoken_address"]
-            if addr in seen:
-                continue
-            seen.add(addr)
-            if r.get("strike_price") and r.get("expiry") is not None:
-                otokens.append(OTokenInfo(
-                    address=addr,
+        for r in result.data or []:
+            otokens.append(
+                OTokenInfo(
+                    address=r["otoken_address"],
                     strike_price=float(r["strike_price"]),
                     expiry=r["expiry"],
-                    is_put=r.get("is_put", False),
-                ))
+                    is_put=r["is_put"],
+                )
+            )
     except Exception:
         logger.exception("Failed to fetch available oTokens")
+        raise HTTPException(status_code=502, detail="Could not fetch available oTokens")
 
     return MarketDataResponse(
         eth_spot=eth_spot,
@@ -471,6 +468,7 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
 def _ts_to_iso(ts: int) -> str:
     """Convert unix timestamp to ISO 8601 string for Supabase gte filter."""
     from datetime import datetime, timezone
+
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
