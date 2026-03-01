@@ -97,19 +97,18 @@ def _find_or_create_otoken(
     return otoken_addr
 
 
-def _whitelist_otoken(otoken_addr: str, account, label: str) -> bool:
-    """Ensure an oToken is whitelisted. Returns False on failure."""
+def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
+    """Ensure an oToken is whitelisted. Raises on failure."""
     if not settings.whitelist_address:
-        return True
+        return
 
     whitelist = get_whitelist()
     if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
-        return True
+        return
 
     tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
     wl_hash = build_and_send_tx(tx_fn, account)
     logger.info("Whitelisted oToken %s, tx: %s", otoken_addr, wl_hash)
-    return True
 
 
 def ensure_otokens_exist(
@@ -168,9 +167,7 @@ def ensure_otokens_exist(
             continue
 
         try:
-            if not _whitelist_otoken(otoken_addr, account, label):
-                seen[key] = None
-                continue
+            _whitelist_otoken(otoken_addr, account, label)
         except Exception:
             logger.exception(
                 "Failed to whitelist %s: %s. Excluding.",
