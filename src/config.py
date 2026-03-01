@@ -22,16 +22,11 @@ class Settings(BaseSettings):
 
     # Pricing defaults
     risk_free_rate: float = 0.05  # 5% annualized
-    price_ttl_seconds: int = 30  # how long a quoted price is valid
 
     # Bot intervals
-    price_publish_interval_seconds: int = 300  # 5 minutes
+    otoken_publish_interval_seconds: int = 300  # 5 minutes
     event_poll_interval_seconds: int = 30
     circuit_breaker_poll_seconds: int = 10
-
-    # Quote settings
-    quote_deadline_seconds: int = 1800  # 30 min deadline for on-chain quotes
-    default_max_amount_wei: int = 1_000_000_000_000_000_000_000  # 1000 ETH in wei
 
     # Circuit breaker
     circuit_breaker_threshold: float = 0.02  # 2% move triggers pause

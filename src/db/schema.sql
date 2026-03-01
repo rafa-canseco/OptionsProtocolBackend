@@ -175,3 +175,17 @@ create table if not exists mm_api_keys (
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+-- ============================================================
+-- Available oTokens (populated by otoken_manager bot)
+-- ============================================================
+
+create table if not exists available_otokens (
+  id uuid primary key default gen_random_uuid(),
+  otoken_address text not null unique,
+  strike_price numeric not null,
+  expiry bigint not null,
+  is_put boolean not null,
+  collateral_asset text not null,
+  created_at timestamptz not null default now()
+);
