@@ -477,7 +477,7 @@ Returns market data for your pricing engine.
 | `eth_iv` | Implied volatility from Deribit (annualized, decimal) |
 | `protocol_fee_bps` | Protocol fee in basis points (400 = 4%) |
 | `gas_price_gwei` | Current Base gas price |
-| `available_otokens` | oTokens with active quotes in the system |
+| `available_otokens` | oTokens created on-chain by the platform, available for quoting |
 
 ---
 
