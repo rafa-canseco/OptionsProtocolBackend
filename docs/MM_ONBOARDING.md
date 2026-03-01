@@ -77,7 +77,7 @@ EIP712Domain(
 | `name` | `"b1nary"` |
 | `version` | `"1"` |
 | `chainId` | `84532` (Base Sepolia) |
-| `verifyingContract` | `0xF87958fDE6F4D721b9C732DE79572E1937687eEF` (BatchSettler) |
+| `verifyingContract` | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` (BatchSettler) |
 
 ### Quote Struct
 
@@ -117,7 +117,7 @@ DOMAIN = {
     "name": "b1nary",
     "version": "1",
     "chainId": 84532,
-    "verifyingContract": "0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+    "verifyingContract": "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
 }
 
 QUOTE_TYPES = {
@@ -164,7 +164,7 @@ SETTLER_ABI = [
     }
 ]
 settler = w3.eth.contract(
-    address="0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+    address="0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
     abi=SETTLER_ABI,
 )
 nonce = settler.functions.makerNonce(MM_ADDRESS).call()
@@ -219,7 +219,7 @@ const DOMAIN = {
   name: "b1nary",
   version: "1",
   chainId: 84532,
-  verifyingContract: "0xF87958fDE6F4D721b9C732DE79572E1937687eEF",
+  verifyingContract: "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
 };
 
 const QUOTE_TYPES = {
@@ -773,20 +773,20 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 
 | Contract | Address | BaseScan |
 |----------|---------|----------|
-| BatchSettler | `0xF87958fDE6F4D721b9C732DE79572E1937687eEF` | [View](https://sepolia.basescan.org/address/0xF87958fDE6F4D721b9C732DE79572E1937687eEF) |
-| Controller | `0x15945776Ff184e9798BC2505129e2E4f7f404D3F` | [View](https://sepolia.basescan.org/address/0x15945776Ff184e9798BC2505129e2E4f7f404D3F) |
-| MarginPool | `0x9193f3a8b875749d3d5e4342BB2BECb1B15dEbDf` | [View](https://sepolia.basescan.org/address/0x9193f3a8b875749d3d5e4342BB2BECb1B15dEbDf) |
-| OTokenFactory | `0x40A1CcA80b2E0408C72698e9a04777efe546bE0a` | [View](https://sepolia.basescan.org/address/0x40A1CcA80b2E0408C72698e9a04777efe546bE0a) |
-| Oracle | `0xea3Ae72b85C130798fdBFD23C817913cC884816f` | [View](https://sepolia.basescan.org/address/0xea3Ae72b85C130798fdBFD23C817913cC884816f) |
-| AddressBook | `0x87247F9378f966834Fc90fA38A4230d31786642f` | [View](https://sepolia.basescan.org/address/0x87247F9378f966834Fc90fA38A4230d31786642f) |
-| Whitelist | `0x43b512dA5b4938f4FE1B1Ae199Cd2324cA2478FC` | [View](https://sepolia.basescan.org/address/0x43b512dA5b4938f4FE1B1Ae199Cd2324cA2478FC) |
+| BatchSettler | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` | [View](https://sepolia.basescan.org/address/0x29bb32c014aC3378FfbE335804B94cED48f2afc4) |
+| Controller | `0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e` | [View](https://sepolia.basescan.org/address/0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e) |
+| MarginPool | `0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44` | [View](https://sepolia.basescan.org/address/0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44) |
+| OTokenFactory | `0x29f897775ccFcFc7382929e0EC9580756041E4FE` | [View](https://sepolia.basescan.org/address/0x29f897775ccFcFc7382929e0EC9580756041E4FE) |
+| Oracle | `0x7843A0b0288DeEceCef333b8764342eA4Fc439D9` | [View](https://sepolia.basescan.org/address/0x7843A0b0288DeEceCef333b8764342eA4Fc439D9) |
+| AddressBook | `0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3` | [View](https://sepolia.basescan.org/address/0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3) |
+| Whitelist | `0xe188f203650425AcFF343bD64F7FF5bd8c89AB43` | [View](https://sepolia.basescan.org/address/0xe188f203650425AcFF343bD64F7FF5bd8c89AB43) |
 
 ### Mock Tokens (Testnet)
 
 | Token | Address | Decimals | BaseScan |
 |-------|---------|----------|----------|
-| LUSD (Mock USDC) | `0x7fC7F74e5ED3a4ff03eDc310919779DD59D9C17A` | 6 | [View](https://sepolia.basescan.org/address/0x7fC7F74e5ED3a4ff03eDc310919779DD59D9C17A) |
-| LETH (Mock WETH) | `0x45f3B57231bB03Ba7213a50FBe03f1B3De71412B` | 18 | [View](https://sepolia.basescan.org/address/0x45f3B57231bB03Ba7213a50FBe03f1B3De71412B) |
+| LUSD (Mock USDC) | `0x5A2972d3390ABe3E57010272c8032BfC84E2077b` | 6 | [View](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b) |
+| LETH (Mock WETH) | `0x8C259D169378B705ae62AA697F3233C8dc3774Da` | 18 | [View](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da) |
 
 ### Key Addresses
 

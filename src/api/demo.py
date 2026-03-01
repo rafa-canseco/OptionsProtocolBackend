@@ -228,31 +228,13 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
     already_set = await asyncio.to_thread(
         oracle.functions.getExpiryPrice(weth, expiry).call,
     )
-    needs_reset = already_set[1] and already_set[0] != oracle_price_8dec
-    needs_set = not already_set[1] or needs_reset
+    needs_set = not already_set[1]
 
-    if needs_reset:
-        # force_itm needs a different price — reset first (beta mode only)
-        try:
-            logger.info(
-                f"Resetting Oracle price for expiry {expiry} "
-                f"(locked={already_set[0]}, wanted={oracle_price_8dec})"
-            )
-            tx_fn = oracle.functions.resetExpiryPrice(weth, expiry)
-            await asyncio.to_thread(build_and_send_tx, tx_fn, account)
-
-            # Wait for reset to propagate before setting new price
-            await _wait_for_rpc(
-                oracle.functions.getExpiryPrice(weth, expiry).call,
-                lambda r: not r[1],  # isFinalized == False
-                "Oracle reset propagation",
-            )
-            logger.info(f"Oracle price reset confirmed for expiry {expiry}")
-        except HTTPException:
-            raise
-        except Exception:
-            logger.exception("Failed to reset Oracle expiry price")
-            raise HTTPException(500, "Failed to reset Oracle expiry price")
+    if already_set[1] and already_set[0] != oracle_price_8dec:
+        logger.warning(
+            f"Oracle price already set to {already_set[0]} for expiry {expiry}, "
+            f"wanted {oracle_price_8dec}. Price cannot be changed after being set."
+        )
 
     if needs_set:
         try:

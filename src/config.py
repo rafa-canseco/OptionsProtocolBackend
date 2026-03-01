@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     usdc_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 
     # Contract addresses (set after deployment)
-    price_sheet_address: str = ""
     batch_settler_address: str = ""
     controller_address: str = ""
     otoken_factory_address: str = ""

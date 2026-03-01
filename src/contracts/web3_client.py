@@ -7,7 +7,6 @@ from eth_account import Account
 
 from src.config import settings
 from src.contracts.abis import (
-    PRICE_SHEET_ABI,
     BATCH_SETTLER_ABI,
     OTOKEN_FACTORY_ABI,
     OTOKEN_ABI,
@@ -33,14 +32,6 @@ def get_w3() -> Web3:
 
 def get_operator_account() -> Account:
     return Account.from_key(settings.operator_private_key)
-
-
-def get_price_sheet() -> Contract:
-    w3 = get_w3()
-    return w3.eth.contract(
-        address=Web3.to_checksum_address(settings.price_sheet_address),
-        abi=PRICE_SHEET_ABI,
-    )
 
 
 def get_batch_settler() -> Contract:
