@@ -3,6 +3,7 @@
 Pure functions with zero settings dependencies. Used by the
 otoken_manager bot for on-chain oToken creation.
 """
+
 from datetime import datetime, timezone, timedelta
 
 STRIKE_DECIMALS = 8
@@ -11,9 +12,10 @@ STRIKE_DECIMALS = 8
 def strike_to_8_decimals(strike_usd: float) -> int:
     """Convert a strike price in USD to 8-decimal integer.
 
+    Uses round() to avoid float truncation errors.
     e.g. $2000 -> 200000000000
     """
-    return int(strike_usd * 10**STRIKE_DECIMALS)
+    return round(strike_usd * 10**STRIKE_DECIMALS)
 
 
 def expiry_days_to_timestamp(days: int) -> int:

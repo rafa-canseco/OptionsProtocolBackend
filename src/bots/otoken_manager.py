@@ -6,40 +6,120 @@ external MMs can discover them via GET /mm/market.
 
 Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 """
+
 import asyncio
 import logging
 
 from web3 import Web3
 
 from src.config import settings
-from src.db.database import get_client
-from src.pricing.chainlink import get_eth_price
-from src.pricing.price_sheet import generate_otoken_specs, OTokenSpec
-from src.pricing.black_scholes import OptionType
-from src.pricing.utils import strike_to_8_decimals, expiry_days_to_timestamp
 from src.contracts.web3_client import (
+    build_and_send_tx,
+    get_operator_account,
     get_otoken_factory,
     get_whitelist,
-    get_operator_account,
-    build_and_send_tx,
 )
+from src.db.database import get_client
+from src.pricing.black_scholes import OptionType
+from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
+from src.pricing.utils import expiry_days_to_timestamp, strike_to_8_decimals
+from src.pricing.chainlink import get_eth_price
 
 logger = logging.getLogger(__name__)
 
-OTOKEN_DECIMALS = 8
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
+def _find_or_create_otoken(
+    factory,
+    account,
+    weth: str,
+    usdc: str,
+    collateral: str,
+    strike_price: int,
+    expiry: int,
+    is_put: bool,
+    label: str,
+) -> str | None:
+    """Find an existing oToken or create a new one.
+
+    Returns the oToken address, or None if creation failed.
+    """
+    target_addr = factory.functions.getTargetOTokenAddress(
+        weth, usdc, collateral, strike_price, expiry, is_put
+    ).call()
+
+    if factory.functions.isOToken(target_addr).call():
+        logger.debug("oToken exists: %s -> %s", label, target_addr)
+        return target_addr
+
+    logger.info("Creating oToken: %s", label)
+    try:
+        tx_fn = factory.functions.createOToken(
+            weth,
+            usdc,
+            collateral,
+            strike_price,
+            expiry,
+            is_put,
+        )
+        tx_hash = build_and_send_tx(tx_fn, account)
+        logger.info("oToken created, tx: %s", tx_hash)
+    except Exception as create_err:
+        # Race condition: another process may have created it
+        if factory.functions.isOToken(target_addr).call():
+            logger.info(
+                "oToken already existed (race): %s -> %s",
+                label,
+                target_addr,
+            )
+            return target_addr
+        raise RuntimeError(f"Failed to create oToken: {label}") from create_err
+
+    otoken_addr = factory.functions.getTargetOTokenAddress(
+        weth,
+        usdc,
+        collateral,
+        strike_price,
+        expiry,
+        is_put,
+    ).call()
+
+    if otoken_addr == ZERO_ADDRESS:
+        logger.error(
+            "oToken tx succeeded (%s) but address is zero: %s",
+            tx_hash,
+            label,
+        )
+        return None
+
+    logger.info("oToken address resolved: %s -> %s", label, otoken_addr)
+    return otoken_addr
+
+
+def _whitelist_otoken(otoken_addr: str, account, label: str) -> bool:
+    """Ensure an oToken is whitelisted. Returns False on failure."""
+    if not settings.whitelist_address:
+        return True
+
+    whitelist = get_whitelist()
+    if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
+        return True
+
+    tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
+    wl_hash = build_and_send_tx(tx_fn, account)
+    logger.info("Whitelisted oToken %s, tx: %s", otoken_addr, wl_hash)
+    return True
+
+
 def ensure_otokens_exist(
-    quotes: list[OTokenSpec],
+    specs: list[OTokenSpec],
 ) -> list[tuple[str, OTokenSpec]]:
-    """For each quote, ensure the corresponding oToken exists on-chain.
+    """For each spec, ensure the corresponding oToken exists on-chain.
 
     Deduplicates by (strike, expiry_days, is_put) to avoid redundant
-    on-chain calls. Creates oTokens via OTokenFactory.createOToken if
-    they don't exist yet. Handles OTokenAlreadyExists gracefully.
-    Skips individual quotes on failure without aborting the whole cycle.
-    Returns a list of (otoken_address, quote) pairs.
+    on-chain calls. Skips individual specs on failure without aborting
+    the whole cycle. Returns (otoken_address, spec) pairs.
     """
     factory = get_otoken_factory()
     account = get_operator_account()
@@ -49,130 +129,59 @@ def ensure_otokens_exist(
     seen: dict[tuple, str | None] = {}
     results: list[tuple[str, OTokenSpec]] = []
 
-    for quote in quotes:
-        is_put = quote.option_type == OptionType.PUT
-        key = (quote.strike, quote.expiry_days, is_put)
+    for spec in specs:
+        is_put = spec.option_type == OptionType.PUT
+        key = (spec.strike, spec.expiry_days, is_put)
         label = (
-            f"strike={quote.strike} expiry={quote.expiry_days}d "
+            f"strike={spec.strike} expiry={spec.expiry_days}d "
             f"{'put' if is_put else 'call'}"
         )
 
         if key in seen:
             if seen[key] is not None:
-                results.append((seen[key], quote))
+                results.append((seen[key], spec))
             continue
 
-        strike_price = strike_to_8_decimals(quote.strike)
-        expiry = expiry_days_to_timestamp(quote.expiry_days)
+        strike_price = strike_to_8_decimals(spec.strike)
+        expiry = expiry_days_to_timestamp(spec.expiry_days)
         collateral = usdc if is_put else weth
 
         try:
-            target_addr = factory.functions.getTargetOTokenAddress(
-                weth, usdc, collateral, strike_price, expiry, is_put
-            ).call()
-            exists = factory.functions.isOToken(target_addr).call()
+            otoken_addr = _find_or_create_otoken(
+                factory,
+                account,
+                weth,
+                usdc,
+                collateral,
+                strike_price,
+                expiry,
+                is_put,
+                label,
+            )
+        except Exception:
+            logger.exception("Failed oToken lookup/create: %s", label)
+            seen[key] = None
+            continue
+
+        if otoken_addr is None:
+            seen[key] = None
+            continue
+
+        try:
+            if not _whitelist_otoken(otoken_addr, account, label):
+                seen[key] = None
+                continue
         except Exception:
             logger.exception(
-                "Failed to check oToken existence: %s", label
+                "Failed to whitelist %s: %s. Excluding.",
+                otoken_addr,
+                label,
             )
             seen[key] = None
             continue
 
-        if exists:
-            otoken_addr = target_addr
-            logger.debug("oToken exists: %s -> %s", label, otoken_addr)
-        else:
-            try:
-                logger.info("Creating oToken: %s", label)
-                tx_fn = factory.functions.createOToken(
-                    weth, usdc, collateral,
-                    strike_price, expiry, is_put,
-                )
-                tx_hash = build_and_send_tx(tx_fn, account)
-                logger.info("oToken created, tx: %s", tx_hash)
-            except Exception:
-                try:
-                    is_created = factory.functions.isOToken(
-                        target_addr
-                    ).call()
-                    if is_created:
-                        logger.info(
-                            "oToken already existed (race): %s -> %s",
-                            label, target_addr,
-                        )
-                        otoken_addr = target_addr
-                    else:
-                        logger.exception(
-                            "Failed to create oToken: %s", label
-                        )
-                        seen[key] = None
-                        continue
-                except Exception:
-                    logger.debug(
-                        "Recovery isOToken check failed for %s",
-                        label, exc_info=True,
-                    )
-                    logger.exception(
-                        "Failed to create oToken: %s", label
-                    )
-                    seen[key] = None
-                    continue
-            else:
-                try:
-                    otoken_addr = (
-                        factory.functions.getTargetOTokenAddress(
-                            weth, usdc, collateral,
-                            strike_price, expiry, is_put,
-                        ).call()
-                    )
-                except Exception:
-                    logger.exception(
-                        "oToken created (tx: %s) but failed to "
-                        "compute address: %s", tx_hash, label,
-                    )
-                    seen[key] = None
-                    continue
-
-                if otoken_addr == ZERO_ADDRESS:
-                    logger.error(
-                        "oToken tx succeeded (%s) but "
-                        "getTargetOTokenAddress returned zero: %s",
-                        tx_hash, label,
-                    )
-                    seen[key] = None
-                    continue
-
-                logger.info(
-                    "oToken address resolved: %s -> %s",
-                    label, otoken_addr,
-                )
-
-        if settings.whitelist_address:
-            try:
-                whitelist = get_whitelist()
-                is_wl = whitelist.functions.isWhitelistedOToken(
-                    otoken_addr
-                ).call()
-                if not is_wl:
-                    tx_fn = whitelist.functions.whitelistOToken(
-                        otoken_addr
-                    )
-                    wl_hash = build_and_send_tx(tx_fn, account)
-                    logger.info(
-                        "Whitelisted oToken %s, tx: %s",
-                        otoken_addr, wl_hash,
-                    )
-            except Exception:
-                logger.exception(
-                    "Failed to whitelist oToken %s: %s. "
-                    "Excluding to prevent user tx reverts.",
-                    otoken_addr, label,
-                )
-                seen[key] = None
-                continue
-
         seen[key] = otoken_addr
-        results.append((otoken_addr, quote))
+        results.append((otoken_addr, spec))
 
     return results
 
@@ -180,41 +189,42 @@ def ensure_otokens_exist(
 def _upsert_available_otokens(
     paired: list[tuple[str, OTokenSpec]],
 ) -> None:
-    """Write created oTokens to the available_otokens table."""
+    """Write created oTokens to the available_otokens table.
+
+    Raises on DB failure so the caller knows the cycle did not
+    complete successfully.
+    """
     seen_addresses: set[str] = set()
     rows = []
-    for otoken_addr, quote in paired:
+    for otoken_addr, spec in paired:
         addr_lower = otoken_addr.lower()
         if addr_lower in seen_addresses:
             continue
         seen_addresses.add(addr_lower)
 
-        is_put = quote.option_type == OptionType.PUT
+        is_put = spec.option_type == OptionType.PUT
         weth = settings.weth_address.lower()
         usdc = settings.usdc_address.lower()
         collateral = usdc if is_put else weth
 
-        rows.append({
-            "otoken_address": addr_lower,
-            "strike_price": quote.strike,
-            "expiry": expiry_days_to_timestamp(quote.expiry_days),
-            "is_put": is_put,
-            "collateral_asset": collateral,
-        })
+        rows.append(
+            {
+                "otoken_address": addr_lower,
+                "strike_price": spec.strike,
+                "expiry": expiry_days_to_timestamp(spec.expiry_days),
+                "is_put": is_put,
+                "collateral_asset": collateral,
+            }
+        )
 
     if not rows:
         return
 
-    try:
-        client = get_client()
-        client.table("available_otokens").upsert(
-            rows, on_conflict="otoken_address"
-        ).execute()
-        logger.info(
-            "Upserted %d oTokens to available_otokens", len(rows)
-        )
-    except Exception:
-        logger.exception("Failed to write available_otokens")
+    client = get_client()
+    client.table("available_otokens").upsert(
+        rows, on_conflict="otoken_address"
+    ).execute()
+    logger.info("Upserted %d oTokens to available_otokens", len(rows))
 
 
 async def publish_once():
@@ -235,15 +245,11 @@ async def run():
     """Main loop: ensure oTokens exist every N seconds."""
     if not settings.otoken_factory_address:
         logger.error(
-            "otoken_factory_address not configured, "
-            "otoken manager cannot start"
+            "otoken_factory_address not configured, otoken manager cannot start"
         )
         return
     if not settings.operator_private_key:
-        logger.error(
-            "operator_private_key not configured, "
-            "otoken manager cannot start"
-        )
+        logger.error("operator_private_key not configured, otoken manager cannot start")
         return
 
     logger.info(
