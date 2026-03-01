@@ -8,27 +8,15 @@ from src.bots.otoken_manager import (
     ZERO_ADDRESS,
 )
 from src.pricing.utils import (
-    premium_to_usdc,
     strike_to_8_decimals,
     expiry_days_to_timestamp,
 )
 from src.config import settings
-from src.pricing.price_sheet import PriceQuote
+from src.pricing.price_sheet import OTokenSpec
 from src.pricing.black_scholes import OptionType
 
 WETH = settings.weth_address
 USDC = settings.usdc_address
-
-
-def test_premium_to_usdc():
-    assert premium_to_usdc(100.0) == 100_000_000
-    assert premium_to_usdc(0.50) == 500_000
-    assert premium_to_usdc(0.000001) == 1  # minimum 1 unit
-
-
-def test_premium_to_usdc_zero():
-    # Zero premium should return minimum 1
-    assert premium_to_usdc(0.0) == 1
 
 
 def test_strike_to_8_decimals():
@@ -60,17 +48,11 @@ def test_expiry_days_ordering():
     assert ts7 < ts14 < ts30
 
 
-def _make_quote(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
-    return PriceQuote(
+def _make_spec(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
+    return OTokenSpec(
         option_type=option_type,
         strike=strike,
         expiry_days=expiry_days,
-        premium=50.0,
-        delta=0.5,
-        iv=0.4,
-        spot=2000.0,
-        created_at=0,
-        ttl=30,
     )
 
 
@@ -97,7 +79,7 @@ def test_ensure_otokens_exist_already_exists(mock_factory_fn, mock_account, mock
     whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
     mock_wl.return_value = whitelist
 
-    quotes = [_make_quote()]
+    quotes = [_make_spec()]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 1
@@ -120,7 +102,7 @@ def test_ensure_otokens_exist_creates_new(mock_factory_fn, mock_account, mock_tx
     whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
     mock_wl.return_value = whitelist
 
-    quotes = [_make_quote()]
+    quotes = [_make_spec()]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 1
@@ -139,7 +121,7 @@ def test_ensure_otokens_deduplicates(mock_factory_fn, mock_account, mock_tx):
     mock_factory_fn.return_value = factory
     mock_account.return_value = MagicMock()
 
-    quotes = [_make_quote(), _make_quote()]  # same params
+    quotes = [_make_spec(), _make_spec()]  # same params
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 2
@@ -163,7 +145,7 @@ def test_ensure_otokens_handles_creation_failure(mock_factory_fn, mock_account, 
     mock_account.return_value = MagicMock()
     mock_tx.side_effect = RuntimeError("tx reverted")
 
-    quotes = [_make_quote()]
+    quotes = [_make_spec()]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 0  # quote skipped, not crash
@@ -188,7 +170,7 @@ def test_ensure_otokens_handles_already_exists_race(mock_factory_fn, mock_accoun
     whitelist.functions.whitelistOToken.return_value = MagicMock()
     mock_wl.return_value = whitelist
 
-    quotes = [_make_quote()]
+    quotes = [_make_spec()]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 1
@@ -205,7 +187,7 @@ def test_ensure_otokens_rejects_zero_address_after_creation(mock_factory_fn, moc
     mock_account.return_value = MagicMock()
     mock_tx.return_value = "0xabcd"
 
-    quotes = [_make_quote()]
+    quotes = [_make_spec()]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 0  # zero address rejected
@@ -229,8 +211,8 @@ def test_ensure_otokens_partial_failure(mock_factory_fn, mock_account, mock_tx):
     mock_account.return_value = MagicMock()
 
     quotes = [
-        _make_quote(strike=2000.0),
-        _make_quote(strike=2050.0),  # different strike -> different key
+        _make_spec(strike=2000.0),
+        _make_spec(strike=2050.0),  # different strike -> different key
     ]
     results = ensure_otokens_exist(quotes)
 
@@ -253,7 +235,7 @@ def test_ensure_otokens_call_uses_weth_collateral(mock_factory_fn, mock_account,
     whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
     mock_wl.return_value = whitelist
 
-    quotes = [_make_quote(option_type=OptionType.CALL)]
+    quotes = [_make_spec(option_type=OptionType.CALL)]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 1
@@ -277,7 +259,7 @@ def test_ensure_otokens_put_uses_usdc_collateral(mock_factory_fn, mock_account, 
     whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
     mock_wl.return_value = whitelist
 
-    quotes = [_make_quote(option_type=OptionType.PUT)]
+    quotes = [_make_spec(option_type=OptionType.PUT)]
     results = ensure_otokens_exist(quotes)
 
     assert len(results) == 1

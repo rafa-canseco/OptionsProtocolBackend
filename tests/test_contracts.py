@@ -1,4 +1,4 @@
-from src.contracts.abis import PRICE_SHEET_ABI, BATCH_SETTLER_ABI, OTOKEN_FACTORY_ABI, OTOKEN_ABI
+from src.contracts.abis import BATCH_SETTLER_ABI, OTOKEN_FACTORY_ABI, OTOKEN_ABI
 
 
 def _fn_names(abi):
@@ -7,20 +7,6 @@ def _fn_names(abi):
 
 def _event_names(abi):
     return [item["name"] for item in abi if item.get("type") == "event"]
-
-
-def test_price_sheet_functions():
-    fns = _fn_names(PRICE_SHEET_ABI)
-    assert "publishQuotes" in fns
-    assert "invalidateQuotes" in fns
-    assert "getQuote" in fns
-
-
-def test_price_sheet_events():
-    events = _event_names(PRICE_SHEET_ABI)
-    assert "QuotePublished" in events
-    assert "QuoteInvalidated" in events
-    assert "QuoteFilled" in events
 
 
 def test_batch_settler_events():

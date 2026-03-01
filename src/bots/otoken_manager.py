@@ -14,8 +14,7 @@ from web3 import Web3
 from src.config import settings
 from src.db.database import get_client
 from src.pricing.chainlink import get_eth_price
-from src.pricing.deribit import get_eth_iv
-from src.pricing.price_sheet import generate_price_sheet, PriceQuote
+from src.pricing.price_sheet import generate_otoken_specs, OTokenSpec
 from src.pricing.black_scholes import OptionType
 from src.pricing.utils import strike_to_8_decimals, expiry_days_to_timestamp
 from src.contracts.web3_client import (
@@ -32,8 +31,8 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 def ensure_otokens_exist(
-    quotes: list[PriceQuote],
-) -> list[tuple[str, PriceQuote]]:
+    quotes: list[OTokenSpec],
+) -> list[tuple[str, OTokenSpec]]:
     """For each quote, ensure the corresponding oToken exists on-chain.
 
     Deduplicates by (strike, expiry_days, is_put) to avoid redundant
@@ -48,7 +47,7 @@ def ensure_otokens_exist(
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
     seen: dict[tuple, str | None] = {}
-    results: list[tuple[str, PriceQuote]] = []
+    results: list[tuple[str, OTokenSpec]] = []
 
     for quote in quotes:
         is_put = quote.option_type == OptionType.PUT
@@ -179,7 +178,7 @@ def ensure_otokens_exist(
 
 
 def _upsert_available_otokens(
-    paired: list[tuple[str, PriceQuote]],
+    paired: list[tuple[str, OTokenSpec]],
 ) -> None:
     """Write created oTokens to the available_otokens table."""
     seen_addresses: set[str] = set()
@@ -219,12 +218,11 @@ def _upsert_available_otokens(
 
 
 async def publish_once():
-    """Single cycle: generate price sheet, create oTokens, record them."""
+    """Single cycle: generate oToken specs, create on-chain, record them."""
     eth_price, _ = get_eth_price()
-    iv = await get_eth_iv()
-    quotes = generate_price_sheet(spot=eth_price, iv=iv)
+    specs = generate_otoken_specs(spot=eth_price)
 
-    paired = await asyncio.to_thread(ensure_otokens_exist, quotes)
+    paired = await asyncio.to_thread(ensure_otokens_exist, specs)
     if not paired:
         logger.warning("No oTokens created, skipping")
         return
@@ -250,11 +248,11 @@ async def run():
 
     logger.info(
         "oToken manager starting (interval=%ds)",
-        settings.price_publish_interval_seconds,
+        settings.otoken_publish_interval_seconds,
     )
     while True:
         try:
             await publish_once()
         except Exception:
             logger.exception("oToken manager cycle failed")
-        await asyncio.sleep(settings.price_publish_interval_seconds)
+        await asyncio.sleep(settings.otoken_publish_interval_seconds)

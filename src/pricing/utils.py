@@ -1,17 +1,11 @@
 """Shared pricing utilities.
 
-Pure functions with zero settings dependencies. Used by both
-otoken_manager (backend bot) and mm_client (standalone process).
+Pure functions with zero settings dependencies. Used by the
+otoken_manager bot for on-chain oToken creation.
 """
 from datetime import datetime, timezone, timedelta
 
-USDC_DECIMALS = 6
 STRIKE_DECIMALS = 8
-
-
-def premium_to_usdc(premium_usd: float, usdc_decimals: int = USDC_DECIMALS) -> int:
-    """Convert a USD premium float to USDC integer units."""
-    return max(int(premium_usd * 10**usdc_decimals), 1)
 
 
 def strike_to_8_decimals(strike_usd: float) -> int:
