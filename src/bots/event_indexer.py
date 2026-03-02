@@ -64,8 +64,8 @@ def _set_last_indexed_block(block: int) -> None:
 def _enrich_with_otoken_metadata(event_data: dict) -> dict:
     """Read oToken on-chain metadata for denormalization into DB.
 
-    All three fields (strike_price, expiry, is_put) are assigned atomically —
-    either all succeed or none are set. These fields are critical for settlement
+    Fetches all three fields before assigning any, so either all succeed
+    or none are set. These fields are critical for settlement
     (identify_itm_positions depends on them).
     """
     try:
@@ -73,6 +73,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
         strike = ot.functions.strikePrice().call()
         expiry = ot.functions.expiry().call()
         is_put = ot.functions.isPut().call()
+        # Assign only after all reads succeed — no partial enrichment
         event_data["strike_price"] = strike
         event_data["expiry"] = expiry
         event_data["is_put"] = is_put
@@ -161,9 +162,16 @@ def _notify_mm(event_data: dict) -> None:
         return
     try:
         loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no event loop (sync context / tests)
+    try:
         loop.create_task(notify_mm_fill(mm_addr, event_data))
     except RuntimeError:
-        pass  # no event loop (e.g. tests)
+        logger.warning(
+            "Could not schedule MM fill notification for %s (loop closing?), tx=%s",
+            mm_addr,
+            event_data.get("tx_hash"),
+        )
 
 
 def _fetch_and_store_order_events(
@@ -368,6 +376,12 @@ def _process_subscription_log(settler, log) -> None:
         _process_order_subscription_log(settler, log)
     elif first_topic == _PHYSICAL_DELIVERY_TOPIC:
         _process_delivery_subscription_log(settler, log)
+    else:
+        logger.debug(
+            "Ignoring unrecognized event topic %s in tx %s",
+            first_topic.hex(),
+            log.get("transactionHash", "unknown"),
+        )
 
 
 def _process_order_subscription_log(settler, log) -> None:
@@ -397,7 +411,14 @@ def _process_order_subscription_log(settler, log) -> None:
 
     _notify_mm(event_data)
 
-    _set_last_indexed_block(decoded.blockNumber)
+    try:
+        _set_last_indexed_block(decoded.blockNumber)
+    except Exception:
+        logger.warning(
+            "Failed to update last_indexed_block to %d, "
+            "will be corrected on next event or catchup",
+            decoded.blockNumber,
+        )
 
 
 def _process_delivery_subscription_log(settler, log) -> None:
@@ -425,8 +446,16 @@ def _process_delivery_subscription_log(settler, log) -> None:
             "Failed to update subscription PhysicalDelivery event: %s",
             row.get("delivery_tx_hash"),
         )
+        return
 
-    _set_last_indexed_block(decoded.blockNumber)
+    try:
+        _set_last_indexed_block(decoded.blockNumber)
+    except Exception:
+        logger.warning(
+            "Failed to update last_indexed_block to %d, "
+            "will be corrected on next event or catchup",
+            decoded.blockNumber,
+        )
 
 
 async def _subscription_loop() -> None:
@@ -445,7 +474,11 @@ async def _subscription_loop() -> None:
         try:
             await index_once()
         except Exception:
-            logger.exception("getLogs catchup failed before subscribe")
+            logger.exception(
+                "getLogs catchup failed before subscribe. "
+                "Events between last_indexed_block and now may be missed "
+                "until the next reconnect catchup cycle."
+            )
 
         try:
             async with AsyncWeb3(WebSocketProvider(wss_url)) as ws_w3:
@@ -460,8 +493,21 @@ async def _subscription_loop() -> None:
                 backoff = 1  # reset on successful connection
 
                 async for payload in ws_w3.socket.process_subscriptions():
-                    log = payload["result"]
-                    _process_subscription_log(settler, log)
+                    try:
+                        log = payload["result"]
+                    except (KeyError, TypeError):
+                        logger.warning(
+                            "Unexpected subscription payload: %s",
+                            payload,
+                        )
+                        continue
+                    try:
+                        _process_subscription_log(settler, log)
+                    except Exception:
+                        logger.exception(
+                            "Failed to process subscription log: %s",
+                            log.get("transactionHash", "unknown"),
+                        )
 
         except asyncio.CancelledError:
             logger.info("Subscription loop cancelled, shutting down")
