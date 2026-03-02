@@ -464,7 +464,7 @@ async def _subscription_loop() -> None:
     On disconnect or error, catches up via getLogs and reconnects with
     exponential backoff (capped at MAX_RECONNECT_DELAY seconds).
     """
-    wss_url = settings.base_sepolia_wss_url
+    wss_url = settings.wss_rpc_url
     settler_address = settings.batch_settler_address
     settler = get_batch_settler()
     backoff = 1
@@ -528,16 +528,16 @@ async def _subscription_loop() -> None:
 async def run():
     """Start the event indexer.
 
-    Uses eth_subscribe (WebSocket) when base_sepolia_wss_url is configured.
+    Uses eth_subscribe (WebSocket) when wss_rpc_url is configured.
     Falls back to getLogs polling otherwise.
     """
-    if settings.base_sepolia_wss_url:
+    if settings.wss_rpc_url:
         logger.info("Event indexer starting in subscription mode (WSS)")
         await _subscription_loop()
     else:
         logger.info(
             "Event indexer starting in polling mode "
-            "(interval=%ds, set BASE_SEPOLIA_WSS_URL for real-time)",
+            "(interval=%ds, set WSS_RPC_URL for real-time)",
             settings.event_poll_interval_seconds,
         )
         while True:
