@@ -20,6 +20,7 @@ Technical reference for integrating with the b1nary options protocol as a market
 9. [Risk Parameters](#9-risk-parameters)
 10. [Contract Addresses](#10-contract-addresses)
 11. [Testnet Quickstart](#11-testnet-quickstart)
+12. [Real-time Fill Notifications](#real-time-fill-notifications-websocket)
 
 ---
 
@@ -364,9 +365,80 @@ To fully invalidate all outstanding quotes both off-chain and on-chain, call `DE
 
 ---
 
+### Real-time Fill Notifications (WebSocket)
+
+#### `WS /mm/stream` — Live fill events
+
+Connects to a WebSocket that pushes fill events the moment they are detected on-chain. This is the fastest way to know when a user executes one of your quotes.
+
+**Authentication:** Pass your API key as a query parameter or as the first message after connecting.
+
+```
+# Option A: query param
+wss://api.b1nary.app/mm/stream?api_key=your-api-key
+
+# Option B: first message
+{"api_key": "your-api-key"}
+```
+
+**On successful auth, you receive:**
+
+```json
+{"type": "auth", "status": "ok", "mm_address": "0x..."}
+```
+
+**On each fill, you receive:**
+
+```json
+{
+  "type": "fill",
+  "data": {
+    "tx_hash": "0x...",
+    "block_number": 12345678,
+    "otoken_address": "0x...",
+    "amount": "100000000",
+    "gross_premium": "5000000",
+    "net_premium": "4800000",
+    "protocol_fee": "200000",
+    "collateral": "2400000000",
+    "user_address": "0x...",
+    "mm_address": "0x...",
+    "vault_id": 1,
+    "strike_price": 240000000000,
+    "expiry": 1741200000,
+    "is_put": true
+  }
+}
+```
+
+**Reconnect:** The server does not persist missed messages. If your connection drops, reconnect and use `GET /mm/fills?since=<last_seen_timestamp>` to catch up on any fills you missed.
+
+**Python example:**
+
+```python
+import json
+import websockets
+import asyncio
+
+async def listen_fills(api_key: str):
+    url = f"wss://api.b1nary.app/mm/stream?api_key={api_key}"
+    async for ws in websockets.connect(url):
+        try:
+            async for msg in ws:
+                data = json.loads(msg)
+                if data["type"] == "fill":
+                    print(f"Fill: {data['data']['tx_hash']}")
+        except websockets.ConnectionClosed:
+            continue  # auto-reconnect
+
+asyncio.run(listen_fills("your-api-key"))
+```
+
+---
+
 ### Monitoring (requires `X-API-Key`)
 
-#### `GET /mm/fills` — Filled trades
+#### `GET /mm/fills` — Filled trades (polling fallback)
 
 Returns trades executed against your quotes (indexed `OrderExecuted` events).
 
