@@ -117,7 +117,7 @@ def ensure_otokens_exist(
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure the corresponding oToken exists on-chain.
 
-    Deduplicates by (strike, expiry_days, is_put) to avoid redundant
+    Deduplicates by (strike, expiry_ts, is_put) to avoid redundant
     on-chain calls. Skips individual specs on failure without aborting
     the whole cycle. Returns (otoken_address, spec) pairs.
     """

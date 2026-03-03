@@ -12,6 +12,13 @@ class OTokenSpec:
     strike: float
     expiry_ts: int
 
+    def __post_init__(self):
+        if self.expiry_ts % 86400 != 28800:
+            raise ValueError(
+                f"expiry_ts {self.expiry_ts} is not at 08:00 UTC "
+                f"(ts % 86400 = {self.expiry_ts % 86400}, expected 28800)"
+            )
+
 
 def generate_strikes(spot: float, num_strikes: int = 5) -> list[float]:
     """Generate strike prices around the current spot.
