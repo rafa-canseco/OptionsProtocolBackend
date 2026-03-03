@@ -19,6 +19,8 @@ Technical reference for integrating with the b1nary options protocol as a market
 8. [Physical Delivery](#8-physical-delivery)
 9. [Risk Parameters](#9-risk-parameters)
 10. [Contract Addresses](#10-contract-addresses)
+11. [Testnet Quickstart](#11-testnet-quickstart)
+12. [Real-time Fill Notifications](#real-time-fill-notifications-websocket)
 
 ---
 
@@ -363,9 +365,80 @@ To fully invalidate all outstanding quotes both off-chain and on-chain, call `DE
 
 ---
 
+### Real-time Fill Notifications (WebSocket)
+
+#### `WS /mm/stream` — Live fill events
+
+Connects to a WebSocket that pushes fill events the moment they are detected on-chain. This is the fastest way to know when a user executes one of your quotes.
+
+**Authentication:** Pass your API key as a query parameter or as the first message after connecting.
+
+```
+# Option A: query param
+wss://api.b1nary.app/mm/stream?api_key=your-api-key
+
+# Option B: first message
+{"api_key": "your-api-key"}
+```
+
+**On successful auth, you receive:**
+
+```json
+{"type": "auth", "status": "ok", "mm_address": "0x..."}
+```
+
+**On each fill, you receive:**
+
+```json
+{
+  "type": "fill",
+  "data": {
+    "tx_hash": "0x...",
+    "block_number": 12345678,
+    "otoken_address": "0x...",
+    "amount": "100000000",
+    "gross_premium": "5000000",
+    "net_premium": "4800000",
+    "protocol_fee": "200000",
+    "collateral": "2400000000",
+    "user_address": "0x...",
+    "mm_address": "0x...",
+    "vault_id": 1,
+    "strike_price": 240000000000,
+    "expiry": 1741200000,
+    "is_put": true
+  }
+}
+```
+
+**Reconnect:** The server does not persist missed messages. If your connection drops, reconnect and use `GET /mm/fills?since=<last_seen_timestamp>` to catch up on any fills you missed.
+
+**Python example:**
+
+```python
+import json
+import websockets
+import asyncio
+
+async def listen_fills(api_key: str):
+    url = f"wss://api.b1nary.app/mm/stream?api_key={api_key}"
+    async for ws in websockets.connect(url):
+        try:
+            async for msg in ws:
+                data = json.loads(msg)
+                if data["type"] == "fill":
+                    print(f"Fill: {data['data']['tx_hash']}")
+        except websockets.ConnectionClosed:
+            continue  # auto-reconnect
+
+asyncio.run(listen_fills("your-api-key"))
+```
+
+---
+
 ### Monitoring (requires `X-API-Key`)
 
-#### `GET /mm/fills` — Filled trades
+#### `GET /mm/fills` — Filled trades (polling fallback)
 
 Returns trades executed against your quotes (indexed `OrderExecuted` events).
 
@@ -788,6 +861,37 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 | LUSD (Mock USDC) | `0x5A2972d3390ABe3E57010272c8032BfC84E2077b` | 6 | [View](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b) |
 | LETH (Mock WETH) | `0x8C259D169378B705ae62AA697F3233C8dc3774Da` | 18 | [View](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da) |
 
+**Minting testnet USDC (LUSD):** The LUSD contract exposes a public `mint(address to, uint256 amount)` function. Call it directly to fund your MM wallet with test USDC — no faucet needed.
+
+```python
+LUSD_ADDRESS = "0x5A2972d3390ABe3E57010272c8032BfC84E2077b"
+LUSD_ABI = [
+    {
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "mint",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
+lusd = w3.eth.contract(address=LUSD_ADDRESS, abi=LUSD_ABI)
+tx = lusd.functions.mint(
+    MM_ADDRESS,
+    10_000 * 10**6,  # 10,000 USDC (6 decimals)
+).build_transaction({
+    "from": MM_ADDRESS,
+    "nonce": w3.eth.get_transaction_count(MM_ADDRESS),
+})
+signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+w3.eth.send_raw_transaction(signed.raw_transaction)
+```
+
+You can also call `mint` directly on [BaseScan](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract) using the **Write Contract** tab (connect your wallet via MetaMask).
+
 ### Key Addresses
 
 | Role | Address |
@@ -795,6 +899,80 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 | Operator (settlement bot) | `0x9386365F8c1aF88B4A7Bfb3DB71E5Fa6d1f20382` |
 
 All contracts are verified on BaseScan. ABIs are available from the verified source code.
+
+---
+
+## 11. Testnet Quickstart
+
+Everything you need to go from zero to submitting your first quote on Base Sepolia.
+
+### Step 1 — Fund your wallet via the API faucet
+
+The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
+
+```bash
+curl -X POST https://api.b1nary.app/faucet \
+  -H "Content-Type: application/json" \
+  -d '{"address": "0xYourMMWalletAddress"}'
+```
+
+```json
+{
+  "eth_amount":  "5000000000000000",
+  "leth_amount": "50000000000000000000",
+  "lusd_amount": "100000000000",
+  "eth_tx_hash":  "0x...",
+  "leth_tx_hash": "0x...",
+  "lusd_tx_hash": "0x..."
+}
+```
+
+**One-time per wallet.** Returns `409` if the address has already claimed.
+
+**Need more tokens after your initial claim?** Call `mint` directly on the mock token contracts (no auth required):
+
+```python
+# Mint more LUSD
+lusd = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=MOCK_ERC20_MINT_ABI)
+lusd.functions.mint(MM_ADDRESS, 100_000 * 10**6).transact({"from": MM_ADDRESS})
+
+# Mint more LETH
+leth = w3.eth.contract(address="0x8C259D169378B705ae62AA697F3233C8dc3774Da", abi=MOCK_ERC20_MINT_ABI)
+leth.functions.mint(MM_ADDRESS, 50 * 10**18).transact({"from": MM_ADDRESS})
+```
+
+Or call `mint` directly on BaseScan Write Contract tabs:
+- [LUSD mint](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract)
+- [LETH mint](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da#writeContract)
+
+If you need more Base Sepolia ETH for gas, external faucets: [Coinbase CDP](https://portal.cdp.coinbase.com/products/faucet), [Alchemy](https://www.alchemy.com/faucets/base-sepolia), [Superchain](https://app.optimism.io/faucet).
+
+### Step 2 — Approve USDC to BatchSettler
+
+One-time approval so the contract can pull premium from your wallet when users fill your quotes. See section 5 for the full snippet. Quick version:
+
+```python
+usdc = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=ERC20_ABI)
+usdc.functions.approve("0x29bb32c014aC3378FfbE335804B94cED48f2afc4", 2**256 - 1).transact({"from": MM_ADDRESS})
+```
+
+### Step 3 — Get whitelisted
+
+Your MM wallet must be whitelisted on the BatchSettler contract. Contact the b1nary team with your wallet address. They'll call `setWhitelistedMM(yourAddress, true)`.
+
+Without this, all `executeOrder` calls using your quotes will revert.
+
+### Step 4 — Get your API key
+
+Contact the b1nary team to have your wallet registered and receive an API key. Then follow sections 3 and 4 to sign and submit quotes.
+
+### Testnet checklist
+
+- [ ] LUSD and LETH in wallet (`POST /faucet` or direct `mint`)
+- [ ] LUSD approved to BatchSettler (`approve(BATCH_SETTLER_ADDRESS, max)`)
+- [ ] Wallet whitelisted on BatchSettler (`setWhitelistedMM`)
+- [ ] API key received
+- [ ] First quote signed and submitted via `POST /mm/quotes`
 
 ---
 
