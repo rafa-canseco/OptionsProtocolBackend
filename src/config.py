@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC
     eth_staking_apy: float = 0.035  # 3.5% annualized
 
-    model_config = {"env_file": ".env"}
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

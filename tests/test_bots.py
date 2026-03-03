@@ -1,4 +1,3 @@
-import time
 from unittest.mock import patch, MagicMock
 
 from web3 import Web3
@@ -8,10 +7,7 @@ from src.bots.otoken_manager import (
     _upsert_available_otokens,
     ZERO_ADDRESS,
 )
-from src.pricing.utils import (
-    strike_to_8_decimals,
-    expiry_days_to_timestamp,
-)
+from src.pricing.utils import strike_to_8_decimals
 from src.config import settings
 from src.pricing.price_sheet import OTokenSpec
 from src.pricing.black_scholes import OptionType
@@ -24,29 +20,6 @@ def test_strike_to_8_decimals():
     assert strike_to_8_decimals(2000.0) == 200_000_000_000
     assert strike_to_8_decimals(2500.50) == 250_050_000_000
     assert strike_to_8_decimals(100.0) == 10_000_000_000
-
-
-def test_expiry_days_to_timestamp_is_0800_utc():
-    """Expiry timestamp must be at 08:00 UTC (ts % 86400 == 28800)."""
-    for days in [0, 7, 14, 30]:
-        ts = expiry_days_to_timestamp(days)
-        assert ts % 86400 == 28800, f"days={days}: {ts} is not 08:00 UTC"
-
-
-def test_expiry_days_to_timestamp_is_future():
-    """All expiry timestamps must be in the future."""
-    now = int(time.time())
-    for days in [0, 7, 14, 30]:
-        ts = expiry_days_to_timestamp(days)
-        assert ts > now, f"days={days}: {ts} should be > {now}"
-
-
-def test_expiry_days_ordering():
-    """Longer expiry -> later timestamp."""
-    ts7 = expiry_days_to_timestamp(7)
-    ts14 = expiry_days_to_timestamp(14)
-    ts30 = expiry_days_to_timestamp(30)
-    assert ts7 < ts14 < ts30
 
 
 def _make_spec(strike=2000.0, expiry_ts=None, option_type=OptionType.PUT):
@@ -318,6 +291,7 @@ def test_upsert_available_otokens_writes_rows(mock_db):
     assert len(rows) == 1
     assert rows[0]["otoken_address"] == addr.lower()
     assert rows[0]["strike_price"] == 2000.0
+    assert rows[0]["expiry"] == spec.expiry_ts
     assert rows[0]["is_put"] is True
     assert rows[0]["collateral_asset"] == USDC.lower()
 
