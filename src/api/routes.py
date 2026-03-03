@@ -2,6 +2,7 @@ import logging
 import math
 import re
 import time
+from datetime import datetime, timezone
 
 from collections import defaultdict
 
@@ -48,8 +49,11 @@ def _check_rate_limit(ip: str) -> None:
     now = time.monotonic()
 
     if len(_waitlist_hits) > _WAITLIST_MAX_TRACKED_IPS:
-        stale = [k for k, v in _waitlist_hits.items()
-                 if not v or now - v[-1] >= _WAITLIST_WINDOW]
+        stale = [
+            k
+            for k, v in _waitlist_hits.items()
+            if not v or now - v[-1] >= _WAITLIST_WINDOW
+        ]
         for k in stale:
             del _waitlist_hits[k]
 
@@ -57,7 +61,9 @@ def _check_rate_limit(ip: str) -> None:
     _waitlist_hits[ip] = [t for t in hits if now - t < _WAITLIST_WINDOW]
     if len(_waitlist_hits[ip]) >= _WAITLIST_MAX_REQUESTS:
         logger.warning("Rate limit exceeded for IP %s", ip)
-        raise HTTPException(status_code=429, detail="Too many requests, try again later")
+        raise HTTPException(
+            status_code=429, detail="Too many requests, try again later"
+        )
     _waitlist_hits[ip].append(now)
 
 
@@ -112,24 +118,31 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
 
-        # Compute expiry_days from expiry timestamp
+        # Compute expiry_days (cosmetic) and expiry_date (stable)
         now_ts = int(time.time())
         expiry_days = max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
+        expiry_date = (
+            datetime.fromtimestamp(expiry, tz=timezone.utc).strftime("%Y-%m-%d")
+            if expiry
+            else None
+        )
 
         # TTL = seconds until deadline
         ttl = max(0, deadline - now_ts)
 
         from src.pricing.black_scholes import OptionType
+
         option_type = OptionType.PUT if is_put else OptionType.CALL
 
         return PriceResponse(
             option_type=option_type,
             strike=strike or 0,
             expiry_days=expiry_days,
+            expiry_date=expiry_date,
             premium=net_premium,
             delta=0,  # Not available from MM quotes
-            iv=0,     # Not available from MM quotes
-            spot=0,   # Will be enriched below if possible
+            iv=0,  # Not available from MM quotes
+            spot=0,  # Will be enriched below if possible
             ttl=ttl,
             expires_at=float(deadline),
             available_amount=available_eth,
@@ -196,6 +209,7 @@ async def get_prices():
     spot = 0.0
     try:
         from src.pricing.chainlink import get_eth_price
+
         spot, _ = get_eth_price()
         if circuit_breaker.check(spot):
             raise HTTPException(
@@ -236,16 +250,22 @@ async def join_waitlist(body: WaitlistRequest, request: Request):
     _check_rate_limit(_get_client_ip(request))
     client = get_client()
     try:
-        existing = client.table("waitlist").select("id").eq("email", body.email).execute()
+        existing = (
+            client.table("waitlist").select("id").eq("email", body.email).execute()
+        )
         is_new = not existing.data
     except Exception:
         logger.exception("Waitlist existence check failed")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
     try:
-        result = client.table("waitlist").upsert(
-            {"email": body.email},
-            on_conflict="email",
-        ).execute()
+        result = (
+            client.table("waitlist")
+            .upsert(
+                {"email": body.email},
+                on_conflict="email",
+            )
+            .execute()
+        )
     except Exception:
         logger.exception("Waitlist upsert failed")
         raise HTTPException(status_code=502, detail="Could not save to waitlist")
