@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from src.pricing.black_scholes import OptionType
+from src.pricing.utils import get_friday_expiries
 
 
 @dataclass
@@ -9,7 +10,14 @@ class OTokenSpec:
 
     option_type: OptionType
     strike: float
-    expiry_days: int
+    expiry_ts: int
+
+    def __post_init__(self):
+        if self.expiry_ts % 86400 != 28800:
+            raise ValueError(
+                f"expiry_ts {self.expiry_ts} is not at 08:00 UTC "
+                f"(ts % 86400 = {self.expiry_ts % 86400}, expected 28800)"
+            )
 
 
 def generate_strikes(spot: float, num_strikes: int = 5) -> list[float]:
@@ -25,30 +33,31 @@ def generate_strikes(spot: float, num_strikes: int = 5) -> list[float]:
 
 def generate_otoken_specs(
     spot: float,
-    expiry_days: list[int] | None = None,
+    expiry_timestamps: list[int] | None = None,
     num_strikes: int = 5,
 ) -> list[OTokenSpec]:
     """Generate the set of oTokens to list (strikes x expiries x types).
 
     Args:
         spot: Current ETH price (used to center strikes)
-        expiry_days: Expiry windows in days. Defaults to [7, 14, 30]
+        expiry_timestamps: Fixed Friday 08:00 UTC timestamps.
+            Defaults to get_friday_expiries().
         num_strikes: Number of strikes to generate around ATM
     """
-    if expiry_days is None:
-        expiry_days = [7, 14, 30]
+    if expiry_timestamps is None:
+        expiry_timestamps = get_friday_expiries()
 
     strikes = generate_strikes(spot, num_strikes)
     specs: list[OTokenSpec] = []
 
-    for days in expiry_days:
+    for ts in expiry_timestamps:
         for K in strikes:
             for opt_type in (OptionType.CALL, OptionType.PUT):
                 specs.append(
                     OTokenSpec(
                         option_type=opt_type,
                         strike=K,
-                        expiry_days=days,
+                        expiry_ts=ts,
                     )
                 )
 

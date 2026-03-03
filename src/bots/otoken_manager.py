@@ -9,6 +9,7 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from web3 import Web3
 
@@ -22,7 +23,7 @@ from src.contracts.web3_client import (
 from src.db.database import get_client
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import expiry_days_to_timestamp, strike_to_8_decimals
+from src.pricing.utils import strike_to_8_decimals
 from src.pricing.chainlink import get_eth_price
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,7 @@ def ensure_otokens_exist(
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure the corresponding oToken exists on-chain.
 
-    Deduplicates by (strike, expiry_days, is_put) to avoid redundant
+    Deduplicates by (strike, expiry_ts, is_put) to avoid redundant
     on-chain calls. Skips individual specs on failure without aborting
     the whole cycle. Returns (otoken_address, spec) pairs.
     """
@@ -130,10 +131,12 @@ def ensure_otokens_exist(
 
     for spec in specs:
         is_put = spec.option_type == OptionType.PUT
-        key = (spec.strike, spec.expiry_days, is_put)
+        key = (spec.strike, spec.expiry_ts, is_put)
+        expiry_date = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
         label = (
-            f"strike={spec.strike} expiry={spec.expiry_days}d "
-            f"{'put' if is_put else 'call'}"
+            f"strike={spec.strike} expiry={expiry_date} {'put' if is_put else 'call'}"
         )
 
         if key in seen:
@@ -142,7 +145,7 @@ def ensure_otokens_exist(
             continue
 
         strike_price = strike_to_8_decimals(spec.strike)
-        expiry = expiry_days_to_timestamp(spec.expiry_days)
+        expiry = spec.expiry_ts
         collateral = usdc if is_put else weth
 
         try:
@@ -208,7 +211,7 @@ def _upsert_available_otokens(
             {
                 "otoken_address": addr_lower,
                 "strike_price": spec.strike,
-                "expiry": expiry_days_to_timestamp(spec.expiry_days),
+                "expiry": spec.expiry_ts,
                 "is_put": is_put,
                 "collateral_asset": collateral,
             }

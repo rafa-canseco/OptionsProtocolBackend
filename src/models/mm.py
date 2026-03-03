@@ -41,7 +41,7 @@ class QuoteSubmission(BaseModel):
 class QuoteBatchRequest(BaseModel):
     """Batch of signed quotes submitted by a market maker."""
 
-    quotes: list[QuoteSubmission] = Field(min_length=1, max_length=100)
+    quotes: list[QuoteSubmission] = Field(min_length=1, max_length=200)
 
 
 class QuoteBatchResponse(BaseModel):
