@@ -49,11 +49,15 @@ def test_expiry_days_ordering():
     assert ts7 < ts14 < ts30
 
 
-def _make_spec(strike=2000.0, expiry_days=7, option_type=OptionType.PUT):
+def _make_spec(strike=2000.0, expiry_ts=None, option_type=OptionType.PUT):
+    if expiry_ts is None:
+        from src.pricing.utils import get_friday_expiries
+
+        expiry_ts = get_friday_expiries()[0]
     return OTokenSpec(
         option_type=option_type,
         strike=strike,
-        expiry_days=expiry_days,
+        expiry_ts=expiry_ts,
     )
 
 
@@ -306,7 +310,7 @@ def test_upsert_available_otokens_writes_rows(mock_db):
     table_mock.upsert.return_value.execute.return_value = None
 
     addr = "0xABCD1234000000000000000000000000ABCD1234"
-    spec = _make_spec(strike=2000.0, expiry_days=7, option_type=OptionType.PUT)
+    spec = _make_spec(strike=2000.0, option_type=OptionType.PUT)
     _upsert_available_otokens([(addr, spec)])
 
     mock_db.return_value.table.assert_called_once_with("available_otokens")

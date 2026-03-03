@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 from src.pricing.price_sheet import generate_otoken_specs, generate_strikes
+from src.pricing.utils import get_friday_expiries
 
 
 def test_generate_strikes_centered():
@@ -16,8 +19,12 @@ def test_generate_strikes_spacing():
 
 def test_otoken_specs_default_expiries():
     specs = generate_otoken_specs(spot=2000.0)
-    expiry_days = {s.expiry_days for s in specs}
-    assert expiry_days == {7, 14, 30}
+    expiry_ts_set = {s.expiry_ts for s in specs}
+    assert len(expiry_ts_set) == 3
+    for ts in expiry_ts_set:
+        assert ts % 86400 == 28800, f"{ts} is not 08:00 UTC"
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        assert dt.weekday() == 4, f"{dt} is not a Friday"
 
 
 def test_otoken_specs_both_types():
@@ -33,13 +40,16 @@ def test_otoken_specs_count():
 
 
 def test_otoken_specs_custom_expiries():
-    specs = generate_otoken_specs(spot=2000.0, expiry_days=[1, 3])
-    expiry_days = {s.expiry_days for s in specs}
-    assert expiry_days == {1, 3}
+    ts1 = get_friday_expiries()[0]
+    ts2 = get_friday_expiries()[1]
+    specs = generate_otoken_specs(spot=2000.0, expiry_timestamps=[ts1, ts2])
+    expiry_ts_set = {s.expiry_ts for s in specs}
+    assert expiry_ts_set == {ts1, ts2}
 
 
 def test_otoken_specs_strikes_around_spot():
-    specs = generate_otoken_specs(spot=2500.0, expiry_days=[7], num_strikes=5)
+    ts = get_friday_expiries()[0]
+    specs = generate_otoken_specs(spot=2500.0, expiry_timestamps=[ts], num_strikes=5)
     assert len(specs) == 10  # 5 strikes x 2 types
     strikes = {s.strike for s in specs}
     assert 2500.0 in strikes  # center strike
