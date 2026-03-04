@@ -68,14 +68,20 @@ def _check_rate_limit(ip: str) -> None:
 
 
 def _fetch_active_quotes() -> list[dict]:
-    """Read all active, non-expired quotes from mm_quotes."""
+    """Read all active, non-expired quotes from mm_quotes.
+
+    Excludes quotes whose oToken expiry is within 48h of now so that
+    near-expiry options are never shown even if the DB has stale rows.
+    """
     now_ts = int(time.time())
+    expiry_cutoff_ts = now_ts + 48 * 3600
     client = get_client()
     result = (
         client.table("mm_quotes")
         .select("*")
         .eq("is_active", True)
         .gt("deadline", now_ts)
+        .gt("expiry", expiry_cutoff_ts)
         .execute()
     )
     return result.data or []

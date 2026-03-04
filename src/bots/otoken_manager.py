@@ -9,7 +9,7 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from web3 import Web3
 
@@ -23,7 +23,7 @@ from src.contracts.web3_client import (
 from src.db.database import get_client
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import strike_to_8_decimals
+from src.pricing.utils import CUTOFF_HOURS, FRIDAY_WEEKDAY, strike_to_8_decimals
 from src.pricing.chainlink import get_eth_price
 
 logger = logging.getLogger(__name__)
@@ -186,17 +186,43 @@ def ensure_otokens_exist(
     return results
 
 
+def _is_friday_8am_utc(ts: int) -> bool:
+    """Return True if timestamp falls on Friday 08:00 UTC."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    return dt.weekday() == FRIDAY_WEEKDAY and dt.hour == 8 and dt.minute == 0
+
+
+def _prune_near_expiry_otokens() -> None:
+    """Delete rows from available_otokens expiring within CUTOFF_HOURS."""
+    cutoff_ts = int(
+        (datetime.now(timezone.utc) + timedelta(hours=CUTOFF_HOURS)).timestamp()
+    )
+    client = get_client()
+    client.table("available_otokens").delete().lt("expiry", cutoff_ts).execute()
+    logger.info("Pruned available_otokens with expiry < now+%dh", CUTOFF_HOURS)
+
+
 def _upsert_available_otokens(
     paired: list[tuple[str, OTokenSpec]],
 ) -> None:
     """Write created oTokens to the available_otokens table.
 
+    Skips any spec whose expiry is not Friday 08:00 UTC.
     Raises on DB failure so the caller knows the cycle did not
     complete successfully.
     """
     seen_addresses: set[str] = set()
     rows = []
     for otoken_addr, spec in paired:
+        if not _is_friday_8am_utc(spec.expiry_ts):
+            expiry_dt = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc)
+            logger.warning(
+                "Skipping non-Friday oToken: %s expiry=%s",
+                otoken_addr,
+                expiry_dt.isoformat(),
+            )
+            continue
+
         addr_lower = otoken_addr.lower()
         if addr_lower in seen_addresses:
             continue
@@ -228,7 +254,9 @@ def _upsert_available_otokens(
 
 
 async def publish_once():
-    """Single cycle: generate oToken specs, create on-chain, record them."""
+    """Single cycle: prune stale oTokens, generate specs, create on-chain, record them."""
+    _prune_near_expiry_otokens()
+
     eth_price, _ = get_eth_price()
     specs = generate_otoken_specs(spot=eth_price)
 
