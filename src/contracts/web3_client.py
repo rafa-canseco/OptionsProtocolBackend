@@ -26,7 +26,12 @@ _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
 def get_w3() -> Web3:
     global _w3
     if _w3 is None:
-        _w3 = Web3(Web3.HTTPProvider(settings.base_sepolia_rpc_url))
+        if not settings.rpc_url:
+            raise ValueError(
+                "rpc_url is not configured. Set the RPC_URL environment variable "
+                "to a Base mainnet HTTP endpoint (e.g. from Alchemy or Infura)."
+            )
+        _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     return _w3
 
 
@@ -35,6 +40,10 @@ def get_operator_account() -> Account:
 
 
 def get_batch_settler() -> Contract:
+    if not settings.batch_settler_address:
+        raise ValueError(
+            "batch_settler_address not configured. Set BATCH_SETTLER_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.batch_settler_address),
@@ -43,6 +52,10 @@ def get_batch_settler() -> Contract:
 
 
 def get_otoken_factory() -> Contract:
+    if not settings.otoken_factory_address:
+        raise ValueError(
+            "otoken_factory_address not configured. Set OTOKEN_FACTORY_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.otoken_factory_address),
@@ -60,7 +73,9 @@ def get_otoken(address: str) -> Contract:
 
 def get_controller() -> Contract:
     if not settings.controller_address:
-        raise ValueError("controller_address not configured. Set CONTROLLER_ADDRESS env var.")
+        raise ValueError(
+            "controller_address not configured. Set CONTROLLER_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.controller_address),
@@ -80,7 +95,9 @@ def get_oracle() -> Contract:
 
 def get_whitelist() -> Contract:
     if not settings.whitelist_address:
-        raise ValueError("whitelist_address not configured. Set WHITELIST_ADDRESS env var.")
+        raise ValueError(
+            "whitelist_address not configured. Set WHITELIST_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.whitelist_address),
@@ -90,7 +107,9 @@ def get_whitelist() -> Contract:
 
 def get_uniswap_quoter() -> Contract:
     if not settings.uniswap_v3_quoter_address:
-        raise ValueError("uniswap_v3_quoter_address not configured. Set UNISWAP_V3_QUOTER_ADDRESS env var.")
+        raise ValueError(
+            "uniswap_v3_quoter_address not configured. Set UNISWAP_V3_QUOTER_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.uniswap_v3_quoter_address),
@@ -125,7 +144,7 @@ def _sign_send_and_confirm(
                 nonce = max(chain_nonce, tracked_nonce)
             else:
                 nonce = forced_nonce
-            bumped_priority = int(priority_fee * (1.15 ** attempt))
+            bumped_priority = int(priority_fee * (1.15**attempt))
             max_fee = int(base_fee * 2) + bumped_priority
             tx_dict["nonce"] = nonce
             tx_dict.pop("gasPrice", None)
@@ -136,7 +155,10 @@ def _sign_send_and_confirm(
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 _local_nonce[account.address] = nonce + 1
             except Exception as e:
-                if "replacement transaction underpriced" in str(e).lower() and attempt < max_retries - 1:
+                if (
+                    "replacement transaction underpriced" in str(e).lower()
+                    and attempt < max_retries - 1
+                ):
                     forced_nonce = nonce
                     logger.warning(
                         f"Nonce {nonce} has stuck pending tx, retrying with bumped fee "
@@ -164,7 +186,9 @@ def _sign_send_and_confirm(
     return tx_hash.hex()
 
 
-def build_and_send_eth_transfer(to: str, value: int, account, tx_timeout: int = 120) -> str:
+def build_and_send_eth_transfer(
+    to: str, value: int, account, tx_timeout: int = 120
+) -> str:
     """Send a plain ETH transfer. Returns tx hash hex."""
     w3 = get_w3()
     tx_dict = {
@@ -191,9 +215,11 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     gas_limit = int(gas_estimate * 1.2)
 
     w3 = get_w3()
-    tx_dict = contract_fn.build_transaction({
-        "from": account.address,
-        "gas": gas_limit,
-        "chainId": settings.chain_id,
-    })
+    tx_dict = contract_fn.build_transaction(
+        {
+            "from": account.address,
+            "gas": gas_limit,
+            "chainId": settings.chain_id,
+        }
+    )
     return _sign_send_and_confirm(w3, tx_dict, account, "Transaction", tx_timeout)

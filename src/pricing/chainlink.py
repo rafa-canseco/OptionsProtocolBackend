@@ -59,7 +59,7 @@ def get_eth_price_raw() -> tuple[int, int, int]:
 
 
 def get_eth_price() -> tuple[float, int]:
-    """Read ETH/USD price from Chainlink on Base Sepolia.
+    """Read ETH/USD price from Chainlink on Base mainnet.
 
     Returns (price_float, updated_at_timestamp).
     """
