@@ -5,15 +5,15 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
-    base_sepolia_rpc_url: str = "https://sepolia.base.org"
+    rpc_url: str = ""
     wss_rpc_url: str = ""  # WSS RPC — enables eth_subscribe when set
     chainlink_eth_usd_address: str = (
-        "0x4aDC67696bA383F43DD60A9e78F2C97Fbbfc7cb1"  # Base Sepolia
+        "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
     )
 
-    # Asset addresses (Base Sepolia)
+    # Asset addresses (Base mainnet)
     weth_address: str = "0x4200000000000000000000000000000000000006"
-    usdc_address: str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    usdc_address: str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     # Contract addresses (set after deployment)
     batch_settler_address: str = ""
@@ -41,9 +41,15 @@ class Settings(BaseSettings):
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
 
     # Physical settlement (flash loan + DEX swap)
-    uniswap_v3_router_address: str = ""
-    uniswap_v3_quoter_address: str = ""
-    aave_v3_pool_address: str = ""
+    uniswap_v3_router_address: str = (
+        "0x2626664c2603336E57B271c5C0b26F421741e481"  # Base mainnet SwapRouter02
+    )
+    uniswap_v3_quoter_address: str = (
+        "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"  # Base mainnet QuoterV2
+    )
+    aave_v3_pool_address: str = (
+        "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"  # Base mainnet
+    )
     uniswap_fee_tier: int = 3000  # 0.3% — most liquid ETH/USDC pool on Base
     swap_slippage_tolerance: float = 0.01  # 1% slippage default
     flash_loan_redeem_delay_seconds: int = 300  # wait 5 min post-settle before delivery
@@ -55,7 +61,10 @@ class Settings(BaseSettings):
     whitelist_address: str = ""
 
     # Chain
-    chain_id: int = 84532  # Base Sepolia
+    chain_id: int = 8453  # Base mainnet
+
+    # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
+    allowed_origins: str = "*"
 
     # Beta mode: disables auto-settlement, enables /demo/settle endpoint
     beta_mode: bool = False

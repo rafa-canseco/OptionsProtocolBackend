@@ -123,8 +123,8 @@ app = FastAPI(
         "3. `GET /positions/{address}` — check the user's open and settled positions\n\n"
         "All monetary values are in USD unless noted. On-chain amounts use the token's native decimals "
         "(oToken = 8, USDC = 6, WETH = 18).\n\n"
-        "**Chain:** Base Sepolia (chain ID 84532)  \n"
-        "**Contracts:** see [BaseScan](https://sepolia.basescan.org)"
+        f"**Chain:** Base (chain ID {settings.chain_id})  \n"
+        "**Contracts:** see [BaseScan](https://basescan.org)"
     ),
     version="0.4.0",
     openapi_tags=openapi_tags,
@@ -133,7 +133,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_origins.split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
