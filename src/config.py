@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     uniswap_v3_router_address: str = ""
     uniswap_v3_quoter_address: str = ""
     aave_v3_pool_address: str = ""
+    uniswap_fee_tier: int = 3000  # 0.3% — most liquid ETH/USDC pool on Base
     swap_slippage_tolerance: float = 0.01  # 1% slippage default
     flash_loan_redeem_delay_seconds: int = 300  # wait 5 min post-settle before delivery
 
