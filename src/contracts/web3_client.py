@@ -26,6 +26,11 @@ _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
 def get_w3() -> Web3:
     global _w3
     if _w3 is None:
+        if not settings.rpc_url:
+            raise ValueError(
+                "rpc_url is not configured. Set the RPC_URL environment variable "
+                "to a Base mainnet HTTP endpoint (e.g. from Alchemy or Infura)."
+            )
         _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     return _w3
 
@@ -35,6 +40,10 @@ def get_operator_account() -> Account:
 
 
 def get_batch_settler() -> Contract:
+    if not settings.batch_settler_address:
+        raise ValueError(
+            "batch_settler_address not configured. Set BATCH_SETTLER_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.batch_settler_address),
@@ -43,6 +52,10 @@ def get_batch_settler() -> Contract:
 
 
 def get_otoken_factory() -> Contract:
+    if not settings.otoken_factory_address:
+        raise ValueError(
+            "otoken_factory_address not configured. Set OTOKEN_FACTORY_ADDRESS env var."
+        )
     w3 = get_w3()
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.otoken_factory_address),

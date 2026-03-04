@@ -52,6 +52,12 @@ async def lifespan(app: FastAPI):
             "On-chain bots not started: contract addresses or operator key not configured"
         )
 
+    if settings.allowed_origins.strip() == "*":
+        logger.warning(
+            "CORS is configured to allow all origins ('*'). "
+            "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
+        )
+
     # Weekly aggregator only needs DB access, not on-chain config
     from src.bots import weekly_aggregator
 
@@ -99,7 +105,7 @@ openapi_tags = [
     },
     {
         "name": "Faucet",
-        "description": "Send gas ETH + test tokens (LETH/LUSD) on Base Sepolia. 1 claim per wallet (permanent). Beta only — disabled in production.",
+        "description": "Send gas ETH + test tokens on testnet. 1 claim per wallet (permanent). Beta only — disabled in production.",
     },
     {
         "name": "Demo",
@@ -133,7 +139,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins.split(","),
+    allow_origins=[o.strip() for o in settings.allowed_origins.split(",")],
     allow_methods=["*"],
     allow_headers=["*"],
 )
