@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     batch_settler_address: str = ""
     controller_address: str = ""
     otoken_factory_address: str = ""
+    margin_pool_address: str = ""
 
     # Operator wallet (for bots that send transactions)
     operator_private_key: str = ""
