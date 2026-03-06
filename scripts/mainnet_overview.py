@@ -66,7 +66,7 @@ def _fetch_order_stats() -> dict:
     client = get_client()
     result = (
         client.table("order_events")
-        .select("protocol_fee,collateral,settlement_type,created_at")
+        .select("protocol_fee,collateral,is_put,settlement_type,indexed_at")
         .execute()
     )
     rows = result.data or []
@@ -75,18 +75,25 @@ def _fetch_order_stats() -> dict:
     total_fees_usdc = (
         sum(int(r.get("protocol_fee") or 0) for r in rows) / 10**USDC_DECIMALS
     )
-    total_collateral_usdc = (
-        sum(int(r.get("collateral") or 0) for r in rows) / 10**USDC_DECIMALS
+    # Puts: USDC collateral (6 dec). Calls: WETH collateral (18 dec). Sum separately.
+    usdc_collateral = (
+        sum(int(r.get("collateral") or 0) for r in rows if r.get("is_put"))
+        / 10**USDC_DECIMALS
+    )
+    weth_collateral = (
+        sum(int(r.get("collateral") or 0) for r in rows if not r.get("is_put"))
+        / 10**WETH_DECIMALS
     )
     physical_deliveries = sum(1 for r in rows if r.get("settlement_type") == "physical")
 
-    timestamps = [r["created_at"] for r in rows if r.get("created_at")]
+    timestamps = [r["indexed_at"] for r in rows if r.get("indexed_at")]
     last_order_ts = max(timestamps) if timestamps else None
 
     return {
         "total_orders": total_orders,
         "total_fees_usdc": total_fees_usdc,
-        "total_collateral_usdc": total_collateral_usdc,
+        "usdc_collateral": usdc_collateral,
+        "weth_collateral": weth_collateral,
         "physical_deliveries": physical_deliveries,
         "last_order_ts": last_order_ts,
     }
@@ -147,26 +154,39 @@ def _format_last_order(ts_str: str | None) -> str:
     return f"{total_seconds // 86400}d ago"
 
 
+def _fetch_eth_price() -> float | None:
+    """Return ETH/USD price from Chainlink, or None if unavailable."""
+    try:
+        price, _ = get_eth_price()
+        return price
+    except Exception:
+        return None
+
+
 def main() -> None:
     print("Fetching on-chain data...")
     usdc_bal, weth_bal = _fetch_tvl()
-    eth_price, _ = get_eth_price()
+    eth_price = _fetch_eth_price()
     active_series = _fetch_active_otoken_series()
 
     print("Fetching Supabase data...")
     order_stats = _fetch_order_stats()
     user_stats = _fetch_user_stats()
 
-    weth_usd = weth_bal * eth_price
-    total_tvl = usdc_bal + weth_usd
-
     print()
     print("=== b1nary mainnet overview ===")
-    print(
-        f"TVL: ${total_tvl:,.0f}"
-        f" (USDC: ${usdc_bal:,.0f}"
-        f" | WETH: {weth_bal:.4f} @ ${eth_price:,.0f})"
-    )
+    if eth_price is not None:
+        weth_usd = weth_bal * eth_price
+        total_tvl = usdc_bal + weth_usd
+        print(
+            f"TVL: ${total_tvl:,.0f}"
+            f" (USDC: ${usdc_bal:,.0f}"
+            f" | WETH: {weth_bal:.4f} @ ${eth_price:,.0f})"
+        )
+    else:
+        print(
+            f"TVL: USDC ${usdc_bal:,.0f} | WETH {weth_bal:.4f} (ETH price unavailable)"
+        )
     print(f"Active vaults: {order_stats['total_orders']}")
     print(f"Total orders: {order_stats['total_orders']}")
     print(
@@ -176,7 +196,13 @@ def main() -> None:
     )
     print(f"Weekly active users: {user_stats['weekly_active']}")
     print(f"Protocol fees: ${order_stats['total_fees_usdc']:,.2f} USDC")
-    print(f"MM collateral committed: ${order_stats['total_collateral_usdc']:,.0f}")
+    usdc_col = order_stats["usdc_collateral"]
+    weth_col = order_stats["weth_collateral"]
+    if eth_price is not None:
+        total_col = usdc_col + weth_col * eth_price
+        print(f"MM collateral committed: ${total_col:,.0f}")
+    else:
+        print(f"MM collateral committed: ${usdc_col:,.0f} USDC + {weth_col:.4f} WETH")
     print(f"Physical deliveries: {order_stats['physical_deliveries']}")
     print(f"Active oToken series: {active_series}")
     print(f"Last order: {_format_last_order(order_stats['last_order_ts'])}")
