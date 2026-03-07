@@ -40,7 +40,12 @@ def _get_feed():
 def _get_decimals() -> int:
     global _decimals_cache
     if _decimals_cache is None:
-        _decimals_cache = _get_feed().functions.decimals().call()
+        try:
+            _decimals_cache = _get_feed().functions.decimals().call()
+        except Exception:
+            # MockChainlinkFeed (testnet) doesn't implement decimals() —
+            # it always uses 8 decimals (Chainlink USD standard).
+            _decimals_cache = 8
     return _decimals_cache
 
 
