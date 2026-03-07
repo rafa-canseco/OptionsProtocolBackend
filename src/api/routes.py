@@ -33,6 +33,11 @@ _WAITLIST_MAX_REQUESTS = 5
 _WAITLIST_MAX_TRACKED_IPS = 10_000
 _waitlist_hits: dict[str, list[float]] = defaultdict(list)
 
+# --- Read endpoint rate limit (positions, waitlist/count) ---
+_READ_WINDOW = 60  # seconds
+_READ_MAX_REQUESTS = 30  # allows 1 req/2s; frontend polls /positions every 10s
+_read_hits: dict[str, list[float]] = defaultdict(list)
+
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP, preferring X-Forwarded-For for proxied requests."""
@@ -65,6 +70,25 @@ def _check_rate_limit(ip: str) -> None:
             status_code=429, detail="Too many requests, try again later"
         )
     _waitlist_hits[ip].append(now)
+
+
+def _check_read_rate_limit(ip: str) -> None:
+    """Raise 429 if ip exceeded _READ_MAX_REQUESTS in the last window."""
+    now = time.monotonic()
+
+    if len(_read_hits) > _WAITLIST_MAX_TRACKED_IPS:
+        stale = [k for k, v in _read_hits.items() if not v or now - v[-1] >= _READ_WINDOW]
+        for k in stale:
+            del _read_hits[k]
+
+    hits = _read_hits[ip]
+    _read_hits[ip] = [t for t in hits if now - t < _READ_WINDOW]
+    if len(_read_hits[ip]) >= _READ_MAX_REQUESTS:
+        logger.warning("Read rate limit exceeded for IP %s", ip)
+        raise HTTPException(
+            status_code=429, detail="Too many requests, try again later"
+        )
+    _read_hits[ip].append(now)
 
 
 def _fetch_active_quotes() -> list[dict]:
@@ -286,8 +310,9 @@ async def join_waitlist(body: WaitlistRequest, request: Request):
     tags=["Waitlist"],
     summary="Get waitlist size",
 )
-async def get_waitlist_count():
+async def get_waitlist_count(request: Request):
     """Return `{\"count\": N}` with the total number of emails on the waitlist."""
+    _check_read_rate_limit(_get_client_ip(request))
     client = get_client()
     try:
         result = client.table("waitlist").select("id", count="exact").execute()
@@ -346,13 +371,14 @@ def _compute_outcome(position: dict) -> str | None:
     tags=["Positions"],
     summary="Get positions for a wallet",
 )
-async def get_positions(address: str):
+async def get_positions(address: str, request: Request):
     """Return all option positions for the given Ethereum address.
 
     Data comes from on-chain `OrderExecuted` events indexed into Supabase.
     Each position includes strike, expiry, premium paid, settlement status,
     and a human-readable `outcome` field for settled positions.
     """
+    _check_read_rate_limit(_get_client_ip(request))
     if not ETH_ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
 

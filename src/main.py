@@ -53,6 +53,11 @@ async def lifespan(app: FastAPI):
         )
 
     if settings.allowed_origins.strip() == "*":
+        if settings.chain_id == 8453:
+            raise RuntimeError(
+                "CORS cannot be '*' on mainnet (chain_id=8453). "
+                "Set ALLOWED_ORIGINS to your production domain(s)."
+            )
         logger.warning(
             "CORS is configured to allow all origins ('*'). "
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
@@ -104,14 +109,6 @@ openapi_tags = [
         "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
     },
     {
-        "name": "Faucet",
-        "description": "Send gas ETH + test tokens on testnet. 1 claim per wallet (permanent). Beta only — disabled in production.",
-    },
-    {
-        "name": "Demo",
-        "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
-    },
-    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -156,6 +153,16 @@ if settings.beta_mode:
 
     app.include_router(demo_router)
     app.include_router(faucet_router)
+    app.openapi_tags = (app.openapi_tags or []) + [  # type: ignore[operator]
+        {
+            "name": "Faucet",
+            "description": "Send gas ETH + test tokens on testnet. 1 claim per wallet (permanent). Beta only — disabled in production.",
+        },
+        {
+            "name": "Demo",
+            "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
+        },
+    ]
     logger.info("Beta mode: /demo/settle and /faucet endpoints enabled")
 
 
