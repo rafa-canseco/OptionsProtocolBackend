@@ -1,4 +1,8 @@
--- Run this in the Supabase SQL editor to create the tables
+-- Canonical schema for a FRESH Supabase project.
+-- Use this file when bootstrapping a new environment (e.g. production, local dev).
+-- For existing databases, apply incremental files in src/db/migrations/ instead.
+-- Both paths are idempotent (IF NOT EXISTS everywhere), but do not rely on that —
+-- pick one entrypoint per environment and stick to it.
 -- ============================================================
 
 -- Legacy tables (kept for backwards compatibility, no longer written to by API)
