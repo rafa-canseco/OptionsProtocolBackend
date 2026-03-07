@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background bots when contract addresses are configured."""
+    # Safety invariants — checked before any background tasks are spawned so
+    # that a misconfigured production server fails fast with no orphaned tasks.
+    if settings.allowed_origins.strip() == "*":
+        if not settings.beta_mode:
+            logger.critical(
+                "STARTUP ABORTED: CORS is '*' in production mode. "
+                "Set ALLOWED_ORIGINS to your production domain(s)."
+            )
+            raise RuntimeError(
+                "CORS cannot be '*' in production mode. "
+                "Set ALLOWED_ORIGINS to your production domain(s)."
+            )
+        logger.warning(
+            "CORS is configured to allow all origins ('*'). "
+            "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
+        )
+
     tasks = []
 
     has_on_chain_config = (
@@ -50,17 +67,6 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(
             "On-chain bots not started: contract addresses or operator key not configured"
-        )
-
-    if settings.allowed_origins.strip() == "*":
-        if settings.chain_id == 8453:
-            raise RuntimeError(
-                "CORS cannot be '*' on mainnet (chain_id=8453). "
-                "Set ALLOWED_ORIGINS to your production domain(s)."
-            )
-        logger.warning(
-            "CORS is configured to allow all origins ('*'). "
-            "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
     # Weekly aggregator only needs DB access, not on-chain config
@@ -163,6 +169,7 @@ if settings.beta_mode:
             "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
         },
     ]
+    app.openapi_schema = None  # invalidate cached schema so tag mutation takes effect
     logger.info("Beta mode: /demo/settle and /faucet endpoints enabled")
 
 

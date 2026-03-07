@@ -27,13 +27,16 @@ _PRICES_TTL = 15  # seconds
 _prices_cache: list | None = None
 _prices_cached_at: float = 0.0
 
-# --- Waitlist rate limit (in-memory, per IP) ---
+# --- In-memory rate limiting (per IP, per worker process) ---
+# NOTE: State is not shared across uvicorn workers. In a multi-worker deployment
+# the effective limit is _MAX_REQUESTS * num_workers per IP per window.
+# For hard per-IP enforcement on mainnet, replace with a shared Redis store.
+_MAX_TRACKED_IPS = 10_000  # eviction threshold shared by all rate limiters
+
 _WAITLIST_WINDOW = 60  # seconds
 _WAITLIST_MAX_REQUESTS = 5
-_WAITLIST_MAX_TRACKED_IPS = 10_000
 _waitlist_hits: dict[str, list[float]] = defaultdict(list)
 
-# --- Read endpoint rate limit (positions, waitlist/count) ---
 _READ_WINDOW = 60  # seconds
 _READ_MAX_REQUESTS = 30  # allows 1 req/2s; frontend polls /positions every 10s
 _read_hits: dict[str, list[float]] = defaultdict(list)
@@ -46,6 +49,9 @@ def _get_client_ip(request: Request) -> str:
         return forwarded.split(",")[0].strip()
     if request.client is not None:
         return request.client.host
+    logger.warning(
+        "Could not determine client IP; all such requests share one rate-limit bucket"
+    )
     return "unknown"
 
 
@@ -53,7 +59,7 @@ def _check_rate_limit(ip: str) -> None:
     """Raise 429 if ip exceeded _WAITLIST_MAX_REQUESTS in the last window."""
     now = time.monotonic()
 
-    if len(_waitlist_hits) > _WAITLIST_MAX_TRACKED_IPS:
+    if len(_waitlist_hits) > _MAX_TRACKED_IPS:
         stale = [
             k
             for k, v in _waitlist_hits.items()
@@ -61,6 +67,12 @@ def _check_rate_limit(ip: str) -> None:
         ]
         for k in stale:
             del _waitlist_hits[k]
+        if len(_waitlist_hits) > _MAX_TRACKED_IPS:
+            logger.warning(
+                "Waitlist rate limiter: %d IPs tracked (over %d limit), no stale entries to evict",
+                len(_waitlist_hits),
+                _MAX_TRACKED_IPS,
+            )
 
     hits = _waitlist_hits[ip]
     _waitlist_hits[ip] = [t for t in hits if now - t < _WAITLIST_WINDOW]
@@ -76,10 +88,18 @@ def _check_read_rate_limit(ip: str) -> None:
     """Raise 429 if ip exceeded _READ_MAX_REQUESTS in the last window."""
     now = time.monotonic()
 
-    if len(_read_hits) > _WAITLIST_MAX_TRACKED_IPS:
-        stale = [k for k, v in _read_hits.items() if not v or now - v[-1] >= _READ_WINDOW]
+    if len(_read_hits) > _MAX_TRACKED_IPS:
+        stale = [
+            k for k, v in _read_hits.items() if not v or now - v[-1] >= _READ_WINDOW
+        ]
         for k in stale:
             del _read_hits[k]
+        if len(_read_hits) > _MAX_TRACKED_IPS:
+            logger.warning(
+                "Read rate limiter: %d IPs tracked (over %d limit), no stale entries to evict",
+                len(_read_hits),
+                _MAX_TRACKED_IPS,
+            )
 
     hits = _read_hits[ip]
     _read_hits[ip] = [t for t in hits if now - t < _READ_WINDOW]
