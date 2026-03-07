@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background bots when contract addresses are configured."""
+    # Safety invariants — checked before any background tasks are spawned so
+    # that a misconfigured production server fails fast with no orphaned tasks.
+    if settings.allowed_origins.strip() == "*":
+        if not settings.beta_mode:
+            logger.critical(
+                "STARTUP ABORTED: CORS is '*' in production mode. "
+                "Set ALLOWED_ORIGINS to your production domain(s)."
+            )
+            raise RuntimeError(
+                "CORS cannot be '*' in production mode. "
+                "Set ALLOWED_ORIGINS to your production domain(s)."
+            )
+        logger.warning(
+            "CORS is configured to allow all origins ('*'). "
+            "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
+        )
+
     tasks = []
 
     has_on_chain_config = (
@@ -50,12 +67,6 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(
             "On-chain bots not started: contract addresses or operator key not configured"
-        )
-
-    if settings.allowed_origins.strip() == "*":
-        logger.warning(
-            "CORS is configured to allow all origins ('*'). "
-            "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
     # Weekly aggregator only needs DB access, not on-chain config
@@ -104,14 +115,6 @@ openapi_tags = [
         "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
     },
     {
-        "name": "Faucet",
-        "description": "Send gas ETH + test tokens on testnet. 1 claim per wallet (permanent). Beta only — disabled in production.",
-    },
-    {
-        "name": "Demo",
-        "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
-    },
-    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -156,6 +159,17 @@ if settings.beta_mode:
 
     app.include_router(demo_router)
     app.include_router(faucet_router)
+    app.openapi_tags = (app.openapi_tags or []) + [  # type: ignore[operator]
+        {
+            "name": "Faucet",
+            "description": "Send gas ETH + test tokens on testnet. 1 claim per wallet (permanent). Beta only — disabled in production.",
+        },
+        {
+            "name": "Demo",
+            "description": "Beta-only endpoints for triggering instant settlement in testnet. Requires X-Demo-Key header. Disabled in production.",
+        },
+    ]
+    app.openapi_schema = None  # invalidate cached schema so tag mutation takes effect
     logger.info("Beta mode: /demo/settle and /faucet endpoints enabled")
 
 

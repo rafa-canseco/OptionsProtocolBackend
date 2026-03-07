@@ -1,10 +1,22 @@
+import pytest
 from fastapi.testclient import TestClient
 
+import src.api.routes as routes_module
 from src.main import app
 
 client = TestClient(app)
 
 VALID_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678"
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limit_state():
+    """Clear in-memory rate-limit dicts between tests to prevent state leakage."""
+    routes_module._waitlist_hits.clear()
+    routes_module._read_hits.clear()
+    yield
+    routes_module._waitlist_hits.clear()
+    routes_module._read_hits.clear()
 
 
 def test_health():
@@ -87,3 +99,71 @@ def test_batch_status_removed():
     """GET /batch/status no longer exists."""
     response = client.get("/batch/status")
     assert response.status_code == 404
+
+
+# --- CORS startup guard ---
+
+
+def test_cors_wildcard_raises_in_production(monkeypatch):
+    """CORS '*' with beta_mode=False must raise RuntimeError at startup."""
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "*")
+    monkeypatch.setattr(main_module.settings, "beta_mode", False)
+    with pytest.raises(RuntimeError, match="CORS cannot be"):
+        with TestClient(main_module.app):
+            pass  # lifespan fires on first request context enter
+
+
+def test_cors_wildcard_allowed_in_beta(monkeypatch):
+    """CORS '*' with beta_mode=True should start cleanly (only a warning)."""
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "*")
+    monkeypatch.setattr(main_module.settings, "beta_mode", True)
+    with TestClient(main_module.app) as c:
+        response = c.get("/health")
+    assert response.status_code == 200
+
+
+# --- Rate limiting ---
+
+
+def test_positions_rate_limit():
+    """31st request from the same IP within 60s should return 429."""
+    headers = {"X-Forwarded-For": "1.2.3.4"}
+    for _ in range(30):
+        r = client.get(f"/positions/{VALID_ADDRESS}", headers=headers)
+        assert r.status_code == 200
+    r = client.get(f"/positions/{VALID_ADDRESS}", headers=headers)
+    assert r.status_code == 429
+
+
+def test_positions_rate_limit_independent_ips():
+    """Different IPs should have independent rate-limit buckets."""
+    for i in range(30):
+        r = client.get(
+            f"/positions/{VALID_ADDRESS}",
+            headers={"X-Forwarded-For": f"10.0.0.{i}"},
+        )
+        assert r.status_code == 200
+
+
+def test_waitlist_count():
+    """GET /waitlist/count should return a non-negative integer."""
+    response = client.get("/waitlist/count")
+    assert response.status_code == 200
+    data = response.json()
+    assert "count" in data
+    assert isinstance(data["count"], int)
+    assert data["count"] >= 0
+
+
+def test_waitlist_count_rate_limit():
+    """31st request from the same IP within 60s should return 429."""
+    headers = {"X-Forwarded-For": "2.3.4.5"}
+    for _ in range(30):
+        r = client.get("/waitlist/count", headers=headers)
+        assert r.status_code == 200
+    r = client.get("/waitlist/count", headers=headers)
+    assert r.status_code == 429
