@@ -189,3 +189,6 @@ create table if not exists available_otokens (
   collateral_asset text not null,
   created_at timestamptz not null default now()
 );
+
+create index if not exists idx_available_otokens_expiry
+  on available_otokens(expiry);

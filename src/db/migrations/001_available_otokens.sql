@@ -1,5 +1,5 @@
 -- Migration: Create available_otokens table
--- Run in Supabase SQL Editor: https://supabase.com/dashboard/project/emkndwvhsefbyiflgzop/sql
+-- Run in Supabase SQL Editor for the target project
 -- Required before otoken_manager bot can write discovered oTokens
 
 create table if not exists available_otokens (
