@@ -47,15 +47,15 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
-    # physicalRedeem(address oToken, address user, uint256 amount, uint256 maxCollateralSpent)
+    # physicalRedeem(address oToken, address user, uint256 amount, uint256 maxCollateralSpent, address mm)
     # Executes physical delivery for ITM positions via flash loan + DEX swap.
-    # Contract handles swap routing internally (exactOutputSingle).
     {
         "inputs": [
             {"name": "oToken", "type": "address"},
             {"name": "user", "type": "address"},
             {"name": "amount", "type": "uint256"},
             {"name": "maxCollateralSpent", "type": "uint256"},
+            {"name": "mm", "type": "address"},
         ],
         "name": "physicalRedeem",
         "outputs": [],
@@ -74,14 +74,14 @@ BATCH_SETTLER_ABI = [
         "name": "PhysicalDelivery",
         "type": "event",
     },
-    # batchPhysicalRedeem(address[], address[], uint256[], uint256[])
-    # Not used yet (settler does sequential physicalRedeem), but ready for batch optimization.
+    # batchPhysicalRedeem(address[], address[], uint256[], uint256[], address[])
     {
         "inputs": [
             {"name": "oTokens", "type": "address[]"},
             {"name": "users", "type": "address[]"},
             {"name": "amounts", "type": "uint256[]"},
             {"name": "maxCollateralSpents", "type": "uint256[]"},
+            {"name": "mms", "type": "address[]"},
         ],
         "name": "batchPhysicalRedeem",
         "outputs": [],
@@ -215,7 +215,7 @@ ORACLE_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
-    # setExpiryPrice(address asset, uint256 expiry, uint256 price) — owner only
+    # setExpiryPrice(address asset, uint256 expiry, uint256 price) — owner or operator
     {
         "inputs": [
             {"name": "_asset", "type": "address"},
@@ -225,6 +225,30 @@ ORACLE_ABI = [
         "name": "setExpiryPrice",
         "outputs": [],
         "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # transferOwnership(address newOwner) — 2-step, step 1
+    {
+        "inputs": [{"name": "newOwner", "type": "address"}],
+        "name": "transferOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # acceptOwnership() — 2-step, step 2
+    {
+        "inputs": [],
+        "name": "acceptOwnership",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # owner() — read current owner
+    {
+        "inputs": [],
+        "name": "owner",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
         "type": "function",
     },
 ]
