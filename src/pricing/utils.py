@@ -4,6 +4,7 @@ Pure functions with zero settings dependencies. Used by the
 otoken_manager bot for on-chain oToken creation.
 """
 
+import os
 from datetime import datetime, timezone, timedelta
 
 STRIKE_DECIMALS = 8
@@ -47,7 +48,14 @@ def get_friday_expiries(
     Fridays within 48h of `now` are excluded so users don't see
     options about to expire. All timestamps satisfy the contract
     constraint ``ts % 86400 == 28800``.
+
+    Override: set CUSTOM_EXPIRY_TIMESTAMPS env var with comma-separated
+    unix timestamps to bypass Friday logic (e.g. for pilot testing).
     """
+    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
+    if custom:
+        return [int(ts.strip()) for ts in custom.split(",")]
+
     if now is None:
         now = datetime.now(timezone.utc)
 
