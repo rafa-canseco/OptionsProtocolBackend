@@ -55,6 +55,9 @@ create table if not exists order_events (
   otoken_address text not null,
   amount numeric not null,
   premium numeric not null,
+  gross_premium numeric,
+  net_premium numeric,
+  protocol_fee numeric,
   collateral numeric not null,
   vault_id integer not null,
   -- Denormalized oToken metadata
