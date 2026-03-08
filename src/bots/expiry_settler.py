@@ -23,6 +23,7 @@ from src.contracts.web3_client import (
     get_operator_account,
     build_and_send_tx,
 )
+from src.pricing.chainlink import get_eth_price_raw
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def get_expired_unsettled() -> list[dict]:
     now = int(datetime.now(timezone.utc).timestamp())
     result = (
         client.table("order_events")
-        .select("user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put")
+        .select("user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address")
         .eq("is_settled", False)
         .lt("expiry", now)
         .not_.is_("strike_price", "null")
@@ -223,12 +224,73 @@ def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> Non
         raise
 
 
+def _ensure_expiry_prices_set(expiries: set[int]) -> None:
+    """Set Oracle expiry prices from Chainlink for all needed expiries.
+
+    Reads the current Chainlink ETH/USD price and calls
+    setExpiryPrice for each expiry that isn't finalized yet.
+    Skips (with warning) any expiry that fails.
+    """
+    if not expiries:
+        return
+
+    oracle = get_oracle()
+    account = get_operator_account()
+    weth = Web3.to_checksum_address(settings.weth_address)
+
+    chainlink_price, decimals, _ = get_eth_price_raw()
+    if decimals != 8:
+        chainlink_price = int(
+            chainlink_price * (10**8) / (10**decimals)
+        )
+
+    for expiry in expiries:
+        try:
+            price_raw, is_finalized = oracle.functions.getExpiryPrice(
+                weth, expiry
+            ).call()
+            if is_finalized:
+                logger.info(
+                    "Expiry price already set for %d: %d",
+                    expiry, price_raw,
+                )
+                continue
+        except Exception:
+            logger.exception(
+                "Failed to read expiry price for %d", expiry
+            )
+            continue
+
+        try:
+            tx_fn = oracle.functions.setExpiryPrice(
+                weth, expiry, chainlink_price
+            )
+            tx_hash = build_and_send_tx(tx_fn, account)
+            logger.info(
+                "Set expiry price %d for expiry %d, tx: %s",
+                chainlink_price, expiry, tx_hash,
+            )
+        except Exception as e:
+            if "PriceAlreadySet" in str(e):
+                logger.info(
+                    "Expiry price already set for %d (race)", expiry
+                )
+            else:
+                logger.exception(
+                    "Failed to set expiry price for %d", expiry
+                )
+
+
 async def settle_once():
     """Single settlement cycle: 2-phase (batch settle + physical delivery for ITM)."""
     positions = get_expired_unsettled()
     if not positions:
         logger.info("No expired positions to settle")
         return
+
+    # --- Phase 0: set expiry prices on Oracle from Chainlink ---
+    expiries = {pos["expiry"] for pos in positions}
+    await asyncio.to_thread(_ensure_expiry_prices_set, expiries)
 
     # --- Phase 1: batchSettleVaults (settles all expired vaults on-chain) ---
     settler = get_batch_settler()
@@ -292,15 +354,32 @@ async def settle_once():
     for pos in itm_positions:
         otoken_addr = pos["otoken_address"]
         user_addr = pos["user_address"]
+        mm_addr = pos.get("mm_address", "")
         amount_raw = int(pos["amount"])
         vault_id = pos["vault_id"]
         expiry_price_raw = pos.get("expiry_price_raw")
         expiry_price_str = str(expiry_price_raw) if expiry_price_raw is not None else None
 
+        if not mm_addr:
+            logger.error(
+                "ALERT: No mm_address for user=%s vault=%d. "
+                "Cannot do physical delivery.",
+                user_addr, vault_id,
+            )
+            try:
+                _db_update(user_addr, vault_id, {
+                    "settlement_type": "physical_failed",
+                    "is_itm": True,
+                    "expiry_price": expiry_price_str,
+                }, "Phase 2 missing-mm mark")
+            except Exception:
+                pass
+            continue
+
         # Step 1: get swap quote
         try:
             max_collateral, contra_amount = await asyncio.to_thread(
-                compute_max_collateral_spent, pos,
+                compute_max_collateral_spent, pos, expiry_price_raw,
             )
         except Exception:
             logger.exception(
@@ -329,6 +408,7 @@ async def settle_once():
                 Web3.to_checksum_address(user_addr),
                 amount_raw,
                 max_collateral,
+                Web3.to_checksum_address(mm_addr),
             )
             tx_hash = build_and_send_tx(tx_fn, account)
             delivery_succeeded = True
