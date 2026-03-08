@@ -27,7 +27,6 @@ from src.contracts.web3_client import (
 logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 50  # max vaults per tx to avoid gas limit
-UNISWAP_FEE_TIER = 3000  # 0.3% — standard tier for ETH/USDC on Uniswap V3
 
 
 def get_expired_unsettled() -> list[dict]:
@@ -185,7 +184,7 @@ def compute_max_collateral_spent(
     quoter = get_uniswap_quoter()
     try:
         result = quoter.functions.quoteExactOutputSingle(
-            (token_in, token_out, contra_amount, UNISWAP_FEE_TIER, 0)
+            (token_in, token_out, contra_amount, settings.uniswap_fee_tier, 0)
         ).call()
         amount_in = result[0]
     except Exception:
