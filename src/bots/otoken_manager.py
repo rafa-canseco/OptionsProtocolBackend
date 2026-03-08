@@ -9,6 +9,7 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from web3 import Web3
@@ -186,20 +187,51 @@ def ensure_otokens_exist(
     return results
 
 
-def _is_friday_8am_utc(ts: int) -> bool:
-    """Return True if timestamp falls on Friday 08:00 UTC."""
+def _get_custom_expiry_set() -> set[int]:
+    """Return custom expiry timestamps from env, or empty set."""
+    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
+    if not custom:
+        return set()
+    return {int(ts.strip()) for ts in custom.split(",")}
+
+
+def _is_valid_expiry(ts: int) -> bool:
+    """Return True if timestamp is a valid expiry (Friday 08:00 UTC or custom)."""
+    if ts in _get_custom_expiry_set():
+        return True
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
     return dt.weekday() == FRIDAY_WEEKDAY and dt.hour == 8 and dt.minute == 0
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens expiring within CUTOFF_HOURS."""
+    """Delete rows from available_otokens expiring within CUTOFF_HOURS.
+
+    Custom expiry timestamps are exempt from pruning.
+    """
     cutoff_ts = int(
         (datetime.now(timezone.utc) + timedelta(hours=CUTOFF_HOURS)).timestamp()
     )
+    custom = _get_custom_expiry_set()
     client = get_client()
-    client.table("available_otokens").delete().lt("expiry", cutoff_ts).execute()
-    logger.info("Pruned available_otokens with expiry < now+%dh", CUTOFF_HOURS)
+    result = (
+        client.table("available_otokens")
+        .select("id, expiry")
+        .lt("expiry", cutoff_ts)
+        .execute()
+    )
+    prune_ids = [
+        r["id"] for r in (result.data or [])
+        if r["expiry"] not in custom
+    ]
+    if prune_ids:
+        client.table("available_otokens").delete().in_(
+            "id", prune_ids
+        ).execute()
+    logger.info(
+        "Pruned %d available_otokens (skipped %d custom)",
+        len(prune_ids),
+        len(result.data or []) - len(prune_ids),
+    )
 
 
 def _upsert_available_otokens(
@@ -214,7 +246,7 @@ def _upsert_available_otokens(
     seen_addresses: set[str] = set()
     rows = []
     for otoken_addr, spec in paired:
-        if not _is_friday_8am_utc(spec.expiry_ts):
+        if not _is_valid_expiry(spec.expiry_ts):
             expiry_dt = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc)
             logger.warning(
                 "Skipping non-Friday oToken: %s expiry=%s",
