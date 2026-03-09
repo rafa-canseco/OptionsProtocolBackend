@@ -42,7 +42,7 @@ def get_expired_unsettled() -> list[dict]:
         client.table("order_events")
         .select("user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address")
         .eq("is_settled", False)
-        .lt("expiry", now)
+        .lte("expiry", now)
         .not_.is_("strike_price", "null")
         .not_.is_("is_put", "null")
         .not_.is_("amount", "null")
@@ -532,8 +532,8 @@ async def _wait_until_target_hour():
     if target <= now:
         target += timedelta(days=1)
 
-    wait_seconds = (target - now).total_seconds()
-    logger.info(f"Expiry settler waiting {wait_seconds:.0f}s until {target.isoformat()}")
+    wait_seconds = (target - now).total_seconds() + 10  # 10s buffer past the hour
+    logger.info(f"Expiry settler waiting {wait_seconds:.0f}s until {target.isoformat()} +10s")
     await asyncio.sleep(wait_seconds)
 
 
