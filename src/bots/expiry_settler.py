@@ -301,7 +301,7 @@ async def settle_once():
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
         batch = positions[i:i + MAX_BATCH_SIZE]
-        owners = [p["user_address"] for p in batch]
+        owners = [Web3.to_checksum_address(p["user_address"]) for p in batch]
         vault_ids = [p["vault_id"] for p in batch]
 
         # Step 1: on-chain settlement
@@ -538,8 +538,20 @@ async def _wait_until_target_hour():
 
 
 async def run():
-    """Main loop: settle at 08:00 UTC daily."""
+    """Main loop: settle at 08:00 UTC daily.
+
+    On startup, runs settle_once() immediately to catch any
+    expired positions that were missed (e.g. deploy during
+    settlement window). Then enters the daily wait loop.
+    """
     logger.info("Expiry settler starting (physical settlement enabled)")
+
+    # Catch-up: settle anything already expired
+    try:
+        await settle_once()
+    except Exception:
+        logger.exception("Startup catch-up settlement failed")
+
     while True:
         await _wait_until_target_hour()
         try:
