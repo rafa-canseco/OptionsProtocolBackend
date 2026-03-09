@@ -68,6 +68,13 @@ create table if not exists order_events (
   is_settled boolean not null default false,
   settled_at timestamptz,
   settlement_tx_hash text,
+  -- Settlement outcome (populated by expiry_settler bot)
+  settlement_type text,
+  is_itm boolean,
+  expiry_price numeric,
+  delivered_asset text,
+  delivered_amount numeric,
+  delivery_tx_hash text,
   -- Indexing metadata
   indexed_at timestamptz not null default now()
 );
