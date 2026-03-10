@@ -212,7 +212,7 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     except Exception as e:
         logger.error(f"Gas estimation failed for tx from {account.address}: {e}")
         raise
-    gas_limit = int(gas_estimate * 1.2)
+    gas_limit = int(gas_estimate * 2)
 
     w3 = get_w3()
     tx_dict = contract_fn.build_transaction(
