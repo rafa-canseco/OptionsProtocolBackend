@@ -200,12 +200,17 @@ def build_and_send_eth_transfer(
     return _sign_send_and_confirm(w3, tx_dict, account, "ETH transfer", tx_timeout)
 
 
+FALLBACK_GAS_LIMIT = 3_000_000
+
+
 def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
     Uses a lock + local nonce tracker to prevent nonce collisions.
     Retries with bumped gas price to replace stuck pending transactions.
-    Waits for receipt and raises on revert.
+    Waits for receipt and raises on revert. If the first attempt reverts
+    (likely out-of-gas from a stale estimate), retries once with a high
+    fixed gas limit.
     """
     try:
         gas_estimate = contract_fn.estimate_gas({"from": account.address})
@@ -222,4 +227,25 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
             "chainId": settings.chain_id,
         }
     )
-    return _sign_send_and_confirm(w3, tx_dict, account, "Transaction", tx_timeout)
+    try:
+        return _sign_send_and_confirm(
+            w3, tx_dict, account, "Transaction", tx_timeout,
+        )
+    except RuntimeError as e:
+        if "reverted" not in str(e):
+            raise
+        logger.warning(
+            f"Tx reverted with gas limit {gas_limit}, "
+            f"retrying with fallback {FALLBACK_GAS_LIMIT}"
+        )
+
+    tx_dict = contract_fn.build_transaction(
+        {
+            "from": account.address,
+            "gas": FALLBACK_GAS_LIMIT,
+            "chainId": settings.chain_id,
+        }
+    )
+    return _sign_send_and_confirm(
+        w3, tx_dict, account, "Transaction (gas retry)", tx_timeout,
+    )
