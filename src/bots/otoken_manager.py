@@ -108,9 +108,18 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
     if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
         return
 
-    tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
-    wl_hash = build_and_send_tx(tx_fn, account)
-    logger.info("Whitelisted oToken %s, tx: %s", otoken_addr, wl_hash)
+    try:
+        tx_fn = whitelist.functions.whitelistOToken(otoken_addr)
+        wl_hash = build_and_send_tx(tx_fn, account)
+        logger.info("Whitelisted oToken %s, tx: %s", otoken_addr, wl_hash)
+    except Exception:
+        if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
+            logger.info(
+                "oToken %s already whitelisted (by factory), skipping: %s",
+                otoken_addr, label,
+            )
+            return
+        raise
 
 
 def ensure_otokens_exist(
