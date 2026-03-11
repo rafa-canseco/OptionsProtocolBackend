@@ -152,22 +152,26 @@ def _fetch_active_quotes() -> list[dict]:
 
 
 def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
-    """For each oToken, pick the quote with the highest bid price.
+    """For each (strike, expiry, is_put), pick the quote with the highest bid.
 
-    When users sell options, they want the highest premium — so we pick
-    the MM offering the best (highest) bid for each oToken.
+    Deduplicates by option identity rather than oToken address to handle
+    cases where multiple oTokens exist for the same strike/expiry/type
+    (e.g. after a factory upgrade).
     """
-    by_otoken: dict[str, dict] = {}
+    by_option: dict[tuple, dict] = {}
     for q in quotes:
         try:
-            otoken = q["otoken_address"]
             bid = float(q["bid_price"])
+            strike = q.get("strike_price")
+            expiry = q.get("expiry")
+            is_put = q.get("is_put")
         except (KeyError, ValueError, TypeError) as e:
             logger.warning("Skipping malformed quote %s: %s", q.get("id"), e)
             continue
-        if otoken not in by_otoken or bid > float(by_otoken[otoken]["bid_price"]):
-            by_otoken[otoken] = q
-    return list(by_otoken.values())
+        key = (strike, expiry, is_put)
+        if key not in by_option or bid > float(by_option[key]["bid_price"]):
+            by_option[key] = q
+    return list(by_option.values())
 
 
 def _quote_to_price_response(q: dict) -> PriceResponse | None:
