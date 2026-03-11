@@ -213,7 +213,7 @@ def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> Non
         result = (
             client.table("order_events")
             .update(fields)
-            .eq("user_address", user_addr)
+            .eq("user_address", user_addr.lower())
             .eq("vault_id", vault_id)
             .execute()
         )
@@ -503,7 +503,7 @@ def _mark_batch_settled(
                 "settled_at": now,
                 "settlement_tx_hash": tx_hash,
                 "settlement_type": "cash",
-            }).eq("user_address", user_addr).eq("vault_id", vault_id).execute()
+            }).eq("user_address", user_addr.lower()).eq("vault_id", vault_id).execute()
             if not result.data:
                 logger.error(
                     f"_mark_batch_settled matched no rows: user={user_addr} vault={vault_id}"
