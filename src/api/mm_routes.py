@@ -16,6 +16,7 @@ Monitoring:
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,7 @@ from src.contracts.web3_client import get_batch_settler, get_w3
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
 from src.models.mm import (
+    CapacityUpdateRequest,
     ExpiryBucket,
     ExposureResponse,
     FillResponse,
@@ -465,10 +467,52 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
     )
 
 
+@router.post(
+    "/capacity",
+    summary="Report MM capacity",
+    tags=["MM Monitoring"],
+)
+async def report_capacity(
+    body: CapacityUpdateRequest,
+    mm_address: str = Depends(require_mm_api_key),
+):
+    """Receive a capacity report from a market maker.
+
+    The mm_address is taken from the authenticated API key, not the body.
+    Upserts into mm_capacity keyed by mm_address.
+    """
+    row = {
+        "mm_address": mm_address.lower(),
+        "asset": body.asset,
+        "capacity_eth": body.capacity_eth,
+        "capacity_usd": body.capacity_usd,
+        "status": body.status,
+        "reported_at": datetime.fromtimestamp(time.time(), tz=timezone.utc).isoformat(),
+    }
+    for field in (
+        "premium_pool_usd",
+        "hedge_pool_usd",
+        "hedge_pool_withdrawable_usd",
+        "leverage",
+        "open_positions_count",
+        "open_positions_notional_usd",
+    ):
+        val = getattr(body, field)
+        if val is not None:
+            row[field] = val
+
+    try:
+        client = get_client()
+        client.table("mm_capacity").upsert(row, on_conflict="mm_address").execute()
+    except Exception:
+        logger.exception("Failed to upsert mm_capacity for %s", mm_address)
+        raise HTTPException(status_code=502, detail="Could not save capacity")
+
+    return {"status": "ok"}
+
+
 def _ts_to_iso(ts: int) -> str:
     """Convert unix timestamp to ISO 8601 string for Supabase gte filter."""
-    from datetime import datetime, timezone
-
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
