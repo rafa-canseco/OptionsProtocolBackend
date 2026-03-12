@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from src.config import settings
 from src.db.database import get_client
+from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
 from src.pricing.circuit_breaker import circuit_breaker
@@ -41,6 +42,8 @@ _waitlist_hits: dict[str, list[float]] = defaultdict(list)
 _READ_WINDOW = 60  # seconds
 _READ_MAX_REQUESTS = 30  # allows 1 req/2s; frontend polls /positions every 10s
 _read_hits: dict[str, list[float]] = defaultdict(list)
+
+_CAPACITY_STALE_SECONDS = 120  # MM reports every ~30s; 2min = stale
 
 
 def _get_client_ip(request: Request) -> str:
@@ -110,6 +113,91 @@ def _check_read_rate_limit(ip: str) -> None:
             status_code=429, detail="Too many requests, try again later"
         )
     _read_hits[ip].append(now)
+
+
+def _fetch_capacity_rows() -> list[dict]:
+    """Read non-stale mm_capacity rows from Supabase."""
+    cutoff = datetime.fromtimestamp(
+        time.time() - _CAPACITY_STALE_SECONDS, tz=timezone.utc
+    ).isoformat()
+    client = get_client()
+    result = (
+        client.table("mm_capacity").select("*").gte("reported_at", cutoff).execute()
+    )
+    return result.data or []
+
+
+def _aggregate_capacity(rows: list[dict]) -> dict:
+    """Aggregate capacity rows into a single summary."""
+    if not rows:
+        return {
+            "capacity_eth": 0.0,
+            "capacity_usd": 0.0,
+            "market_open": False,
+            "market_status": "full",
+            "max_position_eth": 0.0,
+            "mm_count": 0,
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    total_eth = 0.0
+    total_usd = 0.0
+    max_single = 0.0
+    any_active = False
+    any_degraded = False
+    latest_at = ""
+
+    for r in rows:
+        eth = float(r.get("capacity_eth", 0))
+        usd = float(r.get("capacity_usd", 0))
+        total_eth += eth
+        total_usd += usd
+        max_single = max(max_single, eth)
+        status = r.get("status", "full")
+        if status == "active":
+            any_active = True
+        elif status == "degraded":
+            any_degraded = True
+        reported = r.get("reported_at", "")
+        if reported > latest_at:
+            latest_at = reported
+
+    if any_active:
+        market_status = "active"
+    elif any_degraded:
+        market_status = "degraded"
+    else:
+        market_status = "full"
+
+    return {
+        "capacity_eth": total_eth,
+        "capacity_usd": total_usd,
+        "market_open": market_status != "full",
+        "market_status": market_status,
+        "max_position_eth": max_single,
+        "mm_count": len(rows),
+        "updated_at": latest_at,
+    }
+
+
+@router.get(
+    "/capacity",
+    response_model=CapacityResponse,
+    tags=["Market Data"],
+    summary="Get available market capacity",
+)
+async def get_capacity():
+    """Return aggregated capacity across all active market makers.
+
+    Capacity is considered stale if not reported within 120 seconds.
+    """
+    try:
+        rows = _fetch_capacity_rows()
+    except Exception:
+        logger.exception("Failed to fetch mm_capacity")
+        raise HTTPException(502, "Capacity data unavailable")
+
+    return _aggregate_capacity(rows)
 
 
 def _fetch_active_quotes() -> list[dict]:
@@ -257,6 +345,19 @@ async def get_prices():
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
+
+    # Check if all MMs are at capacity
+    try:
+        cap_rows = _fetch_capacity_rows()
+        if cap_rows and all(r.get("status") == "full" for r in cap_rows):
+            raise HTTPException(
+                status_code=503,
+                detail="Market at capacity — all market makers are full",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Could not check mm_capacity, proceeding", exc_info=True)
 
     now = time.monotonic()
     if _prices_cache is not None and (now - _prices_cached_at) < _PRICES_TTL:

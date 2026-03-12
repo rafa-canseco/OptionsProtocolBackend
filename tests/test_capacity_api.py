@@ -1,0 +1,280 @@
+"""Tests for MM capacity endpoints (POST /mm/capacity, GET /capacity)."""
+
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from src.api.deps import require_mm_api_key
+from src.main import app
+
+client = TestClient(app)
+
+MM_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+@pytest.fixture()
+def auth_headers():
+    """Override FastAPI dependency to bypass real API key auth."""
+    app.dependency_overrides[require_mm_api_key] = lambda: MM_ADDRESS
+    yield {"X-API-Key": "fake"}
+    app.dependency_overrides.pop(require_mm_api_key, None)
+
+
+@pytest.fixture()
+def mock_db():
+    """Patch get_client for both mm_routes and routes modules."""
+    mock_client = MagicMock()
+    with (
+        patch("src.api.mm_routes.get_client", return_value=mock_client),
+        patch("src.api.routes.get_client", return_value=mock_client),
+    ):
+        yield mock_client
+
+
+class TestPostCapacity:
+    def test_accepts_valid_report(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"mm_address": MM_ADDRESS}]
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "ETH",
+                "capacity_eth": 10.5,
+                "capacity_usd": 21000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+        # Verify upsert was called with authenticated address
+        call_args = mock_db.table.return_value.upsert.call_args
+        row = call_args[0][0]
+        assert row["mm_address"] == MM_ADDRESS.lower()
+        assert row["capacity_eth"] == 10.5
+        assert row["status"] == "active"
+
+    def test_accepts_internal_mm_fields(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{}]
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "capacity_eth": 5.0,
+                "capacity_usd": 10000.0,
+                "status": "degraded",
+                "premium_pool_usd": 12000.0,
+                "hedge_pool_usd": 15000.0,
+                "leverage": 3,
+                "open_positions_count": 2,
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        row = mock_db.table.return_value.upsert.call_args[0][0]
+        assert row["premium_pool_usd"] == 12000.0
+        assert row["leverage"] == 3
+
+    def test_rejects_invalid_status(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "invalid",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_negative_capacity(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "capacity_eth": -1.0,
+                "capacity_usd": 2000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_db_failure_returns_502(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.side_effect = Exception(
+            "DB down"
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 502
+
+
+class TestGetCapacity:
+    def test_returns_aggregated_capacity(self, mock_db):
+        now = _now_iso()
+        mock_db.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "mm_address": "0xaaa",
+                    "capacity_eth": 10.0,
+                    "capacity_usd": 20000.0,
+                    "status": "active",
+                    "reported_at": now,
+                },
+                {
+                    "mm_address": "0xbbb",
+                    "capacity_eth": 5.0,
+                    "capacity_usd": 10000.0,
+                    "status": "active",
+                    "reported_at": now,
+                },
+            ]
+        )
+
+        resp = client.get("/capacity")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["capacity_eth"] == 15.0
+        assert data["capacity_usd"] == 30000.0
+        assert data["market_open"] is True
+        assert data["market_status"] == "active"
+        assert data["max_position_eth"] == 10.0
+        assert data["mm_count"] == 2
+
+    def test_returns_full_when_no_mms(self, mock_db):
+        mock_db.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        resp = client.get("/capacity")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["market_open"] is False
+        assert data["market_status"] == "full"
+        assert data["mm_count"] == 0
+
+    def test_degraded_status(self, mock_db):
+        now = _now_iso()
+        mock_db.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "mm_address": "0xaaa",
+                    "capacity_eth": 2.0,
+                    "capacity_usd": 4000.0,
+                    "status": "degraded",
+                    "reported_at": now,
+                },
+            ]
+        )
+
+        resp = client.get("/capacity")
+        data = resp.json()
+        assert data["market_status"] == "degraded"
+        assert data["market_open"] is True
+
+    def test_mixed_statuses(self, mock_db):
+        """One active + one full = market is active."""
+        now = _now_iso()
+        mock_db.table.return_value.select.return_value.gte.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "mm_address": "0xaaa",
+                    "capacity_eth": 5.0,
+                    "capacity_usd": 10000.0,
+                    "status": "active",
+                    "reported_at": now,
+                },
+                {
+                    "mm_address": "0xbbb",
+                    "capacity_eth": 0.0,
+                    "capacity_usd": 0.0,
+                    "status": "full",
+                    "reported_at": now,
+                },
+            ]
+        )
+
+        resp = client.get("/capacity")
+        data = resp.json()
+        assert data["market_status"] == "active"
+        assert data["market_open"] is True
+        assert data["capacity_eth"] == 5.0
+
+
+class TestPricesCapacityIntegration:
+    def test_prices_returns_503_when_all_full(self, mock_db):
+        """When all MMs report full, /prices returns 503."""
+        now = _now_iso()
+        # mm_capacity query returns all full
+        cap_result = MagicMock(
+            data=[
+                {"mm_address": "0xaaa", "status": "full", "reported_at": now},
+            ]
+        )
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_capacity":
+                mock_table.select.return_value.gte.return_value.execute.return_value = (
+                    cap_result
+                )
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with patch("src.api.routes.circuit_breaker") as mock_cb:
+            mock_cb.is_paused = False
+            resp = client.get("/prices")
+
+        assert resp.status_code == 503
+        assert "capacity" in resp.json()["detail"].lower()
+
+    def test_prices_proceeds_when_capacity_available(self, mock_db):
+        """When at least one MM is active, /prices proceeds normally."""
+        now = _now_iso()
+
+        cap_result = MagicMock(
+            data=[
+                {"mm_address": "0xaaa", "status": "active", "reported_at": now},
+            ]
+        )
+        quotes_result = MagicMock(data=[])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_capacity":
+                mock_table.select.return_value.gte.return_value.execute.return_value = (
+                    cap_result
+                )
+            elif table_name == "mm_quotes":
+                mock_table.select.return_value.eq.return_value.gt.return_value.gt.return_value.execute.return_value = quotes_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with patch("src.api.routes.circuit_breaker") as mock_cb:
+            mock_cb.is_paused = False
+            # Reset prices cache
+            with patch.object(
+                __import__("src.api.routes", fromlist=["routes"]),
+                "_prices_cache",
+                None,
+            ):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
