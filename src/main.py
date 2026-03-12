@@ -10,6 +10,7 @@ from src.api.results import router as results_router
 from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
 from src.api.mm_ws import router as mm_ws_router
+from src.api.activity import router as activity_router
 from src.config import settings
 
 logging.basicConfig(
@@ -152,6 +153,7 @@ app.include_router(results_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)
 app.include_router(mm_ws_router)
+app.include_router(activity_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
