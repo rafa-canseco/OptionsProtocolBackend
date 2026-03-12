@@ -513,8 +513,6 @@ async def report_capacity(
 
 def _ts_to_iso(ts: int) -> str:
     """Convert unix timestamp to ISO 8601 string for Supabase gte filter."""
-    from datetime import datetime, timezone
-
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 

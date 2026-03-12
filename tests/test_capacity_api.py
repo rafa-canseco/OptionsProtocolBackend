@@ -278,3 +278,118 @@ class TestPricesCapacityIntegration:
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
+
+    def test_prices_failopen_on_capacity_db_error(self, mock_db):
+        """When capacity DB errors, /prices proceeds (fail-open)."""
+        quotes_result = MagicMock(data=[])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_capacity":
+                (
+                    mock_table.select.return_value.gte.return_value.execute
+                ).side_effect = Exception("DB down")
+            elif table_name == "mm_quotes":
+                (
+                    mock_table.select.return_value.eq.return_value.gt.return_value.gt.return_value.execute
+                ).return_value = quotes_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with patch("src.api.routes.circuit_breaker") as mock_cb:
+            mock_cb.is_paused = False
+            with patch.object(
+                __import__("src.api.routes", fromlist=["routes"]),
+                "_prices_cache",
+                None,
+            ):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+
+    def test_prices_empty_capacity_does_not_503(self, mock_db):
+        """Empty cap_rows (no MMs) does not trigger 503."""
+        cap_result = MagicMock(data=[])
+        quotes_result = MagicMock(data=[])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_capacity":
+                (
+                    mock_table.select.return_value.gte.return_value.execute
+                ).return_value = cap_result
+            elif table_name == "mm_quotes":
+                (
+                    mock_table.select.return_value.eq.return_value.gt.return_value.gt.return_value.execute
+                ).return_value = quotes_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with patch("src.api.routes.circuit_breaker") as mock_cb:
+            mock_cb.is_paused = False
+            with patch.object(
+                __import__("src.api.routes", fromlist=["routes"]),
+                "_prices_cache",
+                None,
+            ):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+
+
+class TestCapacityAuth:
+    def test_post_capacity_requires_auth(self, mock_db):
+        """POST /mm/capacity without API key returns 401."""
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "active",
+            },
+        )
+        assert resp.status_code in (401, 422)
+
+
+class TestGetCapacityErrors:
+    def test_get_capacity_502_on_db_failure(self, mock_db):
+        """GET /capacity returns 502 when DB is unreachable."""
+        mock_db.table.side_effect = Exception("DB down")
+        resp = client.get("/capacity")
+        assert resp.status_code == 502
+
+
+class TestCapacityAggregationEdgeCases:
+    def test_degraded_plus_full(self, mock_db):
+        """degraded + full (no active) = market degraded."""
+        now = _now_iso()
+        mock_result = MagicMock(
+            data=[
+                {
+                    "mm_address": "0xaaa",
+                    "capacity_eth": 3.0,
+                    "capacity_usd": 6000.0,
+                    "status": "degraded",
+                    "reported_at": now,
+                },
+                {
+                    "mm_address": "0xbbb",
+                    "capacity_eth": 0.0,
+                    "capacity_usd": 0.0,
+                    "status": "full",
+                    "reported_at": now,
+                },
+            ]
+        )
+        (
+            mock_db.table.return_value.select.return_value.gte.return_value.execute
+        ).return_value = mock_result
+
+        resp = client.get("/capacity")
+        data = resp.json()
+        assert data["market_status"] == "degraded"
+        assert data["market_open"] is True
+        # Full MM's capacity not counted
+        assert data["capacity_eth"] == 3.0

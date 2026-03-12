@@ -124,7 +124,9 @@ def _fetch_capacity_rows() -> list[dict]:
     result = (
         client.table("mm_capacity").select("*").gte("reported_at", cutoff).execute()
     )
-    return result.data or []
+    if result.data is None:
+        raise RuntimeError("mm_capacity query returned None data")
+    return result.data
 
 
 def _aggregate_capacity(rows: list[dict]) -> dict:
@@ -148,12 +150,23 @@ def _aggregate_capacity(rows: list[dict]) -> dict:
     latest_at = ""
 
     for r in rows:
-        eth = float(r.get("capacity_eth", 0))
-        usd = float(r.get("capacity_usd", 0))
-        total_eth += eth
-        total_usd += usd
-        max_single = max(max_single, eth)
-        status = r.get("status", "full")
+        try:
+            eth = float(r["capacity_eth"])
+            usd = float(r["capacity_usd"])
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(
+                "Skipping malformed capacity row for %s: %s",
+                r.get("mm_address", "unknown"),
+                e,
+            )
+            continue
+        status = r.get("status", "active")
+        if status == "full":
+            pass  # count for status logic but don't add capacity
+        else:
+            total_eth += eth
+            total_usd += usd
+            max_single = max(max_single, eth)
         if status == "active":
             any_active = True
         elif status == "degraded":
@@ -357,7 +370,9 @@ async def get_prices():
     except HTTPException:
         raise
     except Exception:
-        logger.warning("Could not check mm_capacity, proceeding", exc_info=True)
+        # Fail-open: serve prices when capacity DB is unreachable.
+        # MMs still validate capacity on their side before accepting fills.
+        logger.error("Could not check mm_capacity, proceeding", exc_info=True)
 
     now = time.monotonic()
     if _prices_cache is not None and (now - _prices_cached_at) < _PRICES_TTL:
