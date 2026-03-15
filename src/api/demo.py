@@ -32,7 +32,7 @@ from src.contracts.web3_client import (
     get_w3,
     build_and_send_tx,
 )
-from src.bots.expiry_settler import compute_max_collateral_spent
+from src.bots.expiry_settler import compute_slippage_param
 
 MOCK_CHAINLINK_FEED_ABI = [
     {
@@ -341,11 +341,11 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
                 )
                 logger.info(f"Approved oToken {otoken_addr} to BatchSettler")
 
-            max_collateral, contra_amount = await asyncio.to_thread(
-                compute_max_collateral_spent, position, oracle_price_8dec,
+            slippage_param, contra_amount = await asyncio.to_thread(
+                compute_slippage_param, position, oracle_price_8dec,
             )
             tx_fn = settler.functions.physicalRedeem(
-                otoken_addr, user, short_amount, max_collateral,
+                otoken_addr, user, short_amount, slippage_param,
             )
             delivery_tx_hash = await asyncio.to_thread(build_and_send_tx, tx_fn, account)
             settlement_type = "physical"
