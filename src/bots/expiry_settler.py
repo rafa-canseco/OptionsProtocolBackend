@@ -29,6 +29,7 @@ from src.pricing.chainlink import get_eth_price_raw
 logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 50  # max vaults per tx to avoid gas limit
+BETA_SLIPPAGE_BPS = 1_000  # 10% buffer used in beta mode (no live DEX quote available)
 
 
 def get_expired_unsettled() -> list[dict]:
@@ -132,6 +133,12 @@ def _compute_contra_amount(
         return contra_amount, usdc, weth
 
     contra_amount = (amount_raw * strike) // (10**10)
+    if contra_amount == 0:
+        logger.warning(
+            "CALL contra_amount truncated to 0 (dust position): amount_raw=%d strike=%d",
+            amount_raw,
+            strike,
+        )
     return contra_amount, weth, usdc
 
 
@@ -150,8 +157,8 @@ def _beta_compute_max_collateral_put(contra_amount: int, oracle_price_8dec: int)
     # max_collateral_usdc = contra_weth * oracle_price / 1e(18 + 8 - 6) = contra * price / 1e20
     amount_in = (contra_amount * oracle_price_8dec) // (10**20)
 
-    # 10% buffer (1000 bps)
-    max_collateral = amount_in + (amount_in * 1_000 + 9_999) // 10_000
+    # BETA_SLIPPAGE_BPS ceiling buffer: (amount * bps + 9999) // 10000 rounds up
+    max_collateral = amount_in + (amount_in * BETA_SLIPPAGE_BPS + 9_999) // 10_000
     logger.info(
         f"Beta PUT swap estimate: {amount_in} → max {max_collateral} (10% buffer)"
     )
@@ -165,11 +172,21 @@ def _compute_min_amount_out(contra_amount: int) -> int:
     output). Returns a lower bound with a downside slippage buffer so the
     contract reverts if the DEX returns too little.
 
-    Beta mode: 10% downside buffer.
+    Beta mode: BETA_SLIPPAGE_BPS (10%) downside buffer.
     Production: swap_slippage_tolerance downside.
+
+    contra_amount is the exact USDC owed to the user (strike × oToken amount in
+    the correct decimals). The Uniswap Quoter is not needed here: for CALLs the
+    swap target is exactly contra_amount USDC, so the expected output equals
+    contra_amount and the floor is contra_amount minus the slippage buffer.
     """
+    if contra_amount <= 0:
+        raise ValueError(
+            f"contra_amount must be positive for CALL minAmountOut, got {contra_amount}. "
+            "Check amount_raw and strike_price for this position."
+        )
     if settings.beta_mode:
-        buffer = (contra_amount * 1_000) // 10_000  # 10%
+        buffer = (contra_amount * BETA_SLIPPAGE_BPS) // 10_000
     else:
         slippage_bps = int(settings.swap_slippage_tolerance * 10_000)
         buffer = (contra_amount * slippage_bps) // 10_000
@@ -198,6 +215,17 @@ def compute_slippage_param(
     amount_raw = int(position["amount"])  # 8 decimals (oToken)
     strike = int(position["strike_price"])  # 8 decimals
     is_put = position["is_put"]
+
+    if amount_raw <= 0:
+        raise ValueError(
+            f"amount_raw must be positive, got {amount_raw} "
+            f"for oToken {position.get('otoken_address')}"
+        )
+    if strike <= 0:
+        raise ValueError(
+            f"strike_price must be positive, got {strike} "
+            f"for oToken {position.get('otoken_address')}"
+        )
 
     contra_amount, token_in, token_out = _compute_contra_amount(
         amount_raw, strike, is_put
@@ -449,6 +477,36 @@ async def settle_once():
                 logger.error(
                     f"ALERT: Failed to mark physical_failed for user={user_addr} "
                     f"vault={vault_id}. Position is ITM but has no settlement_type in DB."
+                )
+            continue
+
+        # Last-resort guard: a zero slippage_param would let physicalRedeem accept
+        # any swap output including zero. This should never happen if compute_slippage_param
+        # is correct, but we refuse to call the contract with it regardless.
+        if slippage_param <= 0:
+            logger.error(
+                "ALERT: slippage_param=%d for %s user=%s vault=%d. "
+                "Refusing physicalRedeem with zero/negative slippage bound.",
+                slippage_param,
+                otoken_addr,
+                user_addr,
+                vault_id,
+            )
+            try:
+                _db_update(
+                    user_addr,
+                    vault_id,
+                    {
+                        "settlement_type": "physical_failed",
+                        "is_itm": True,
+                        "expiry_price": expiry_price_str,
+                    },
+                    "Phase 2 zero-slippage-param mark",
+                )
+            except Exception:
+                logger.error(
+                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
+                    f"vault={vault_id} (zero slippage param)."
                 )
             continue
 
