@@ -57,12 +57,7 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(otoken_manager.run()))
         tasks.append(asyncio.create_task(event_indexer.run()))
-        if not settings.beta_mode:
-            tasks.append(asyncio.create_task(expiry_settler.run()))
-        else:
-            logger.info(
-                "Beta mode: expiry_settler disabled (settlement is user-triggered)"
-            )
+        tasks.append(asyncio.create_task(expiry_settler.run()))
         tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
         logger.info("Started %d on-chain bots", len(tasks))
     else:
