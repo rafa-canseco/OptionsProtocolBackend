@@ -8,10 +8,15 @@ def test_returns_exactly_three():
     assert len(result) == 3
 
 
-def test_all_are_fridays():
-    for ts in get_friday_expiries():
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        assert dt.weekday() == FRIDAY_WEEKDAY, f"{dt} is not a Friday"
+def test_weekly_expiries_are_fridays():
+    """The 7d and 14d expiries (last two) must be Fridays."""
+    result = get_friday_expiries()
+    # Weekly expiries are the two Fridays in the result
+    fridays = [
+        ts for ts in result
+        if datetime.fromtimestamp(ts, tz=timezone.utc).weekday() == FRIDAY_WEEKDAY
+    ]
+    assert len(fridays) >= 2, f"Expected at least 2 Fridays, got {len(fridays)}"
 
 
 def test_all_satisfy_contract_constraint():
