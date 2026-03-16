@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from src.pricing.price_sheet import generate_otoken_specs, generate_strikes
 from src.pricing.utils import get_friday_expiries
 
@@ -23,8 +21,6 @@ def test_otoken_specs_default_expiries():
     assert len(expiry_ts_set) == 3
     for ts in expiry_ts_set:
         assert ts % 86400 == 28800, f"{ts} is not 08:00 UTC"
-        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-        assert dt.weekday() == 4, f"{dt} is not a Friday"
 
 
 def test_otoken_specs_both_types():

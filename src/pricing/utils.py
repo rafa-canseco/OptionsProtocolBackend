@@ -10,9 +10,7 @@ from datetime import datetime, timezone, timedelta
 STRIKE_DECIMALS = 8
 FRIDAY_WEEKDAY = 4  # Monday=0, Friday=4
 CUTOFF_HOURS = 48
-WEEKLY_COUNT = 2
-TARGET_MONTHLY_DAYS = 28
-_MIN_VALID_FRIDAYS = 3
+SHORT_TERM_DAYS = 3
 
 
 def strike_to_8_decimals(strike_usd: float) -> int:
@@ -35,22 +33,30 @@ def _next_friday_8am(after: datetime) -> datetime:
     return candidate.replace(hour=8, minute=0, second=0, microsecond=0)
 
 
+def _next_0800_utc(after: datetime) -> datetime:
+    """Return the first 08:00 UTC strictly after `after`."""
+    candidate = after.replace(hour=8, minute=0, second=0, microsecond=0)
+    if candidate <= after:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def get_friday_expiries(
     now: datetime | None = None,
 ) -> list[int]:
-    """Return exactly 3 fixed Friday 08:00 UTC expiry timestamps.
+    """Return exactly 3 expiry timestamps at 08:00 UTC.
 
     Selection:
-      1. Next valid Friday (~1 week out)
-      2. 2nd Friday (~2 weeks out)
-      3. Friday closest to 28 days out (monthly), not already selected
+      1. Short-term (~3d): nearest 08:00 UTC slot (any day)
+      2. Weekly (~7d): Friday 08:00 UTC
+      3. Biweekly (~14d): Friday 08:00 UTC
 
-    Fridays within 48h of `now` are excluded so users don't see
+    Slots within 48h of `now` are excluded so users don't see
     options about to expire. All timestamps satisfy the contract
     constraint ``ts % 86400 == 28800``.
 
     Override: set CUSTOM_EXPIRY_TIMESTAMPS env var with comma-separated
-    unix timestamps to bypass Friday logic (e.g. for pilot testing).
+    unix timestamps to bypass this logic (e.g. for pilot testing).
     """
     custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
     if custom:
@@ -61,33 +67,19 @@ def get_friday_expiries(
 
     cutoff = now + timedelta(hours=CUTOFF_HOURS)
 
-    # Build a pool of upcoming Fridays (8 weeks covers all cases)
-    fridays: list[datetime] = []
-    candidate = _next_friday_8am(now)
-    for _ in range(8):
-        fridays.append(candidate)
-        candidate = candidate + timedelta(weeks=1)
+    # Short-term (~3d): nearest 08:00 UTC slot
+    target_3d = now + timedelta(days=SHORT_TERM_DAYS)
+    exp_3d = target_3d.replace(hour=8, minute=0, second=0, microsecond=0)
+    if exp_3d <= cutoff:
+        exp_3d = _next_0800_utc(cutoff)
 
-    # Filter out Fridays within the 48h cutoff
-    valid = [f for f in fridays if f > cutoff]
+    # Weekly: first 2 Fridays after cutoff
+    exp_7d = _next_friday_8am(cutoff)
+    exp_14d = exp_7d + timedelta(weeks=1)
 
-    if len(valid) < _MIN_VALID_FRIDAYS:
-        raise ValueError(
-            f"Need at least {_MIN_VALID_FRIDAYS} valid Fridays after "
-            f"48h cutoff, got {len(valid)}. now={now.isoformat()}"
-        )
+    # If 3d lands on the same day as the 7d Friday, shift to next day
+    if exp_3d == exp_7d:
+        exp_3d = exp_7d + timedelta(days=1)
 
-    # Pick weekly: first 2 valid Fridays
-    weekly = valid[:WEEKLY_COUNT]
-
-    # Pick monthly: Friday closest to 28 days out, not already selected
-    target = now + timedelta(days=TARGET_MONTHLY_DAYS)
-    weekly_set = set(weekly)
-    remaining = [f for f in valid if f not in weekly_set]
-    monthly = min(
-        remaining,
-        key=lambda f: abs((f - target).total_seconds()),
-    )
-
-    result = sorted({*weekly, monthly})
+    result = sorted({exp_3d, exp_7d, exp_14d})
     return [int(f.timestamp()) for f in result]
