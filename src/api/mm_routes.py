@@ -41,6 +41,7 @@ from src.models.mm import (
 )
 from src.pricing.chainlink import get_eth_price
 from src.pricing.deribit import get_eth_iv
+from src.pricing.utils import get_friday_expiries
 
 logger = logging.getLogger(__name__)
 
@@ -434,15 +435,15 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    # Fetch available oTokens created by the otoken_manager
+    # Fetch available oTokens matching current active expiries only
     otokens: list[OTokenInfo] = []
-    now_ts = int(time.time())
+    active_expiries = get_friday_expiries()
     try:
         client = get_client()
         result = (
             client.table("available_otokens")
             .select("otoken_address,strike_price,expiry,is_put")
-            .gt("expiry", now_ts)
+            .in_("expiry", active_expiries)
             .execute()
         )
         for r in result.data or []:
