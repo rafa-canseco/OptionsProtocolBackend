@@ -25,6 +25,7 @@ class QuoteSubmission(BaseModel):
     )
     signature: str = Field(description="EIP-712 signature (hex, 0x-prefixed, 65 bytes)")
     # Optional metadata for display (not part of EIP-712 struct)
+    asset: str = Field(default="eth", description="Underlying asset (eth, btc)")
     strike_price: float | None = Field(
         default=None, ge=0, description="Strike price in USD"
     )
@@ -125,8 +126,9 @@ class OTokenInfo(BaseModel):
 class MarketDataResponse(BaseModel):
     """Market data for MM's pricing engine."""
 
-    eth_spot: float
-    eth_iv: float
+    asset: str = Field(description="Asset symbol (eth, btc)")
+    spot: float = Field(description="Spot price in USD")
+    iv: float = Field(description="Implied volatility (annualized decimal)")
     protocol_fee_bps: int
     gas_price_gwei: float
     available_otokens: list[OTokenInfo]
@@ -143,6 +145,7 @@ class QuoteResponse(BaseModel):
     max_amount: str
     maker_nonce: int
     signature: str
+    asset: str = "eth"
     strike_price: float | None = None
     expiry: int | None = None
     is_put: bool | None = None
@@ -177,10 +180,11 @@ class CapacityUpdateRequest(BaseModel):
 class CapacityResponse(BaseModel):
     """Public capacity info exposed to the frontend."""
 
-    capacity_eth: float = Field(description="Total available capacity in ETH")
+    asset: str = Field(description="Asset symbol (eth, btc)")
+    capacity: float = Field(description="Total available capacity in native units")
     capacity_usd: float = Field(description="Total available capacity in USD")
     market_open: bool = Field(description="Whether any MM is accepting positions")
     market_status: str = Field(description="active, degraded, or full")
-    max_position_eth: float = Field(description="Max single position size in ETH")
+    max_position: float = Field(description="Max single position size in native units")
     mm_count: int = Field(description="Number of active MMs reporting")
     updated_at: str = Field(description="Latest report timestamp (ISO 8601)")
