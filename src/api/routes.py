@@ -1,6 +1,5 @@
 import logging
 import math
-import os
 import re
 import time
 from datetime import datetime, timezone
@@ -218,7 +217,6 @@ def _fetch_active_quotes() -> list[dict]:
 
     Excludes quotes whose oToken expiry is within 48h of now so that
     near-expiry options are never shown even if the DB has stale rows.
-    Custom expiry timestamps bypass the 48h cutoff.
     """
     now_ts = int(time.time())
     expiry_cutoff_ts = now_ts + 48 * 3600
@@ -232,22 +230,6 @@ def _fetch_active_quotes() -> list[dict]:
         .execute()
     )
     quotes = result.data or []
-
-    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
-    if custom:
-        custom_ts = {int(ts.strip()) for ts in custom.split(",")}
-        custom_result = (
-            client.table("mm_quotes")
-            .select("*")
-            .eq("is_active", True)
-            .gt("deadline", now_ts)
-            .gt("expiry", now_ts)
-            .execute()
-        )
-        seen = {q["id"] for q in quotes}
-        for q in custom_result.data or []:
-            if q["id"] not in seen and q.get("expiry") in custom_ts:
-                quotes.append(q)
 
     return quotes
 

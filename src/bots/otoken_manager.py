@@ -9,7 +9,6 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from web3 import Web3
@@ -24,7 +23,7 @@ from src.contracts.web3_client import (
 from src.db.database import get_client
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import CUTOFF_HOURS, FRIDAY_WEEKDAY, strike_to_8_decimals
+from src.pricing.utils import CUTOFF_HOURS, strike_to_8_decimals
 from src.pricing.chainlink import get_eth_price
 
 logger = logging.getLogger(__name__)
@@ -196,31 +195,17 @@ def ensure_otokens_exist(
     return results
 
 
-def _get_custom_expiry_set() -> set[int]:
-    """Return custom expiry timestamps from env, or empty set."""
-    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
-    if not custom:
-        return set()
-    return {int(ts.strip()) for ts in custom.split(",")}
-
-
 def _is_valid_expiry(ts: int) -> bool:
-    """Return True if timestamp is a valid expiry (Friday 08:00 UTC or custom)."""
-    if ts in _get_custom_expiry_set():
-        return True
+    """Return True if timestamp is a valid expiry (08:00 UTC on any day)."""
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.weekday() == FRIDAY_WEEKDAY and dt.hour == 8 and dt.minute == 0
+    return dt.hour == 8 and dt.minute == 0 and dt.second == 0
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens expiring within CUTOFF_HOURS.
-
-    Custom expiry timestamps are exempt from pruning.
-    """
+    """Delete rows from available_otokens expiring within CUTOFF_HOURS."""
     cutoff_ts = int(
         (datetime.now(timezone.utc) + timedelta(hours=CUTOFF_HOURS)).timestamp()
     )
-    custom = _get_custom_expiry_set()
     client = get_client()
     result = (
         client.table("available_otokens")
@@ -228,19 +213,12 @@ def _prune_near_expiry_otokens() -> None:
         .lt("expiry", cutoff_ts)
         .execute()
     )
-    prune_ids = [
-        r["id"] for r in (result.data or [])
-        if r["expiry"] not in custom
-    ]
+    prune_ids = [r["id"] for r in (result.data or [])]
     if prune_ids:
         client.table("available_otokens").delete().in_(
             "id", prune_ids
         ).execute()
-    logger.info(
-        "Pruned %d available_otokens (skipped %d custom)",
-        len(prune_ids),
-        len(result.data or []) - len(prune_ids),
-    )
+    logger.info("Pruned %d available_otokens", len(prune_ids))
 
 
 def _upsert_available_otokens(
@@ -248,7 +226,7 @@ def _upsert_available_otokens(
 ) -> None:
     """Write created oTokens to the available_otokens table.
 
-    Skips any spec whose expiry is not Friday 08:00 UTC.
+    Skips any spec whose expiry is not 08:00 UTC.
     Raises on DB failure so the caller knows the cycle did not
     complete successfully.
     """
@@ -258,7 +236,7 @@ def _upsert_available_otokens(
         if not _is_valid_expiry(spec.expiry_ts):
             expiry_dt = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc)
             logger.warning(
-                "Skipping non-Friday oToken: %s expiry=%s",
+                "Skipping invalid expiry oToken: %s expiry=%s",
                 otoken_addr,
                 expiry_dt.isoformat(),
             )
