@@ -568,6 +568,28 @@ Returns market data for your pricing engine.
 
 ### Public Endpoints (no auth)
 
+#### `GET /spot` — Current spot price
+
+Returns the live Chainlink spot price for an asset. Does not depend on MM quotes.
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
+
+**Response:**
+
+```json
+{
+  "asset": "btc",
+  "spot": 74185.20,
+  "updated_at": 1773797896
+}
+```
+
+---
+
 #### `GET /prices` — Best bids (price sheet)
 
 Returns the best bid for each oToken across all MMs. This is what users see.
@@ -605,7 +627,7 @@ Returns the best bid for each oToken across all MMs. This is what users see.
 
 The `premium` field is the net premium after protocol fee (what the user receives). The `bid_price_raw` is your gross bid.
 
-Returns **503** if the circuit breaker is active (>2% ETH price move detected).
+Returns **503** if the circuit breaker is active for the requested asset (>2% price move detected). Each asset has an independent circuit breaker.
 
 **Cache:** Results are cached for 15 seconds.
 
@@ -843,7 +865,7 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 | Settlement timing | Weekly, 08:00 UTC | Operator bot |
 | Physical delivery execution | Aave flash loan + Uniswap swap | Operator bot |
 | oToken creation | Factory creates oTokens for each strike/expiry combo | OTokenFactory |
-| Circuit breaker threshold | 2% ETH price move | Backend config |
+| Circuit breaker threshold | 2% price move (per asset) | Backend config |
 
 ### Decimal reference
 
@@ -878,6 +900,7 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 |-------|---------|----------|----------|
 | LUSD (Mock USDC) | `0x5A2972d3390ABe3E57010272c8032BfC84E2077b` | 6 | [View](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b) |
 | LETH (Mock WETH) | `0x8C259D169378B705ae62AA697F3233C8dc3774Da` | 18 | [View](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da) |
+| LBTC (Mock WBTC) | `0x39fA11EbBE82699Fd9F79C566D7384064571d2b4` | 8 | [View](https://sepolia.basescan.org/address/0x39fA11EbBE82699Fd9F79C566D7384064571d2b4) |
 
 **Minting testnet USDC (LUSD):** The LUSD contract exposes a public `mint(address to, uint256 amount)` function. Call it directly to fund your MM wallet with test USDC — no faucet needed.
 
