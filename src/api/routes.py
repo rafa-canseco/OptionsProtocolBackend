@@ -330,6 +330,30 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
 
 @router.get(
+    "/spot",
+    tags=["Market Data"],
+    summary="Get current spot price for an asset",
+)
+async def get_spot(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return the live spot price from Chainlink for a given asset."""
+    from src.pricing.chainlink import get_asset_price
+
+    try:
+        price, updated_at = get_asset_price(asset)
+    except Exception:
+        logger.exception("Failed to fetch %s spot price", asset.value)
+        raise HTTPException(502, f"Could not fetch {asset.value.upper()} spot")
+
+    return {
+        "asset": asset.value,
+        "spot": price,
+        "updated_at": updated_at,
+    }
+
+
+@router.get(
     "/prices",
     response_model=list[PriceResponse],
     tags=["Market Data"],
