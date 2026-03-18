@@ -61,10 +61,22 @@ def _set_last_indexed_block(block: int) -> None:
     ).execute()
 
 
+def _underlying_to_asset(underlying_addr: str) -> str:
+    """Map an underlying token address to an asset symbol."""
+    addr = underlying_addr.lower()
+    weth = settings.weth_address.lower()
+    wbtc = settings.wbtc_address.lower()
+    if addr == weth:
+        return "eth"
+    if addr == wbtc:
+        return "btc"
+    return "unknown"
+
+
 def _enrich_with_otoken_metadata(event_data: dict) -> dict:
     """Read oToken on-chain metadata for denormalization into DB.
 
-    Fetches all three fields before assigning any, so either all succeed
+    Fetches all fields before assigning any, so either all succeed
     or none are set. These fields are critical for settlement
     (identify_itm_positions depends on them).
     """
@@ -73,10 +85,12 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
         strike = ot.functions.strikePrice().call()
         expiry = ot.functions.expiry().call()
         is_put = ot.functions.isPut().call()
+        underlying = ot.functions.underlying().call()
         # Assign only after all reads succeed — no partial enrichment
         event_data["strike_price"] = strike
         event_data["expiry"] = expiry
         event_data["is_put"] = is_put
+        event_data["asset"] = _underlying_to_asset(underlying)
     except Exception:
         logger.exception(
             "Could not read oToken metadata for %s. "

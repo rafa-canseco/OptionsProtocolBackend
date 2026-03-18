@@ -1,15 +1,19 @@
 """Shared pricing utilities.
 
-Pure functions with zero settings dependencies. Used by the
-otoken_manager bot for on-chain oToken creation.
+Used by the otoken_manager bot for on-chain oToken creation.
 """
 
 from datetime import datetime, timezone, timedelta
 
+from src.config import settings
+
 STRIKE_DECIMALS = 8
 FRIDAY_WEEKDAY = 4  # Monday=0, Friday=4
-CUTOFF_HOURS = 48
 SHORT_TERM_DAYS = 4
+
+
+def _cutoff_hours() -> int:
+    return settings.expiry_cutoff_hours
 
 
 def strike_to_8_decimals(strike_usd: float) -> int:
@@ -58,7 +62,7 @@ def get_friday_expiries(
     if now is None:
         now = datetime.now(timezone.utc)
 
-    cutoff = now + timedelta(hours=CUTOFF_HOURS)
+    cutoff = now + timedelta(hours=_cutoff_hours())
 
     # Short-term (~3d): nearest 08:00 UTC slot
     target_3d = now + timedelta(days=SHORT_TERM_DAYS)

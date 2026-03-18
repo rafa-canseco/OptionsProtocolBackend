@@ -10,9 +10,13 @@ class Settings(BaseSettings):
     chainlink_eth_usd_address: str = (
         "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
     )
+    chainlink_btc_usd_address: str = (
+        "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D"  # Base mainnet cbBTC/USD
+    )
 
     # Asset addresses (Base mainnet)
     weth_address: str = "0x4200000000000000000000000000000000000006"
+    wbtc_address: str = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"  # Base mainnet cbBTC
     usdc_address: str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     # Contract addresses (set after deployment)
@@ -37,6 +41,13 @@ class Settings(BaseSettings):
 
     # Protocol fee
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
+
+    # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
+    # e.g. "1773950400,1774123200". If empty, get_friday_expiries() is used.
+    custom_expiry_timestamps: str = ""
+
+    # Hours before expiry to stop showing/creating options (default 48h)
+    expiry_cutoff_hours: int = 48
 
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
