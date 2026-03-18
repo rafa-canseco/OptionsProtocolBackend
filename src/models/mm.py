@@ -3,6 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+VALID_ASSETS = {"eth", "btc"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 
 
@@ -33,6 +34,14 @@ class QuoteSubmission(BaseModel):
     is_put: bool | None = Field(
         default=None, description="True for put, false for call"
     )
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, v: str) -> str:
+        v = v.lower()
+        if v not in VALID_ASSETS:
+            raise ValueError(f"asset must be one of {VALID_ASSETS}")
+        return v
 
     @field_validator("otoken_address")
     @classmethod
@@ -156,7 +165,7 @@ class QuoteResponse(BaseModel):
 class CapacityUpdateRequest(BaseModel):
     """Capacity report from a market maker."""
 
-    asset: str = Field(default="ETH", description="Asset symbol")
+    asset: str = Field(default="eth", description="Asset symbol (eth, btc)")
     capacity_eth: float = Field(ge=0, description="Available capacity in ETH")
     capacity_usd: float = Field(ge=0, description="Available capacity in USD")
     status: str = Field(description="active, degraded, or full")
@@ -167,6 +176,14 @@ class CapacityUpdateRequest(BaseModel):
     leverage: int | None = None
     open_positions_count: int | None = None
     open_positions_notional_usd: float | None = None
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, v: str) -> str:
+        v = v.lower()
+        if v not in VALID_ASSETS:
+            raise ValueError(f"asset must be one of {VALID_ASSETS}")
+        return v
 
     @field_validator("status")
     @classmethod

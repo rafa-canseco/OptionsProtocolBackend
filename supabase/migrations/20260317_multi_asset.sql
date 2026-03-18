@@ -13,7 +13,6 @@ UPDATE available_otokens
 ALTER TABLE available_otokens
   ALTER COLUMN underlying SET NOT NULL;
 
--- Index for filtering oTokens by underlying
 CREATE INDEX IF NOT EXISTS idx_available_otokens_underlying
   ON available_otokens (underlying);
 
@@ -23,3 +22,11 @@ ALTER TABLE mm_quotes
 
 CREATE INDEX IF NOT EXISTS idx_mm_quotes_asset
   ON mm_quotes (asset);
+
+-- 3. mm_capacity: change PK from mm_address to (mm_address, asset)
+-- Drop existing PK and add composite PK so each MM can report per-asset.
+ALTER TABLE mm_capacity
+  DROP CONSTRAINT IF EXISTS mm_capacity_pkey;
+
+ALTER TABLE mm_capacity
+  ADD CONSTRAINT mm_capacity_pkey PRIMARY KEY (mm_address, asset);

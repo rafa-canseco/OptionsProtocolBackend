@@ -35,7 +35,7 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 def _find_or_create_otoken(
     factory,
     account,
-    weth: str,
+    underlying: str,
     usdc: str,
     collateral: str,
     strike_price: int,
@@ -48,7 +48,7 @@ def _find_or_create_otoken(
     Returns the oToken address, or None if creation failed.
     """
     target_addr = factory.functions.getTargetOTokenAddress(
-        weth, usdc, collateral, strike_price, expiry, is_put
+        underlying, usdc, collateral, strike_price, expiry, is_put
     ).call()
 
     if factory.functions.isOToken(target_addr).call():
@@ -58,7 +58,7 @@ def _find_or_create_otoken(
     logger.info("Creating oToken: %s", label)
     try:
         tx_fn = factory.functions.createOToken(
-            weth,
+            underlying,
             usdc,
             collateral,
             strike_price,
@@ -79,7 +79,7 @@ def _find_or_create_otoken(
         raise RuntimeError(f"Failed to create oToken: {label}") from create_err
 
     otoken_addr = factory.functions.getTargetOTokenAddress(
-        weth,
+        underlying,
         usdc,
         collateral,
         strike_price,

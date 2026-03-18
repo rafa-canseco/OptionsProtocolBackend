@@ -498,7 +498,7 @@ async def report_capacity(
     """
     row = {
         "mm_address": mm_address.lower(),
-        "asset": body.asset,
+        "asset": body.asset.lower(),
         "capacity_eth": body.capacity_eth,
         "capacity_usd": body.capacity_usd,
         "status": body.status,
@@ -518,7 +518,9 @@ async def report_capacity(
 
     try:
         client = get_client()
-        client.table("mm_capacity").upsert(row, on_conflict="mm_address").execute()
+        client.table("mm_capacity").upsert(
+            row, on_conflict="mm_address,asset"
+        ).execute()
     except Exception:
         logger.exception("Failed to upsert mm_capacity for %s", mm_address)
         raise HTTPException(status_code=502, detail="Could not save capacity")

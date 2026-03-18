@@ -59,4 +59,10 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
 
 
 def get_asset_config(asset: Asset) -> AssetConfig:
-    return ASSET_CONFIGS[asset]
+    try:
+        return ASSET_CONFIGS[asset]
+    except KeyError:
+        supported = ", ".join(a.value for a in ASSET_CONFIGS)
+        raise ValueError(
+            f"Unsupported asset {asset!r}. Supported: {supported}"
+        ) from None

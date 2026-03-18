@@ -124,7 +124,7 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     result = (
         client.table("mm_capacity")
         .select("*")
-        .eq("asset", asset.value.upper())
+        .eq("asset", asset.value)
         .gte("reported_at", cutoff)
         .execute()
     )
@@ -153,6 +153,7 @@ def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
     any_active = False
     any_degraded = False
     latest_at = ""
+    parsed_count = 0
 
     for r in rows:
         try:
@@ -165,6 +166,7 @@ def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
                 e,
             )
             continue
+        parsed_count += 1
         status = r.get("status", "active")
         if status == "full":
             pass  # count for status logic but don't add capacity
@@ -194,7 +196,7 @@ def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
         "market_open": market_status != "full",
         "market_status": market_status,
         "max_position": max_single,
-        "mm_count": len(rows),
+        "mm_count": parsed_count,
         "updated_at": latest_at,
     }
 
@@ -507,10 +509,11 @@ def _compute_outcome(position: dict) -> str | None:
                 strike_human = int(strike) / 1e8
             except (ValueError, TypeError):
                 return "Settled (physical) — details unavailable"
+            asset_label = position.get("asset", "ETH").upper()
             if is_put:
-                return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Bought {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
             else:
-                return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Sold {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
         elif st == "physical_failed":
             return "Expired ITM — delivery failed, pending review"
         else:

@@ -1,7 +1,11 @@
+import logging
+
 from web3 import Web3
 
 from src.contracts.web3_client import get_w3
 from src.pricing.assets import Asset, get_asset_config
+
+logger = logging.getLogger(__name__)
 
 AGGREGATOR_V3_ABI = [
     {
@@ -47,7 +51,15 @@ def _get_decimals(asset: Asset) -> int:
         try:
             _decimals_cache[feed_address] = _get_feed(asset).functions.decimals().call()
         except Exception:
-            _decimals_cache[feed_address] = 8
+            # Chainlink USD feeds use 8 decimals. Don't cache the fallback
+            # so we retry on the next call in case RPC was transiently down.
+            logger.warning(
+                "Could not read decimals() for %s feed %s, using default 8",
+                asset.value,
+                feed_address,
+                exc_info=True,
+            )
+            return 8
     return _decimals_cache[feed_address]
 
 
