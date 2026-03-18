@@ -85,7 +85,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
         strike = ot.functions.strikePrice().call()
         expiry = ot.functions.expiry().call()
         is_put = ot.functions.isPut().call()
-        underlying = ot.functions.underlyingAsset().call()
+        underlying = ot.functions.underlying().call()
         # Assign only after all reads succeed — no partial enrichment
         event_data["strike_price"] = strike
         event_data["expiry"] = expiry

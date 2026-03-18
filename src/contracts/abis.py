@@ -200,7 +200,7 @@ OTOKEN_ABI = [
     },
     {
         "inputs": [],
-        "name": "underlyingAsset",
+        "name": "underlying",
         "outputs": [{"name": "", "type": "address"}],
         "stateMutability": "view",
         "type": "function",
