@@ -21,10 +21,11 @@ from src.contracts.web3_client import (
     get_whitelist,
 )
 from src.db.database import get_client
+from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
 from src.pricing.utils import CUTOFF_HOURS, strike_to_8_decimals
-from src.pricing.chainlink import get_eth_price
+from src.pricing.chainlink import get_asset_price
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 def _find_or_create_otoken(
     factory,
     account,
-    weth: str,
+    underlying: str,
     usdc: str,
     collateral: str,
     strike_price: int,
@@ -47,7 +48,7 @@ def _find_or_create_otoken(
     Returns the oToken address, or None if creation failed.
     """
     target_addr = factory.functions.getTargetOTokenAddress(
-        weth, usdc, collateral, strike_price, expiry, is_put
+        underlying, usdc, collateral, strike_price, expiry, is_put
     ).call()
 
     if factory.functions.isOToken(target_addr).call():
@@ -57,7 +58,7 @@ def _find_or_create_otoken(
     logger.info("Creating oToken: %s", label)
     try:
         tx_fn = factory.functions.createOToken(
-            weth,
+            underlying,
             usdc,
             collateral,
             strike_price,
@@ -78,7 +79,7 @@ def _find_or_create_otoken(
         raise RuntimeError(f"Failed to create oToken: {label}") from create_err
 
     otoken_addr = factory.functions.getTargetOTokenAddress(
-        weth,
+        underlying,
         usdc,
         collateral,
         strike_price,
@@ -115,7 +116,8 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
         if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
             logger.info(
                 "oToken %s already whitelisted (by factory), skipping: %s",
-                otoken_addr, label,
+                otoken_addr,
+                label,
             )
             return
         raise
@@ -123,6 +125,7 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
 
 def ensure_otokens_exist(
     specs: list[OTokenSpec],
+    asset: Asset = Asset.ETH,
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure the corresponding oToken exists on-chain.
 
@@ -132,7 +135,8 @@ def ensure_otokens_exist(
     """
     factory = get_otoken_factory()
     account = get_operator_account()
-    weth = Web3.to_checksum_address(settings.weth_address)
+    cfg = get_asset_config(asset)
+    underlying = Web3.to_checksum_address(cfg.underlying_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
     seen: dict[tuple, str | None] = {}
@@ -155,13 +159,13 @@ def ensure_otokens_exist(
 
         strike_price = strike_to_8_decimals(spec.strike)
         expiry = spec.expiry_ts
-        collateral = usdc if is_put else weth
+        collateral = usdc if is_put else underlying
 
         try:
             otoken_addr = _find_or_create_otoken(
                 factory,
                 account,
-                weth,
+                underlying,
                 usdc,
                 collateral,
                 strike_price,
@@ -215,14 +219,13 @@ def _prune_near_expiry_otokens() -> None:
     )
     prune_ids = [r["id"] for r in (result.data or [])]
     if prune_ids:
-        client.table("available_otokens").delete().in_(
-            "id", prune_ids
-        ).execute()
+        client.table("available_otokens").delete().in_("id", prune_ids).execute()
     logger.info("Pruned %d available_otokens", len(prune_ids))
 
 
 def _upsert_available_otokens(
     paired: list[tuple[str, OTokenSpec]],
+    asset: Asset = Asset.ETH,
 ) -> None:
     """Write created oTokens to the available_otokens table.
 
@@ -230,6 +233,9 @@ def _upsert_available_otokens(
     Raises on DB failure so the caller knows the cycle did not
     complete successfully.
     """
+    cfg = get_asset_config(asset)
+    underlying = cfg.underlying_address.lower()
+
     seen_addresses: set[str] = set()
     rows = []
     for otoken_addr, spec in paired:
@@ -248,13 +254,13 @@ def _upsert_available_otokens(
         seen_addresses.add(addr_lower)
 
         is_put = spec.option_type == OptionType.PUT
-        weth = settings.weth_address.lower()
         usdc = settings.usdc_address.lower()
-        collateral = usdc if is_put else weth
+        collateral = usdc if is_put else underlying
 
         rows.append(
             {
                 "otoken_address": addr_lower,
+                "underlying": underlying,
                 "strike_price": spec.strike,
                 "expiry": spec.expiry_ts,
                 "is_put": is_put,
@@ -273,19 +279,29 @@ def _upsert_available_otokens(
 
 
 async def publish_once():
-    """Single cycle: prune stale oTokens, generate specs, create on-chain, record them."""
+    """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
     _prune_near_expiry_otokens()
 
-    eth_price, _ = get_eth_price()
-    specs = generate_otoken_specs(spot=eth_price)
+    for asset in Asset:
+        try:
+            spot, _ = get_asset_price(asset)
+        except Exception:
+            logger.exception("Failed to fetch %s price, skipping asset", asset.value)
+            continue
 
-    paired = await asyncio.to_thread(ensure_otokens_exist, specs)
-    if not paired:
-        logger.warning("No oTokens created, skipping")
-        return
+        specs = generate_otoken_specs(spot=spot, asset=asset)
 
-    _upsert_available_otokens(paired)
-    logger.info("oToken manager cycle complete: %d oTokens", len(paired))
+        paired = await asyncio.to_thread(ensure_otokens_exist, specs, asset)
+        if not paired:
+            logger.warning("No oTokens created for %s, skipping", asset.value)
+            continue
+
+        _upsert_available_otokens(paired, asset)
+        logger.info(
+            "oToken manager cycle for %s complete: %d oTokens",
+            asset.value,
+            len(paired),
+        )
 
 
 async def run():

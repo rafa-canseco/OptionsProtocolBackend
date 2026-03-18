@@ -3,6 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+VALID_ASSETS = {"eth", "btc"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 
 
@@ -25,6 +26,7 @@ class QuoteSubmission(BaseModel):
     )
     signature: str = Field(description="EIP-712 signature (hex, 0x-prefixed, 65 bytes)")
     # Optional metadata for display (not part of EIP-712 struct)
+    asset: str = Field(default="eth", description="Underlying asset (eth, btc)")
     strike_price: float | None = Field(
         default=None, ge=0, description="Strike price in USD"
     )
@@ -32,6 +34,14 @@ class QuoteSubmission(BaseModel):
     is_put: bool | None = Field(
         default=None, description="True for put, false for call"
     )
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, v: str) -> str:
+        v = v.lower()
+        if v not in VALID_ASSETS:
+            raise ValueError(f"asset must be one of {VALID_ASSETS}")
+        return v
 
     @field_validator("otoken_address")
     @classmethod
@@ -125,8 +135,9 @@ class OTokenInfo(BaseModel):
 class MarketDataResponse(BaseModel):
     """Market data for MM's pricing engine."""
 
-    eth_spot: float
-    eth_iv: float
+    asset: str = Field(description="Asset symbol (eth, btc)")
+    spot: float = Field(description="Spot price in USD")
+    iv: float = Field(description="Implied volatility (annualized decimal)")
     protocol_fee_bps: int
     gas_price_gwei: float
     available_otokens: list[OTokenInfo]
@@ -143,6 +154,7 @@ class QuoteResponse(BaseModel):
     max_amount: str
     maker_nonce: int
     signature: str
+    asset: str = "eth"
     strike_price: float | None = None
     expiry: int | None = None
     is_put: bool | None = None
@@ -153,7 +165,7 @@ class QuoteResponse(BaseModel):
 class CapacityUpdateRequest(BaseModel):
     """Capacity report from a market maker."""
 
-    asset: str = Field(default="ETH", description="Asset symbol")
+    asset: str = Field(default="eth", description="Asset symbol (eth, btc)")
     capacity_eth: float = Field(ge=0, description="Available capacity in ETH")
     capacity_usd: float = Field(ge=0, description="Available capacity in USD")
     status: str = Field(description="active, degraded, or full")
@@ -164,6 +176,14 @@ class CapacityUpdateRequest(BaseModel):
     leverage: int | None = None
     open_positions_count: int | None = None
     open_positions_notional_usd: float | None = None
+
+    @field_validator("asset")
+    @classmethod
+    def validate_asset(cls, v: str) -> str:
+        v = v.lower()
+        if v not in VALID_ASSETS:
+            raise ValueError(f"asset must be one of {VALID_ASSETS}")
+        return v
 
     @field_validator("status")
     @classmethod
@@ -177,10 +197,11 @@ class CapacityUpdateRequest(BaseModel):
 class CapacityResponse(BaseModel):
     """Public capacity info exposed to the frontend."""
 
-    capacity_eth: float = Field(description="Total available capacity in ETH")
+    asset: str = Field(description="Asset symbol (eth, btc)")
+    capacity: float = Field(description="Total available capacity in native units")
     capacity_usd: float = Field(description="Total available capacity in USD")
     market_open: bool = Field(description="Whether any MM is accepting positions")
     market_status: str = Field(description="active, degraded, or full")
-    max_position_eth: float = Field(description="Max single position size in ETH")
+    max_position: float = Field(description="Max single position size in native units")
     mm_count: int = Field(description="Number of active MMs reporting")
     updated_at: str = Field(description="Latest report timestamp (ISO 8601)")

@@ -10,9 +10,13 @@ class Settings(BaseSettings):
     chainlink_eth_usd_address: str = (
         "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
     )
+    chainlink_btc_usd_address: str = (
+        "0x64c911996D3c6aC71f9b455B1E8E7266BcbD848F"  # Base mainnet
+    )
 
     # Asset addresses (Base mainnet)
     weth_address: str = "0x4200000000000000000000000000000000000006"
+    wbtc_address: str = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"  # Base mainnet
     usdc_address: str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     # Contract addresses (set after deployment)

@@ -26,7 +26,7 @@ Technical reference for integrating with the b1nary options protocol as a market
 
 ## 1. Overview
 
-b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH and earn premium.
+b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH or BTC and earn premium.
 
 **The MM's role:** You are the counterparty. You buy the options that users sell. When a user accepts a price, your signed quote is used on-chain to execute the trade atomically.
 
@@ -198,7 +198,8 @@ resp = requests.post(
                 "max_amount": quote["maxAmount"],
                 "maker_nonce": quote["makerNonce"],
                 "signature": signature,
-                # Optional metadata (for display only):
+                # Optional metadata (for display/filtering):
+                "asset": "eth",  # "eth" or "btc"
                 "strike_price": 2400.0,
                 "expiry": int(time.time()) + 7 * 86400,
                 "is_put": True,
@@ -275,6 +276,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
       "max_amount": 100000000,
       "maker_nonce": 0,
       "signature": "0x...",
+      "asset": "eth",
       "strike_price": 2400.0,
       "expiry": 1741200000,
       "is_put": true
@@ -295,6 +297,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
 | `strike_price` | No | Strike in USD (for display) |
 | `expiry` | No | Expiry timestamp (for display) |
 | `is_put` | No | `true` for put, `false` for call (for display) |
+| `asset` | No | Underlying asset: `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -334,6 +337,7 @@ Returns all your active, non-expired quotes.
     "max_amount": "100000000",
     "maker_nonce": 0,
     "signature": "0x...",
+    "asset": "eth",
     "strike_price": 2400.0,
     "expiry": 1741200000,
     "is_put": true,
@@ -525,12 +529,19 @@ Aggregated view of your outstanding risk.
 
 Returns market data for your pricing engine.
 
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
+
 **Response:**
 
 ```json
 {
-  "eth_spot": 2450.50,
-  "eth_iv": 0.65,
+  "asset": "eth",
+  "spot": 2450.50,
+  "iv": 0.65,
   "protocol_fee_bps": 400,
   "gas_price_gwei": 0.01,
   "available_otokens": [
@@ -546,8 +557,9 @@ Returns market data for your pricing engine.
 
 | Field | Description |
 |-------|-------------|
-| `eth_spot` | Current ETH/USD price from Chainlink |
-| `eth_iv` | Implied volatility from Deribit (annualized, decimal) |
+| `asset` | Asset symbol (`"eth"` or `"btc"`) |
+| `spot` | Current spot price in USD from Chainlink |
+| `iv` | Implied volatility from Deribit (annualized, decimal) |
 | `protocol_fee_bps` | Protocol fee in basis points (400 = 4%) |
 | `gas_price_gwei` | Current Base gas price |
 | `available_otokens` | oTokens created on-chain by the platform, available for quoting |
@@ -559,6 +571,12 @@ Returns market data for your pricing engine.
 #### `GET /prices` — Best bids (price sheet)
 
 Returns the best bid for each oToken across all MMs. This is what users see.
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -730,7 +748,7 @@ Compute `quoteHash` by calling `hashQuote(quote)` on the BatchSettler.
 
 ### Automated circuit breaker
 
-The b1nary backend runs a circuit breaker bot that monitors ETH/USD via Chainlink every 10 seconds. If ETH moves more than 2% from a reference price:
+The b1nary backend runs a circuit breaker bot that monitors asset prices via Chainlink every 10 seconds. If any monitored asset (ETH, BTC) moves more than 2% from its reference price:
 
 1. The bot calls `incrementMakerNonce()` for the protocol's own MM (if applicable).
 2. `GET /prices` returns **503** until the circuit breaker resets.
@@ -908,7 +926,7 @@ Everything you need to go from zero to submitting your first quote on Base Sepol
 
 ### Step 1 — Fund your wallet via the API faucet
 
-The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
+The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, **2 LBTC**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
 
 ```bash
 curl -X POST https://api.b1nary.app/faucet \
@@ -920,9 +938,11 @@ curl -X POST https://api.b1nary.app/faucet \
 {
   "eth_amount":  "5000000000000000",
   "leth_amount": "50000000000000000000",
+  "lbtc_amount": "200000000",
   "lusd_amount": "100000000000",
   "eth_tx_hash":  "0x...",
   "leth_tx_hash": "0x...",
+  "lbtc_tx_hash": "0x...",
   "lusd_tx_hash": "0x..."
 }
 ```
@@ -968,7 +988,7 @@ Contact the b1nary team to have your wallet registered and receive an API key. T
 
 ### Testnet checklist
 
-- [ ] LUSD and LETH in wallet (`POST /faucet` or direct `mint`)
+- [ ] LUSD, LETH, and LBTC in wallet (`POST /faucet` or direct `mint`)
 - [ ] LUSD approved to BatchSettler (`approve(BATCH_SETTLER_ADDRESS, max)`)
 - [ ] Wallet whitelisted on BatchSettler (`setWhitelistedMM`)
 - [ ] API key received

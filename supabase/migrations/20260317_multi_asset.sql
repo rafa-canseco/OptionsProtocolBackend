@@ -1,0 +1,32 @@
+-- Multi-asset support: add underlying/asset columns
+-- Run on STAGING only. Do NOT run on production.
+
+-- 1. available_otokens: add underlying column (token address)
+ALTER TABLE available_otokens
+  ADD COLUMN IF NOT EXISTS underlying text;
+
+-- Backfill existing rows with WETH address (Base mainnet)
+UPDATE available_otokens
+  SET underlying = '0x4200000000000000000000000000000000000006'
+  WHERE underlying IS NULL;
+
+ALTER TABLE available_otokens
+  ALTER COLUMN underlying SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_available_otokens_underlying
+  ON available_otokens (underlying);
+
+-- 2. mm_quotes: add asset column
+ALTER TABLE mm_quotes
+  ADD COLUMN IF NOT EXISTS asset text NOT NULL DEFAULT 'eth';
+
+CREATE INDEX IF NOT EXISTS idx_mm_quotes_asset
+  ON mm_quotes (asset);
+
+-- 3. mm_capacity: change PK from mm_address to (mm_address, asset)
+-- Drop existing PK and add composite PK so each MM can report per-asset.
+ALTER TABLE mm_capacity
+  DROP CONSTRAINT IF EXISTS mm_capacity_pkey;
+
+ALTER TABLE mm_capacity
+  ADD CONSTRAINT mm_capacity_pkey PRIMARY KEY (mm_address, asset);

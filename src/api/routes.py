@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from src.config import settings
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
+from src.pricing.assets import Asset
 from src.pricing.circuit_breaker import circuit_breaker
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -23,10 +24,10 @@ router = APIRouter()
 USDC_DECIMALS = 6
 OTOKEN_DECIMALS = 8
 
-# --- Caches ---
+# --- Caches (per asset) ---
 _PRICES_TTL = 15  # seconds
-_prices_cache: list | None = None
-_prices_cached_at: float = 0.0
+_prices_cache: dict[str, list] = {}
+_prices_cached_at: dict[str, float] = {}
 
 # --- In-memory rate limiting (per IP, per worker process) ---
 # NOTE: State is not shared across uvicorn workers. In a multi-worker deployment
@@ -114,43 +115,49 @@ def _check_read_rate_limit(ip: str) -> None:
     _read_hits[ip].append(now)
 
 
-def _fetch_capacity_rows() -> list[dict]:
-    """Read non-stale mm_capacity rows from Supabase."""
+def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
+    """Read non-stale mm_capacity rows from Supabase, filtered by asset."""
     cutoff = datetime.fromtimestamp(
         time.time() - _CAPACITY_STALE_SECONDS, tz=timezone.utc
     ).isoformat()
     client = get_client()
     result = (
-        client.table("mm_capacity").select("*").gte("reported_at", cutoff).execute()
+        client.table("mm_capacity")
+        .select("*")
+        .eq("asset", asset.value)
+        .gte("reported_at", cutoff)
+        .execute()
     )
     if result.data is None:
         raise RuntimeError("mm_capacity query returned None data")
     return result.data
 
 
-def _aggregate_capacity(rows: list[dict]) -> dict:
+def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
     """Aggregate capacity rows into a single summary."""
     if not rows:
         return {
-            "capacity_eth": 0.0,
+            "asset": asset.value,
+            "capacity": 0.0,
             "capacity_usd": 0.0,
             "market_open": False,
             "market_status": "full",
-            "max_position_eth": 0.0,
+            "max_position": 0.0,
             "mm_count": 0,
             "updated_at": datetime.now(tz=timezone.utc).isoformat(),
         }
 
-    total_eth = 0.0
+    total_native = 0.0
     total_usd = 0.0
     max_single = 0.0
     any_active = False
     any_degraded = False
     latest_at = ""
+    parsed_count = 0
 
     for r in rows:
         try:
-            eth = float(r["capacity_eth"])
+            native = float(r["capacity_eth"])
             usd = float(r["capacity_usd"])
         except (KeyError, ValueError, TypeError) as e:
             logger.error(
@@ -159,13 +166,14 @@ def _aggregate_capacity(rows: list[dict]) -> dict:
                 e,
             )
             continue
+        parsed_count += 1
         status = r.get("status", "active")
         if status == "full":
             pass  # count for status logic but don't add capacity
         else:
-            total_eth += eth
+            total_native += native
             total_usd += usd
-            max_single = max(max_single, eth)
+            max_single = max(max_single, native)
         if status == "active":
             any_active = True
         elif status == "degraded":
@@ -182,12 +190,13 @@ def _aggregate_capacity(rows: list[dict]) -> dict:
         market_status = "full"
 
     return {
-        "capacity_eth": total_eth,
+        "asset": asset.value,
+        "capacity": total_native,
         "capacity_usd": total_usd,
         "market_open": market_status != "full",
         "market_status": market_status,
-        "max_position_eth": max_single,
-        "mm_count": len(rows),
+        "max_position": max_single,
+        "mm_count": parsed_count,
         "updated_at": latest_at,
     }
 
@@ -198,22 +207,24 @@ def _aggregate_capacity(rows: list[dict]) -> dict:
     tags=["Market Data"],
     summary="Get available market capacity",
 )
-async def get_capacity():
+async def get_capacity(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
     """Return aggregated capacity across all active market makers.
 
     Capacity is considered stale if not reported within 120 seconds.
     """
     try:
-        rows = _fetch_capacity_rows()
+        rows = _fetch_capacity_rows(asset)
     except Exception:
         logger.exception("Failed to fetch mm_capacity")
         raise HTTPException(502, "Capacity data unavailable")
 
-    return _aggregate_capacity(rows)
+    return _aggregate_capacity(rows, asset)
 
 
-def _fetch_active_quotes() -> list[dict]:
-    """Read all active, non-expired quotes from mm_quotes.
+def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
+    """Read active, non-expired quotes from mm_quotes for a given asset.
 
     Excludes quotes whose oToken expiry is within 48h of now so that
     near-expiry options are never shown even if the DB has stale rows.
@@ -225,6 +236,7 @@ def _fetch_active_quotes() -> list[dict]:
         client.table("mm_quotes")
         .select("*")
         .eq("is_active", True)
+        .eq("asset", asset.value)
         .gt("deadline", now_ts)
         .gt("expiry", expiry_cutoff_ts)
         .execute()
@@ -323,27 +335,27 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
     tags=["Market Data"],
     summary="Get current option price menu",
 )
-async def get_prices():
-    """Return the live ETH options price sheet.
+async def get_prices(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return the live options price sheet for a given asset.
 
     Reads all active signed quotes from market makers, picks the best
     bid for each oToken, and returns enriched PriceResponse objects.
     The response includes EIP-712 signature data needed by the frontend
     to call executeOrder on BatchSettler.
 
-    Returns **503** if the circuit breaker has paused pricing (>2 % ETH move).
+    Returns **503** if the circuit breaker has paused pricing (>2 % move).
     """
-    global _prices_cache, _prices_cached_at
-
     if circuit_breaker.is_paused:
         raise HTTPException(
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
 
-    # Check if all MMs are at capacity
+    # Check if all MMs are at capacity for this asset
     try:
-        cap_rows = _fetch_capacity_rows()
+        cap_rows = _fetch_capacity_rows(asset)
         if cap_rows and all(r.get("status") == "full" for r in cap_rows):
             raise HTTPException(
                 status_code=503,
@@ -352,27 +364,28 @@ async def get_prices():
     except HTTPException:
         raise
     except Exception:
-        # Fail-open: serve prices when capacity DB is unreachable.
-        # MMs still validate capacity on their side before accepting fills.
         logger.error("Could not check mm_capacity, proceeding", exc_info=True)
 
+    cache_key = asset.value
     now = time.monotonic()
-    if _prices_cache is not None and (now - _prices_cached_at) < _PRICES_TTL:
-        logger.debug("prices cache hit (age=%.1fs)", now - _prices_cached_at)
-        return _prices_cache
+    cached = _prices_cache.get(cache_key)
+    cached_at = _prices_cached_at.get(cache_key, 0.0)
+    if cached is not None and (now - cached_at) < _PRICES_TTL:
+        logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
+        return cached
 
-    logger.info("prices cache miss — fetching from mm_quotes")
+    logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
     try:
-        all_quotes = _fetch_active_quotes()
+        all_quotes = _fetch_active_quotes(asset)
     except Exception:
         logger.exception("Failed to fetch active quotes from DB")
         raise HTTPException(502, "Quote data unavailable")
 
     if not all_quotes:
-        logger.info("No active quotes in mm_quotes")
-        _prices_cache = []
-        _prices_cached_at = time.monotonic()
+        logger.info("No active quotes in mm_quotes for %s", cache_key)
+        _prices_cache[cache_key] = []
+        _prices_cached_at[cache_key] = time.monotonic()
         return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
@@ -380,9 +393,9 @@ async def get_prices():
     # Enrich with spot price if available (best effort)
     spot = 0.0
     try:
-        from src.pricing.chainlink import get_eth_price
+        from src.pricing.chainlink import get_asset_price
 
-        spot, _ = get_eth_price()
+        spot, _ = get_asset_price(asset)
         if circuit_breaker.check(spot):
             raise HTTPException(
                 status_code=503,
@@ -402,8 +415,8 @@ async def get_prices():
                 pr.spot = spot
             result.append(pr)
 
-    _prices_cache = result
-    _prices_cached_at = time.monotonic()
+    _prices_cache[cache_key] = result
+    _prices_cached_at[cache_key] = time.monotonic()
     return result
 
 
@@ -496,10 +509,11 @@ def _compute_outcome(position: dict) -> str | None:
                 strike_human = int(strike) / 1e8
             except (ValueError, TypeError):
                 return "Settled (physical) — details unavailable"
+            asset_label = position.get("asset", "ETH").upper()
             if is_put:
-                return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Bought {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
             else:
-                return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Sold {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
         elif st == "physical_failed":
             return "Expired ITM — delivery failed, pending review"
         else:

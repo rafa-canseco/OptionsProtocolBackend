@@ -39,8 +39,9 @@ from src.models.mm import (
     QuoteBatchResponse,
     QuoteResponse,
 )
-from src.pricing.chainlink import get_eth_price
-from src.pricing.deribit import get_eth_iv
+from src.pricing.assets import Asset
+from src.pricing.chainlink import get_asset_price
+from src.pricing.deribit import get_iv
 from src.pricing.utils import get_friday_expiries
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ async def submit_quotes(
                 "max_amount": str(q.max_amount),
                 "maker_nonce": q.maker_nonce,
                 "signature": q.signature,
+                "asset": q.asset,
                 "strike_price": q.strike_price,
                 "expiry": q.expiry,
                 "is_put": q.is_put,
@@ -191,6 +193,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
             max_amount=str(row["max_amount"]),
             maker_nonce=row["maker_nonce"],
             signature=row["signature"],
+            asset=row.get("asset", "eth"),
             strike_price=row.get("strike_price"),
             expiry=row.get("expiry"),
             is_put=row.get("is_put"),
@@ -413,18 +416,23 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
     summary="Get market data",
     tags=["MM Monitoring"],
 )
-async def get_market(mm_address: str = Depends(require_mm_api_key)):
-    """Return market data for MM's pricing engine."""
+async def get_market(
+    mm_address: str = Depends(require_mm_api_key),
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return market data for MM's pricing engine for a given asset."""
     try:
-        eth_spot, _ = get_eth_price()
+        spot, _ = get_asset_price(asset)
     except Exception:
-        logger.exception("Failed to fetch ETH spot price")
-        raise HTTPException(status_code=502, detail="Could not fetch ETH spot")
+        logger.exception("Failed to fetch %s spot price", asset.value)
+        raise HTTPException(
+            status_code=502, detail=f"Could not fetch {asset.value.upper()} spot"
+        )
 
     try:
-        iv = await get_eth_iv()
+        iv = await get_iv(asset)
     except Exception:
-        logger.exception("Failed to fetch ETH IV from Deribit")
+        logger.exception("Failed to fetch %s IV from Deribit", asset.value)
         raise HTTPException(status_code=502, detail="Could not fetch IV")
 
     try:
@@ -435,7 +443,11 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    # Fetch available oTokens matching current active expiries only
+    from src.pricing.assets import get_asset_config
+
+    cfg = get_asset_config(asset)
+    underlying_addr = cfg.underlying_address.lower()
+
     otokens: list[OTokenInfo] = []
     active_expiries = get_friday_expiries()
     try:
@@ -443,6 +455,7 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("available_otokens")
             .select("otoken_address,strike_price,expiry,is_put")
+            .eq("underlying", underlying_addr)
             .in_("expiry", active_expiries)
             .execute()
         )
@@ -460,8 +473,9 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         raise HTTPException(status_code=502, detail="Could not fetch available oTokens")
 
     return MarketDataResponse(
-        eth_spot=eth_spot,
-        eth_iv=iv,
+        asset=asset.value,
+        spot=spot,
+        iv=iv,
         protocol_fee_bps=settings.protocol_fee_bps,
         gas_price_gwei=round(gas_price_gwei, 4),
         available_otokens=otokens,
@@ -484,7 +498,7 @@ async def report_capacity(
     """
     row = {
         "mm_address": mm_address.lower(),
-        "asset": body.asset,
+        "asset": body.asset.lower(),
         "capacity_eth": body.capacity_eth,
         "capacity_usd": body.capacity_usd,
         "status": body.status,
@@ -504,7 +518,9 @@ async def report_capacity(
 
     try:
         client = get_client()
-        client.table("mm_capacity").upsert(row, on_conflict="mm_address").execute()
+        client.table("mm_capacity").upsert(
+            row, on_conflict="mm_address,asset"
+        ).execute()
     except Exception:
         logger.exception("Failed to upsert mm_capacity for %s", mm_address)
         raise HTTPException(status_code=502, detail="Could not save capacity")
