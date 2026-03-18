@@ -26,7 +26,7 @@ Technical reference for integrating with the b1nary options protocol as a market
 
 ## 1. Overview
 
-b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH and earn premium.
+b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH or BTC and earn premium.
 
 **The MM's role:** You are the counterparty. You buy the options that users sell. When a user accepts a price, your signed quote is used on-chain to execute the trade atomically.
 
@@ -198,7 +198,8 @@ resp = requests.post(
                 "max_amount": quote["maxAmount"],
                 "maker_nonce": quote["makerNonce"],
                 "signature": signature,
-                # Optional metadata (for display only):
+                # Optional metadata (for display/filtering):
+                "asset": "eth",  # "eth" or "btc"
                 "strike_price": 2400.0,
                 "expiry": int(time.time()) + 7 * 86400,
                 "is_put": True,
@@ -275,6 +276,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
       "max_amount": 100000000,
       "maker_nonce": 0,
       "signature": "0x...",
+      "asset": "eth",
       "strike_price": 2400.0,
       "expiry": 1741200000,
       "is_put": true
@@ -295,6 +297,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
 | `strike_price` | No | Strike in USD (for display) |
 | `expiry` | No | Expiry timestamp (for display) |
 | `is_put` | No | `true` for put, `false` for call (for display) |
+| `asset` | No | Underlying asset: `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -334,6 +337,7 @@ Returns all your active, non-expired quotes.
     "max_amount": "100000000",
     "maker_nonce": 0,
     "signature": "0x...",
+    "asset": "eth",
     "strike_price": 2400.0,
     "expiry": 1741200000,
     "is_put": true,
@@ -525,12 +529,19 @@ Aggregated view of your outstanding risk.
 
 Returns market data for your pricing engine.
 
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
+
 **Response:**
 
 ```json
 {
-  "eth_spot": 2450.50,
-  "eth_iv": 0.65,
+  "asset": "eth",
+  "spot": 2450.50,
+  "iv": 0.65,
   "protocol_fee_bps": 400,
   "gas_price_gwei": 0.01,
   "available_otokens": [
@@ -546,8 +557,9 @@ Returns market data for your pricing engine.
 
 | Field | Description |
 |-------|-------------|
-| `eth_spot` | Current ETH/USD price from Chainlink |
-| `eth_iv` | Implied volatility from Deribit (annualized, decimal) |
+| `asset` | Asset symbol (`"eth"` or `"btc"`) |
+| `spot` | Current spot price in USD from Chainlink |
+| `iv` | Implied volatility from Deribit (annualized, decimal) |
 | `protocol_fee_bps` | Protocol fee in basis points (400 = 4%) |
 | `gas_price_gwei` | Current Base gas price |
 | `available_otokens` | oTokens created on-chain by the platform, available for quoting |
@@ -559,6 +571,12 @@ Returns market data for your pricing engine.
 #### `GET /prices` — Best bids (price sheet)
 
 Returns the best bid for each oToken across all MMs. This is what users see.
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -730,7 +748,7 @@ Compute `quoteHash` by calling `hashQuote(quote)` on the BatchSettler.
 
 ### Automated circuit breaker
 
-The b1nary backend runs a circuit breaker bot that monitors ETH/USD via Chainlink every 10 seconds. If ETH moves more than 2% from a reference price:
+The b1nary backend runs a circuit breaker bot that monitors asset prices via Chainlink every 10 seconds. If any monitored asset (ETH, BTC) moves more than 2% from its reference price:
 
 1. The bot calls `incrementMakerNonce()` for the protocol's own MM (if applicable).
 2. `GET /prices` returns **503** until the circuit breaker resets.
