@@ -24,7 +24,7 @@ from src.db.database import get_client
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import CUTOFF_HOURS, strike_to_8_decimals
+from src.pricing.utils import strike_to_8_decimals
 from src.pricing.chainlink import get_asset_price
 
 logger = logging.getLogger(__name__)
@@ -206,9 +206,9 @@ def _is_valid_expiry(ts: int) -> bool:
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens expiring within CUTOFF_HOURS."""
+    """Delete rows from available_otokens expiring within cutoff window."""
     cutoff_ts = int(
-        (datetime.now(timezone.utc) + timedelta(hours=CUTOFF_HOURS)).timestamp()
+        (datetime.now(timezone.utc) + timedelta(hours=settings.expiry_cutoff_hours)).timestamp()
     )
     client = get_client()
     result = (

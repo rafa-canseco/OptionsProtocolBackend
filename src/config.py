@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # e.g. "1773950400,1774123200". If empty, get_friday_expiries() is used.
     custom_expiry_timestamps: str = ""
 
+    # Hours before expiry to stop showing/creating options (default 48h)
+    expiry_cutoff_hours: int = 48
+
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
 

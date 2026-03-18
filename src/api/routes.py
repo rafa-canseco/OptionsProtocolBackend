@@ -230,7 +230,7 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
     near-expiry options are never shown even if the DB has stale rows.
     """
     now_ts = int(time.time())
-    expiry_cutoff_ts = now_ts + 48 * 3600
+    expiry_cutoff_ts = now_ts + settings.expiry_cutoff_hours * 3600
     client = get_client()
     result = (
         client.table("mm_quotes")
