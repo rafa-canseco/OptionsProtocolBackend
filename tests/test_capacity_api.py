@@ -258,7 +258,8 @@ class TestPricesCapacityIntegration:
         mock_db.table.side_effect = side_effect
 
         with patch("src.api.routes.circuit_breaker") as mock_cb:
-            mock_cb.is_paused = False
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
             import src.api.routes as routes_mod
 
             routes_mod._prices_cache.clear()
@@ -284,7 +285,8 @@ class TestPricesCapacityIntegration:
         mock_db.table.side_effect = side_effect
 
         with patch("src.api.routes.circuit_breaker") as mock_cb:
-            mock_cb.is_paused = False
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
             import src.api.routes as routes_mod
 
             routes_mod._prices_cache.clear()
@@ -311,7 +313,8 @@ class TestPricesCapacityIntegration:
         mock_db.table.side_effect = side_effect
 
         with patch("src.api.routes.circuit_breaker") as mock_cb:
-            mock_cb.is_paused = False
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
             import src.api.routes as routes_mod
 
             routes_mod._prices_cache.clear()

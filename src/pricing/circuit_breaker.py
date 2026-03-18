@@ -3,8 +3,16 @@ import time
 from src.config import settings
 
 
-class CircuitBreaker:
-    """Monitors ETH price and pauses quoting if price moves too much."""
+class _AssetState:
+    """Per-asset circuit breaker state."""
+
+    __slots__ = (
+        "reference_price",
+        "reference_time",
+        "is_paused",
+        "paused_at",
+        "pause_reason",
+    )
 
     def __init__(self) -> None:
         self.reference_price: float | None = None
@@ -13,47 +21,85 @@ class CircuitBreaker:
         self.paused_at: float | None = None
         self.pause_reason: str | None = None
 
-    def update_reference(self, price: float) -> None:
-        """Set a new reference price (called when MM refreshes prices)."""
-        self.reference_price = price
-        self.reference_time = time.time()
-        self.is_paused = False
-        self.paused_at = None
-        self.pause_reason = None
 
-    def check(self, current_price: float) -> bool:
-        """Check if current price triggers the circuit breaker.
+class CircuitBreaker:
+    """Per-asset price circuit breaker.
 
-        Returns True if pricing should be paused.
-        """
-        if self.reference_price is None:
-            self.update_reference(current_price)
+    Tracks reference prices independently for each asset so that
+    comparing ETH and BTC prices never causes a false trip.
+    """
+
+    def __init__(self) -> None:
+        self._assets: dict[str, _AssetState] = {}
+
+    def _get(self, asset: str) -> _AssetState:
+        key = asset.lower()
+        if key not in self._assets:
+            self._assets[key] = _AssetState()
+        return self._assets[key]
+
+    def update_reference(self, price: float, asset: str = "eth") -> None:
+        state = self._get(asset)
+        state.reference_price = price
+        state.reference_time = time.time()
+        state.is_paused = False
+        state.paused_at = None
+        state.pause_reason = None
+
+    def check(self, current_price: float, asset: str = "eth") -> bool:
+        """Return True if pricing should be paused for this asset."""
+        state = self._get(asset)
+
+        if state.reference_price is None:
+            self.update_reference(current_price, asset)
             return False
 
-        move = abs(current_price - self.reference_price) / self.reference_price
+        move = abs(current_price - state.reference_price) / state.reference_price
 
         if move >= settings.circuit_breaker_threshold:
-            self.is_paused = True
-            self.paused_at = time.time()
-            self.pause_reason = (
-                f"ETH moved {move:.2%} since last update "
-                f"(ref: ${self.reference_price:.2f}, now: ${current_price:.2f})"
+            state.is_paused = True
+            state.paused_at = time.time()
+            state.pause_reason = (
+                f"{asset.upper()} moved {move:.2%} since last update "
+                f"(ref: ${state.reference_price:.2f}, "
+                f"now: ${current_price:.2f})"
             )
             return True
 
         return False
 
-    def resume(self, new_reference_price: float) -> None:
-        """Manually resume after a circuit breaker trip."""
-        self.update_reference(new_reference_price)
+    def is_paused_for(self, asset: str) -> bool:
+        return self._get(asset).is_paused
+
+    def pause_reason_for(self, asset: str) -> str | None:
+        return self._get(asset).pause_reason
+
+    def resume(self, new_reference_price: float, asset: str = "eth") -> None:
+        self.update_reference(new_reference_price, asset)
+
+    @property
+    def is_paused(self) -> bool:
+        """True if ANY asset is paused (backward compat)."""
+        return any(s.is_paused for s in self._assets.values())
+
+    @property
+    def pause_reason(self) -> str | None:
+        """First paused asset's reason (backward compat)."""
+        for s in self._assets.values():
+            if s.is_paused:
+                return s.pause_reason
+        return None
 
     @property
     def status(self) -> dict:
         return {
-            "is_paused": self.is_paused,
-            "reference_price": self.reference_price,
-            "pause_reason": self.pause_reason,
-            "paused_at": self.paused_at,
+            asset: {
+                "is_paused": s.is_paused,
+                "reference_price": s.reference_price,
+                "pause_reason": s.pause_reason,
+                "paused_at": s.paused_at,
+            }
+            for asset, s in self._assets.items()
         }
 
 

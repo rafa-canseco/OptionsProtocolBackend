@@ -372,10 +372,10 @@ async def get_prices(
     Returns **503** only if the circuit breaker has paused pricing (>2 % move).
     Capacity status is served separately via ``GET /capacity``.
     """
-    if circuit_breaker.is_paused:
+    if circuit_breaker.is_paused_for(asset.value):
         raise HTTPException(
             status_code=503,
-            detail=f"Pricing paused: {circuit_breaker.pause_reason}",
+            detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
         )
 
     cache_key = asset.value
@@ -408,12 +408,12 @@ async def get_prices(
         from src.pricing.chainlink import get_asset_price
 
         spot, _ = get_asset_price(asset)
-        if circuit_breaker.check(spot):
+        if circuit_breaker.check(spot, asset.value):
             raise HTTPException(
                 status_code=503,
-                detail=f"Pricing paused: {circuit_breaker.pause_reason}",
+                detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
-        circuit_breaker.update_reference(spot)
+        circuit_breaker.update_reference(spot, asset.value)
     except HTTPException:
         raise
     except Exception:
