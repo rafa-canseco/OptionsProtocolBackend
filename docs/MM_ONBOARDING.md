@@ -80,7 +80,7 @@ EIP712Domain(
 | `name` | `"b1nary"` |
 | `version` | `"1"` |
 | `chainId` | `84532` (Base Sepolia) |
-| `verifyingContract` | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` (BatchSettler) |
+| `verifyingContract` | `0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918` (BatchSettler) |
 
 ### Quote Struct
 
@@ -120,7 +120,7 @@ DOMAIN = {
     "name": "b1nary",
     "version": "1",
     "chainId": 84532,
-    "verifyingContract": "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+    "verifyingContract": "0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
 }
 
 QUOTE_TYPES = {
@@ -167,7 +167,7 @@ SETTLER_ABI = [
     }
 ]
 settler = w3.eth.contract(
-    address="0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+    address="0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
     abi=SETTLER_ABI,
 )
 nonce = settler.functions.makerNonce(MM_ADDRESS).call()
@@ -223,7 +223,7 @@ const DOMAIN = {
   name: "b1nary",
   version: "1",
   chainId: 84532,
-  verifyingContract: "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+  verifyingContract: "0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
 };
 
 const QUOTE_TYPES = {
@@ -887,26 +887,25 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 
 | Contract | Address | BaseScan |
 |----------|---------|----------|
-| BatchSettler | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` | [View](https://sepolia.basescan.org/address/0x29bb32c014aC3378FfbE335804B94cED48f2afc4) |
-| Controller | `0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e` | [View](https://sepolia.basescan.org/address/0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e) |
-| MarginPool | `0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44` | [View](https://sepolia.basescan.org/address/0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44) |
-| OTokenFactory | `0x29f897775ccFcFc7382929e0EC9580756041E4FE` | [View](https://sepolia.basescan.org/address/0x29f897775ccFcFc7382929e0EC9580756041E4FE) |
-| Oracle | `0x7843A0b0288DeEceCef333b8764342eA4Fc439D9` | [View](https://sepolia.basescan.org/address/0x7843A0b0288DeEceCef333b8764342eA4Fc439D9) |
-| AddressBook | `0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3` | [View](https://sepolia.basescan.org/address/0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3) |
-| Whitelist | `0xe188f203650425AcFF343bD64F7FF5bd8c89AB43` | [View](https://sepolia.basescan.org/address/0xe188f203650425AcFF343bD64F7FF5bd8c89AB43) |
+| BatchSettler | `0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918` | [View](https://sepolia.basescan.org/address/0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918) |
+| Controller | `0xB64a532B71E711B5F45B906D9Fc09c184EC54CA0` | [View](https://sepolia.basescan.org/address/0xB64a532B71E711B5F45B906D9Fc09c184EC54CA0) |
+| MarginPool | `0x727ddBD04A691E73feaE26349F48144953Ef20d6` | [View](https://sepolia.basescan.org/address/0x727ddBD04A691E73feaE26349F48144953Ef20d6) |
+| OTokenFactory | `0x1cEA6AE65c06972249831f617ea196863Fb66e6D` | [View](https://sepolia.basescan.org/address/0x1cEA6AE65c06972249831f617ea196863Fb66e6D) |
+| Oracle | `0x101cB9E8a3105EfB18A81E768238eFc041F31E15` | [View](https://sepolia.basescan.org/address/0x101cB9E8a3105EfB18A81E768238eFc041F31E15) |
+| Whitelist | `0xda732e343cfAd50Df28881B66f111779671a17E1` | [View](https://sepolia.basescan.org/address/0xda732e343cfAd50Df28881B66f111779671a17E1) |
 
 ### Mock Tokens (Testnet)
 
 | Token | Address | Decimals | BaseScan |
 |-------|---------|----------|----------|
-| LUSD (Mock USDC) | `0x5A2972d3390ABe3E57010272c8032BfC84E2077b` | 6 | [View](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b) |
-| LETH (Mock WETH) | `0x8C259D169378B705ae62AA697F3233C8dc3774Da` | 18 | [View](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da) |
+| LUSD (Mock USDC) | `0xAB51a471493832C1D70cef8ff937A850cf37c860` | 6 | [View](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860) |
+| LETH (Mock WETH) | `0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6` | 18 | [View](https://sepolia.basescan.org/address/0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6) |
 | LBTC (Mock WBTC) | `0x39fA11EbBE82699Fd9F79C566D7384064571d2b4` | 8 | [View](https://sepolia.basescan.org/address/0x39fA11EbBE82699Fd9F79C566D7384064571d2b4) |
 
 **Minting testnet USDC (LUSD):** The LUSD contract exposes a public `mint(address to, uint256 amount)` function. Call it directly to fund your MM wallet with test USDC — no faucet needed.
 
 ```python
-LUSD_ADDRESS = "0x5A2972d3390ABe3E57010272c8032BfC84E2077b"
+LUSD_ADDRESS = "0xAB51a471493832C1D70cef8ff937A850cf37c860"
 LUSD_ABI = [
     {
         "inputs": [
@@ -932,7 +931,7 @@ signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
 w3.eth.send_raw_transaction(signed.raw_transaction)
 ```
 
-You can also call `mint` directly on [BaseScan](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract) using the **Write Contract** tab (connect your wallet via MetaMask).
+You can also call `mint` directly on [BaseScan](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860#writeContract) using the **Write Contract** tab (connect your wallet via MetaMask).
 
 ### Key Addresses
 
@@ -977,17 +976,17 @@ curl -X POST https://api.b1nary.app/faucet \
 
 ```python
 # Mint more LUSD
-lusd = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=MOCK_ERC20_MINT_ABI)
+lusd = w3.eth.contract(address="0xAB51a471493832C1D70cef8ff937A850cf37c860", abi=MOCK_ERC20_MINT_ABI)
 lusd.functions.mint(MM_ADDRESS, 100_000 * 10**6).transact({"from": MM_ADDRESS})
 
 # Mint more LETH
-leth = w3.eth.contract(address="0x8C259D169378B705ae62AA697F3233C8dc3774Da", abi=MOCK_ERC20_MINT_ABI)
+leth = w3.eth.contract(address="0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6", abi=MOCK_ERC20_MINT_ABI)
 leth.functions.mint(MM_ADDRESS, 50 * 10**18).transact({"from": MM_ADDRESS})
 ```
 
 Or call `mint` directly on BaseScan Write Contract tabs:
-- [LUSD mint](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract)
-- [LETH mint](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da#writeContract)
+- [LUSD mint](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860#writeContract)
+- [LETH mint](https://sepolia.basescan.org/address/0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6#writeContract)
 
 If you need more Base Sepolia ETH for gas, external faucets: [Coinbase CDP](https://portal.cdp.coinbase.com/products/faucet), [Alchemy](https://www.alchemy.com/faucets/base-sepolia), [Superchain](https://app.optimism.io/faucet).
 
@@ -996,8 +995,8 @@ If you need more Base Sepolia ETH for gas, external faucets: [Coinbase CDP](http
 One-time approval so the contract can pull premium from your wallet when users fill your quotes. See section 5 for the full snippet. Quick version:
 
 ```python
-usdc = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=ERC20_ABI)
-usdc.functions.approve("0x29bb32c014aC3378FfbE335804B94cED48f2afc4", 2**256 - 1).transact({"from": MM_ADDRESS})
+usdc = w3.eth.contract(address="0xAB51a471493832C1D70cef8ff937A850cf37c860", abi=ERC20_ABI)
+usdc.functions.approve("0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918", 2**256 - 1).transact({"from": MM_ADDRESS})
 ```
 
 ### Step 3 — Get whitelisted
