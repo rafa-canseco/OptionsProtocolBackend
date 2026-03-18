@@ -926,7 +926,7 @@ Everything you need to go from zero to submitting your first quote on Base Sepol
 
 ### Step 1 — Fund your wallet via the API faucet
 
-The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
+The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, **2 LBTC**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
 
 ```bash
 curl -X POST https://api.b1nary.app/faucet \
@@ -938,9 +938,11 @@ curl -X POST https://api.b1nary.app/faucet \
 {
   "eth_amount":  "5000000000000000",
   "leth_amount": "50000000000000000000",
+  "lbtc_amount": "200000000",
   "lusd_amount": "100000000000",
   "eth_tx_hash":  "0x...",
   "leth_tx_hash": "0x...",
+  "lbtc_tx_hash": "0x...",
   "lusd_tx_hash": "0x..."
 }
 ```
@@ -986,7 +988,7 @@ Contact the b1nary team to have your wallet registered and receive an API key. T
 
 ### Testnet checklist
 
-- [ ] LUSD and LETH in wallet (`POST /faucet` or direct `mint`)
+- [ ] LUSD, LETH, and LBTC in wallet (`POST /faucet` or direct `mint`)
 - [ ] LUSD approved to BatchSettler (`approve(BATCH_SETTLER_ADDRESS, max)`)
 - [ ] Wallet whitelisted on BatchSettler (`setWhitelistedMM`)
 - [ ] API key received
