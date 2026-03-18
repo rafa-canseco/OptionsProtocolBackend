@@ -32,3 +32,10 @@ ALTER TABLE mm_capacity
 
 ALTER TABLE mm_capacity
   ADD CONSTRAINT mm_capacity_pkey PRIMARY KEY (mm_address, asset);
+
+-- 4. order_events: add asset column (populated by event indexer)
+ALTER TABLE order_events
+  ADD COLUMN IF NOT EXISTS asset text NOT NULL DEFAULT 'eth';
+
+CREATE INDEX IF NOT EXISTS idx_order_events_asset
+  ON order_events (asset);
