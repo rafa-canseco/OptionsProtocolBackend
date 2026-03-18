@@ -345,26 +345,14 @@ async def get_prices(
     The response includes EIP-712 signature data needed by the frontend
     to call executeOrder on BatchSettler.
 
-    Returns **503** if the circuit breaker has paused pricing (>2 % move).
+    Returns **503** only if the circuit breaker has paused pricing (>2 % move).
+    Capacity status is served separately via ``GET /capacity``.
     """
     if circuit_breaker.is_paused:
         raise HTTPException(
             status_code=503,
             detail=f"Pricing paused: {circuit_breaker.pause_reason}",
         )
-
-    # Check if all MMs are at capacity for this asset
-    try:
-        cap_rows = _fetch_capacity_rows(asset)
-        if cap_rows and all(r.get("status") == "full" for r in cap_rows):
-            raise HTTPException(
-                status_code=503,
-                detail="Market at capacity — all market makers are full",
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        logger.error("Could not check mm_capacity, proceeding", exc_info=True)
 
     cache_key = asset.value
     now = time.monotonic()

@@ -234,30 +234,6 @@ class TestGetCapacity:
 
 
 class TestPricesCapacityIntegration:
-    def test_prices_returns_503_when_all_full(self, mock_db):
-        """When all MMs report full, /prices returns 503."""
-        now = _now_iso()
-        cap_result = MagicMock(
-            data=[
-                {"mm_address": "0xaaa", "status": "full", "reported_at": now},
-            ]
-        )
-
-        def side_effect(table_name):
-            mock_table = MagicMock()
-            if table_name == "mm_capacity":
-                _capacity_mock_chain(mock_table).return_value = cap_result
-            return mock_table
-
-        mock_db.table.side_effect = side_effect
-
-        with patch("src.api.routes.circuit_breaker") as mock_cb:
-            mock_cb.is_paused = False
-            resp = client.get("/prices")
-
-        assert resp.status_code == 503
-        assert "capacity" in resp.json()["detail"].lower()
-
     def test_prices_proceeds_when_capacity_available(self, mock_db):
         """When at least one MM is active, /prices proceeds normally."""
         now = _now_iso()
