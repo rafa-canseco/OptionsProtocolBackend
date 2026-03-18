@@ -278,9 +278,30 @@ def _upsert_available_otokens(
     logger.info("Upserted %d oTokens to available_otokens", len(rows))
 
 
+def _parse_custom_expiries() -> list[int] | None:
+    """Parse CUSTOM_EXPIRY_TIMESTAMPS env var into a list of ints, or None if unset."""
+    raw = settings.custom_expiry_timestamps.strip()
+    if not raw:
+        return None
+    try:
+        timestamps = [int(t.strip()) for t in raw.split(",") if t.strip()]
+    except ValueError:
+        logger.error(
+            "CUSTOM_EXPIRY_TIMESTAMPS is malformed: %r — using default expiries",
+            raw,
+        )
+        return None
+    if not timestamps:
+        return None
+    logger.info("Using custom expiry timestamps: %s", timestamps)
+    return timestamps
+
+
 async def publish_once():
     """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
     _prune_near_expiry_otokens()
+
+    custom_expiries = _parse_custom_expiries()
 
     for asset in Asset:
         try:
@@ -289,7 +310,7 @@ async def publish_once():
             logger.exception("Failed to fetch %s price, skipping asset", asset.value)
             continue
 
-        specs = generate_otoken_specs(spot=spot, asset=asset)
+        specs = generate_otoken_specs(spot=spot, asset=asset, expiry_timestamps=custom_expiries)
 
         paired = await asyncio.to_thread(ensure_otokens_exist, specs, asset)
         if not paired:
