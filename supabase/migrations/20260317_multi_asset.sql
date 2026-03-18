@@ -23,8 +23,10 @@ ALTER TABLE mm_quotes
 CREATE INDEX IF NOT EXISTS idx_mm_quotes_asset
   ON mm_quotes (asset);
 
--- 3. mm_capacity: change PK from mm_address to (mm_address, asset)
--- Drop existing PK and add composite PK so each MM can report per-asset.
+-- 3. mm_capacity: add asset column and change PK to (mm_address, asset)
+ALTER TABLE mm_capacity
+  ADD COLUMN IF NOT EXISTS asset text NOT NULL DEFAULT 'eth';
+
 ALTER TABLE mm_capacity
   DROP CONSTRAINT IF EXISTS mm_capacity_pkey;
 
