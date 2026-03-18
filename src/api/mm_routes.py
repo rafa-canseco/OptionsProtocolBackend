@@ -43,6 +43,7 @@ from src.pricing.assets import Asset
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
 from src.pricing.utils import get_friday_expiries
+from src.bots.otoken_manager import _parse_custom_expiries
 
 logger = logging.getLogger(__name__)
 
@@ -449,7 +450,7 @@ async def get_market(
     underlying_addr = cfg.underlying_address.lower()
 
     otokens: list[OTokenInfo] = []
-    active_expiries = get_friday_expiries()
+    active_expiries = _parse_custom_expiries() or get_friday_expiries()
     try:
         client = get_client()
         result = (
