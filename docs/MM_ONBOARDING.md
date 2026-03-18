@@ -2,8 +2,9 @@
 
 Technical reference for integrating with the b1nary options protocol as a market maker.
 
-**Base URL:** `https://api.b1nary.app`
-**Chain:** Base Sepolia (chain ID `84532`)
+**Base URL (production):** `https://api.b1nary.app`
+**Base URL (staging):** `https://optionsprotocolbackend-staging.up.railway.app`
+**Chain:** Base (chain ID `8453`) / Base Sepolia (chain ID `84532` for staging)
 
 ---
 
