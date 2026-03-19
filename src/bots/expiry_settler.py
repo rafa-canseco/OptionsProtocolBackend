@@ -164,20 +164,23 @@ def _compute_contra_amount(
     return contra_amount, underlying, usdc
 
 
-def _beta_compute_max_collateral_put(contra_amount: int, oracle_price_8dec: int) -> int:
+def _beta_compute_max_collateral_put(
+    contra_amount: int, oracle_price_8dec: int, underlying_decimals: int = 18
+) -> int:
     """Compute maxCollateralSpent for PUT physicalRedeem (beta mode).
 
-    No Uniswap Quoter needed — converts WETH contra amount to USDC using
-    oracle price with a 10% buffer.
+    No Uniswap Quoter needed — converts underlying contra amount to USDC
+    using oracle price with a 10% buffer.
 
-    oracle_price_8dec is ETH/USD in 8 decimals (e.g., $2500 = 250000000000).
+    oracle_price_8dec is asset/USD in 8 decimals.
     """
     if oracle_price_8dec <= 0:
         raise ValueError(f"oracle_price_8dec must be positive, got {oracle_price_8dec}")
 
-    # PUT: collateral is USDC (6-dec), contra is WETH (18-dec)
-    # max_collateral_usdc = contra_weth * oracle_price / 1e(18 + 8 - 6) = contra * price / 1e20
-    amount_in = (contra_amount * oracle_price_8dec) // (10**20)
+    # PUT: collateral is USDC (6-dec), contra is underlying (N-dec)
+    # max_collateral_usdc = contra * oracle_price / 10^(N + 8 - 6)
+    divisor = 10 ** (underlying_decimals + 8 - 6)
+    amount_in = (contra_amount * oracle_price_8dec) // divisor
 
     # BETA_SLIPPAGE_BPS ceiling buffer: (amount * bps + 9999) // 10000 rounds up
     max_collateral = amount_in + (amount_in * BETA_SLIPPAGE_BPS + 9_999) // 10_000
@@ -265,8 +268,12 @@ def compute_slippage_param(
             raise ValueError(
                 "oracle_price_8dec is required in beta mode (no Uniswap Quoter available)"
             )
+        try:
+            cfg = get_asset_config(Asset(asset_str))
+        except (ValueError, KeyError):
+            cfg = get_asset_config(Asset.ETH)
         max_collateral = _beta_compute_max_collateral_put(
-            contra_amount, oracle_price_8dec
+            contra_amount, oracle_price_8dec, cfg.decimals
         )
         return max_collateral, contra_amount
 
@@ -462,7 +469,6 @@ async def settle_once():
         settled_positions,
     )
 
-    weth = settings.weth_address.lower()
     usdc = settings.usdc_address.lower()
 
     for pos in itm_positions:
@@ -582,7 +588,12 @@ async def settle_once():
 
         # Step 3: mark DB (separate from on-chain to prevent misattribution)
         if delivery_succeeded:
-            delivered_asset = weth if pos["is_put"] else usdc
+            pos_asset = pos.get("asset", "eth")
+            try:
+                pos_cfg = get_asset_config(Asset(pos_asset))
+            except (ValueError, KeyError):
+                pos_cfg = get_asset_config(Asset.ETH)
+            delivered_asset = pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
             delivered_amount = str(contra_amount)
             try:
                 _db_update(
@@ -636,7 +647,13 @@ async def settle_once():
         otm_failures = 0
         for pos in otm_positions:
             expiry = pos["expiry"]
-            cached_price = expiry_cache.get(expiry)
+            pos_asset = pos.get("asset", "eth")
+            try:
+                pos_cfg = get_asset_config(Asset(pos_asset))
+            except (ValueError, KeyError):
+                pos_cfg = get_asset_config(Asset.ETH)
+            cache_key = (Web3.to_checksum_address(pos_cfg.underlying_address), expiry)
+            cached_price = expiry_cache.get(cache_key)
             expiry_price_str = str(cached_price) if cached_price is not None else None
             try:
                 _db_update(
