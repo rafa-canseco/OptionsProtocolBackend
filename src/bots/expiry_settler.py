@@ -24,7 +24,8 @@ from src.contracts.web3_client import (
     get_operator_account,
     build_and_send_tx,
 )
-from src.pricing.chainlink import get_eth_price_raw
+from src.pricing.assets import Asset, get_asset_config
+from src.pricing.chainlink import get_asset_price_raw
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def get_expired_unsettled() -> list[dict]:
     result = (
         client.table("order_events")
         .select(
-            "user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address"
+            "user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address, asset"
         )
         .eq("is_settled", False)
         .lte("expiry", now)
@@ -71,25 +72,35 @@ def identify_itm_positions(
         oracle price was unavailable — must be excluded from OTM classification
     """
     oracle = get_oracle()
-    weth = Web3.to_checksum_address(settings.weth_address)
 
     itm: list[dict] = []
     skipped: set[tuple[str, int]] = set()
-    expiry_price_cache: dict[int, int | None] = {}
+    # Cache keyed by (underlying_address, expiry)
+    expiry_price_cache: dict[tuple[str, int], int | None] = {}
 
     for pos in positions:
         expiry = pos["expiry"]
-        if expiry not in expiry_price_cache:
+        asset_str = pos.get("asset", "eth")
+        try:
+            cfg = get_asset_config(Asset(asset_str))
+        except (ValueError, KeyError):
+            cfg = get_asset_config(Asset.ETH)
+        underlying = Web3.to_checksum_address(cfg.underlying_address)
+
+        cache_key = (underlying, expiry)
+        if cache_key not in expiry_price_cache:
             try:
                 price_raw, is_finalized = oracle.functions.getExpiryPrice(
-                    weth, expiry
+                    underlying, expiry
                 ).call()
-                expiry_price_cache[expiry] = price_raw if is_finalized else None
+                expiry_price_cache[cache_key] = price_raw if is_finalized else None
             except Exception:
-                logger.exception(f"Failed to read expiry price for timestamp {expiry}")
-                expiry_price_cache[expiry] = None
+                logger.exception(
+                    "Failed to read expiry price for %s at %d", asset_str, expiry
+                )
+                expiry_price_cache[cache_key] = None
 
-        oracle_price = expiry_price_cache[expiry]
+        oracle_price = expiry_price_cache[cache_key]
         if oracle_price is None:
             logger.warning(
                 f"Expiry price not finalized for {expiry}, skipping position"
@@ -115,22 +126,33 @@ def identify_itm_positions(
 
 
 def _compute_contra_amount(
-    amount_raw: int, strike: int, is_put: bool
+    amount_raw: int, strike: int, is_put: bool, asset: str = "eth"
 ) -> tuple[int, str, str]:
     """Determine contra-asset amount and token direction.
 
     Returns (contra_amount, token_in_addr, token_out_addr).
 
-    Decimal math:
-      - PUT ITM: user gets WETH. contra = oTokenAmount * 1e10  (10^8 * 10^10 = 10^18)
-      - CALL ITM: user gets USDC. contra = oTokenAmount * strike / 1e10  (10^8 * 10^8 / 10^10 = 10^6)
+    oToken amounts are always 8 decimals. The scaling factor to reach
+    the underlying's native decimals varies by asset:
+      - ETH (18 dec): scale = 10^10  (10^8 * 10^10 = 10^18)
+      - BTC (8 dec):  scale = 10^0   (10^8 * 1 = 10^8)
+
+    PUT ITM:  user gets underlying. contra = amount * scale
+    CALL ITM: user gets USDC.      contra = amount * strike / 10^10
     """
-    weth = Web3.to_checksum_address(settings.weth_address)
+    try:
+        cfg = get_asset_config(Asset(asset))
+    except (ValueError, KeyError):
+        cfg = get_asset_config(Asset.ETH)
+    underlying = Web3.to_checksum_address(cfg.underlying_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
+    # oToken is 8 dec, underlying is cfg.decimals dec
+    scale = 10 ** (cfg.decimals - 8)
+
     if is_put:
-        contra_amount = amount_raw * (10**10)
-        return contra_amount, usdc, weth
+        contra_amount = amount_raw * scale
+        return contra_amount, usdc, underlying
 
     contra_amount = (amount_raw * strike) // (10**10)
     if contra_amount == 0:
@@ -139,7 +161,7 @@ def _compute_contra_amount(
             amount_raw,
             strike,
         )
-    return contra_amount, weth, usdc
+    return contra_amount, underlying, usdc
 
 
 def _beta_compute_max_collateral_put(contra_amount: int, oracle_price_8dec: int) -> int:
@@ -227,8 +249,9 @@ def compute_slippage_param(
             f"for oToken {position.get('otoken_address')}"
         )
 
+    asset_str = position.get("asset", "eth")
     contra_amount, token_in, token_out = _compute_contra_amount(
-        amount_raw, strike, is_put
+        amount_raw, strike, is_put, asset_str
     )
 
     # CALL: minAmountOut — contra_amount IS the expected USDC output, apply downside buffer
@@ -297,51 +320,76 @@ def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> Non
 def _ensure_expiry_prices_set(expiries: set[int]) -> None:
     """Set Oracle expiry prices from Chainlink for all needed expiries.
 
-    Reads the current Chainlink ETH/USD price and calls
-    setExpiryPrice for each expiry that isn't finalized yet.
-    Skips (with warning) any expiry that fails.
+    Reads the current Chainlink price for each supported asset and
+    calls setExpiryPrice for each (asset, expiry) that isn't finalized.
     """
     if not expiries:
         return
 
     oracle = get_oracle()
     account = get_operator_account()
-    weth = Web3.to_checksum_address(settings.weth_address)
 
-    chainlink_price, decimals, _ = get_eth_price_raw()
-    if decimals != 8:
-        chainlink_price = int(chainlink_price * (10**8) / (10**decimals))
+    for asset in Asset:
+        cfg = get_asset_config(asset)
+        underlying = Web3.to_checksum_address(cfg.underlying_address)
 
-    for expiry in expiries:
         try:
-            price_raw, is_finalized = oracle.functions.getExpiryPrice(
-                weth, expiry
-            ).call()
-            if is_finalized:
-                logger.info(
-                    "Expiry price already set for %d: %d",
-                    expiry,
-                    price_raw,
-                )
-                continue
+            chainlink_price, decimals, _ = get_asset_price_raw(asset)
+            if decimals != 8:
+                chainlink_price = int(chainlink_price * (10**8) / (10**decimals))
         except Exception:
-            logger.exception("Failed to read expiry price for %d", expiry)
+            logger.exception(
+                "Failed to read %s Chainlink price, skipping expiry price set",
+                asset.value,
+            )
             continue
 
-        try:
-            tx_fn = oracle.functions.setExpiryPrice(weth, expiry, chainlink_price)
-            tx_hash = build_and_send_tx(tx_fn, account)
-            logger.info(
-                "Set expiry price %d for expiry %d, tx: %s",
-                chainlink_price,
-                expiry,
-                tx_hash,
-            )
-        except Exception as e:
-            if "PriceAlreadySet" in str(e):
-                logger.info("Expiry price already set for %d (race)", expiry)
-            else:
-                logger.exception("Failed to set expiry price for %d", expiry)
+        for expiry in expiries:
+            try:
+                price_raw, is_finalized = oracle.functions.getExpiryPrice(
+                    underlying, expiry
+                ).call()
+                if is_finalized:
+                    logger.info(
+                        "Expiry price already set for %s at %d: %d",
+                        asset.value,
+                        expiry,
+                        price_raw,
+                    )
+                    continue
+            except Exception:
+                logger.exception(
+                    "Failed to read expiry price for %s at %d",
+                    asset.value,
+                    expiry,
+                )
+                continue
+
+            try:
+                tx_fn = oracle.functions.setExpiryPrice(
+                    underlying, expiry, chainlink_price
+                )
+                tx_hash = build_and_send_tx(tx_fn, account)
+                logger.info(
+                    "Set %s expiry price %d for expiry %d, tx: %s",
+                    asset.value,
+                    chainlink_price,
+                    expiry,
+                    tx_hash,
+                )
+            except Exception as e:
+                if "PriceAlreadySet" in str(e):
+                    logger.info(
+                        "Expiry price already set for %s at %d (race)",
+                        asset.value,
+                        expiry,
+                    )
+                else:
+                    logger.exception(
+                        "Failed to set %s expiry price for %d",
+                        asset.value,
+                        expiry,
+                    )
 
 
 async def settle_once():
