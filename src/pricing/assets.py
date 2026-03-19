@@ -18,6 +18,7 @@ class Asset(str, Enum):
 @dataclass(frozen=True)
 class AssetConfig:
     symbol: str
+    decimals: int
     deribit_index: str
     deribit_currency: str
     strike_step: float
@@ -43,6 +44,7 @@ class AssetConfig:
 ASSET_CONFIGS: dict[Asset, AssetConfig] = {
     Asset.ETH: AssetConfig(
         symbol="ETH",
+        decimals=18,
         deribit_index="eth_usd",
         deribit_currency="ETH",
         strike_step=50.0,
@@ -50,6 +52,7 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
     ),
     Asset.BTC: AssetConfig(
         symbol="BTC",
+        decimals=8,
         deribit_index="btc_usd",
         deribit_currency="BTC",
         strike_step=1000.0,
