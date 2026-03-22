@@ -23,6 +23,7 @@ class AssetConfig:
     deribit_currency: str
     strike_step: float
     num_strikes: int
+    min_otm_per_side: int = 4
 
     @property
     def chainlink_feed_address(self) -> str:
