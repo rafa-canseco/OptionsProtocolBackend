@@ -27,17 +27,29 @@ def generate_strikes(
     spot: float,
     step: float = 50.0,
     num_strikes: int = 5,
+    min_otm_per_side: int = 4,
 ) -> list[float]:
     """Generate strike prices around the current spot.
 
-    Args:
-        spot: Current price of the underlying asset.
-        step: Rounding step for strikes (e.g. $50 for ETH, $1000 for BTC).
-        num_strikes: Total number of strikes to generate.
+    Starts with ``num_strikes`` centered on spot, then extends in
+    each direction until at least ``min_otm_per_side`` OTM strikes
+    exist on both the put side (below spot) and call side (above).
     """
     center = round(spot / step) * step
     half = num_strikes // 2
-    return [center + (i - half) * step for i in range(num_strikes)]
+    strikes = [center + (i - half) * step for i in range(num_strikes)]
+
+    lowest = min(strikes)
+    while sum(1 for s in strikes if s < spot) < min_otm_per_side:
+        lowest -= step
+        strikes.append(lowest)
+
+    highest = max(strikes)
+    while sum(1 for s in strikes if s > spot) < min_otm_per_side:
+        highest += step
+        strikes.append(highest)
+
+    return sorted(strikes)
 
 
 def generate_otoken_specs(
@@ -64,7 +76,10 @@ def generate_otoken_specs(
     if num_strikes is None:
         num_strikes = cfg.num_strikes
 
-    strikes = generate_strikes(spot, step=cfg.strike_step, num_strikes=num_strikes)
+    strikes = generate_strikes(
+        spot, step=cfg.strike_step, num_strikes=num_strikes,
+        min_otm_per_side=cfg.min_otm_per_side,
+    )
     specs: list[OTokenSpec] = []
 
     for ts in expiry_timestamps:
