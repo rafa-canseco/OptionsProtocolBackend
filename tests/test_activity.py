@@ -19,6 +19,8 @@ def _make_row(
     collateral: str = "1000000",  # 1 USDC
     net_premium: str = "50000",  # 0.05 USDC
     is_put: bool = True,
+    strike_price: int = 0,
+    asset: str = "eth",
     days_ago: int = 0,
 ) -> dict:
     ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).isoformat()
@@ -27,6 +29,8 @@ def _make_row(
         "net_premium": net_premium,
         "premium": net_premium,
         "is_put": is_put,
+        "strike_price": strike_price,
+        "asset": asset,
         "indexed_at": ts,
     }
 
@@ -114,16 +118,30 @@ def test_activity_multiple_days():
     assert data["positionCount"] == 4
 
 
-def test_activity_covered_call_uses_weth_decimals():
-    """Covered call collateral uses WETH decimals (1e18), not USDC."""
-    # 1 WETH = 1e18 raw → 1.0 in human units
-    weth_raw = str(10**18)
-    rows = [_make_row(collateral=weth_raw, is_put=False)]
+def test_activity_eth_call_volume_in_usd():
+    """ETH call: 1 WETH collateral at $2500 strike → $2500 USD volume."""
+    weth_raw = str(10**18)  # 1 WETH
+    strike = 250000000000  # $2500 with 8 decimals
+    rows = [
+        _make_row(collateral=weth_raw, is_put=False, strike_price=strike, asset="eth")
+    ]
     with patch("src.api.activity.get_client", return_value=_mock_db(rows)):
         resp = client.get(f"/activity/{VALID_ADDRESS}")
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["totalVolume"] == pytest.approx(1.0)
+    assert resp.json()["totalVolume"] == pytest.approx(2500.0)
+
+
+def test_activity_btc_call_volume_in_usd():
+    """BTC call: 1 cbBTC collateral at $90000 strike → $90000 USD volume."""
+    btc_raw = str(10**8)  # 1 cbBTC (8 decimals)
+    strike = 9000000000000  # $90000 with 8 decimals
+    rows = [
+        _make_row(collateral=btc_raw, is_put=False, strike_price=strike, asset="btc")
+    ]
+    with patch("src.api.activity.get_client", return_value=_mock_db(rows)):
+        resp = client.get(f"/activity/{VALID_ADDRESS}")
+    assert resp.status_code == 200
+    assert resp.json()["totalVolume"] == pytest.approx(90000.0)
 
 
 def test_activity_premium_fallback_to_gross():

@@ -12,26 +12,31 @@ router = APIRouter()
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
-# Collateral decimals per option type.
-# Puts: USDC collateral (6 decimals).
-# Calls: WETH collateral (18 decimals).
-# Note: totalVolume sums put collateral in USDC and call collateral in WETH
-# as a proxy metric. These are different units summed together — acceptable
-# for internal activity tracking but not a strict USDC volume figure.
 _USDC_DECIMALS = 1_000_000  # 1e6
 _WETH_DECIMALS = 10**18  # 1e18
+_CBBTC_DECIMALS = 10**8  # 1e8
+_STRIKE_DECIMALS = 10**8  # oToken strike uses 8 decimals
+
+_CALL_DECIMALS = {"eth": _WETH_DECIMALS, "btc": _CBBTC_DECIMALS}
 
 
-def _collateral_human(row: dict) -> float:
-    """Convert raw collateral string to human-readable amount.
+def _collateral_usd(row: dict) -> float:
+    """Convert raw collateral to USD value.
 
-    Uses is_put to pick the correct decimal divisor. Rows where is_put is None
-    (pre-enrichment) default to USDC decimals (puts were the primary product).
+    Puts: collateral is USDC → divide by 1e6.
+    Calls: collateral is the underlying (WETH/cbBTC) → convert to USD
+    via (collateral / asset_decimals) * (strike_price / 1e8).
     """
     raw = int(row.get("collateral") or 0)
     is_put = row.get("is_put")
-    divisor = _USDC_DECIMALS if (is_put is None or is_put) else _WETH_DECIMALS
-    return raw / divisor
+    if is_put is None or is_put:
+        return raw / _USDC_DECIMALS
+    asset = row.get("asset") or "eth"
+    decimals = _CALL_DECIMALS.get(asset, _WETH_DECIMALS)
+    strike = int(row.get("strike_price") or 0)
+    native_amount = raw / decimals
+    strike_usd = strike / _STRIKE_DECIMALS
+    return native_amount * strike_usd
 
 
 def _premium_human(row: dict) -> float:
@@ -67,7 +72,7 @@ def _compute_metrics(rows: list[dict]) -> dict:
             "daysSinceFirst": 0,
         }
 
-    total_volume = sum(_collateral_human(r) for r in rows)
+    total_volume = sum(_collateral_usd(r) for r in rows)
     total_premium = sum(_premium_human(r) for r in rows)
     position_count = len(rows)
 
@@ -107,7 +112,9 @@ async def get_activity(wallet_address: str):
         client = get_client()
         result = (
             client.table("order_events")
-            .select("collateral,net_premium,premium,is_put,indexed_at")
+            .select(
+                "collateral,net_premium,premium,is_put,strike_price,asset,indexed_at"
+            )
             .eq("user_address", wallet_address.lower())
             .execute()
         )
