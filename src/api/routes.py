@@ -583,6 +583,7 @@ async def get_positions(address: str, request: Request):
 class GroupPositionsRequest(BaseModel):
     group_id: str
     tx_hashes: list[str]
+    user_address: str
 
 
 @router.post(
@@ -606,6 +607,9 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
     except ValueError:
         raise HTTPException(400, "group_id must be a valid UUID")
 
+    if not ETH_ADDRESS_RE.match(body.user_address):
+        raise HTTPException(400, "Invalid user_address")
+
     for tx in body.tx_hashes:
         if not re.match(r"^0x[0-9a-fA-F]{64}$", tx):
             raise HTTPException(400, f"Invalid tx hash: {tx}")
@@ -615,6 +619,7 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         result = (
             client.table("order_events")
             .update({"group_id": body.group_id})
+            .eq("user_address", body.user_address.lower())
             .is_("group_id", "null")
             .in_("tx_hash", [tx.lower() for tx in body.tx_hashes])
             .execute()
@@ -624,7 +629,20 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         logger.exception("Failed to group positions")
         raise HTTPException(502, "Could not update positions")
 
+    expected = len(body.tx_hashes)
     if updated == 0:
         raise HTTPException(404, "No matching ungrouped positions found")
+    if updated != expected:
+        logger.warning(
+            "Partial group: expected %d but matched %d (group_id=%s)",
+            expected,
+            updated,
+            body.group_id,
+        )
+        raise HTTPException(
+            409,
+            f"Expected {expected} positions but found {updated}. "
+            "Some tx hashes may not be indexed yet.",
+        )
 
     return {"grouped": updated, "group_id": body.group_id}
