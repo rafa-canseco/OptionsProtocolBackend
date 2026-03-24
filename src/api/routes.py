@@ -2,6 +2,7 @@ import logging
 import math
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 
 from collections import defaultdict
@@ -601,8 +602,6 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         raise HTTPException(400, "tx_hashes must contain 2-10 entries")
 
     try:
-        import uuid
-
         uuid.UUID(body.group_id)
     except ValueError:
         raise HTTPException(400, "group_id must be a valid UUID")
@@ -616,6 +615,7 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         result = (
             client.table("order_events")
             .update({"group_id": body.group_id})
+            .is_("group_id", "null")
             .in_("tx_hash", [tx.lower() for tx in body.tx_hashes])
             .execute()
         )
@@ -625,6 +625,6 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         raise HTTPException(502, "Could not update positions")
 
     if updated == 0:
-        raise HTTPException(404, "No positions found for given tx hashes")
+        raise HTTPException(404, "No matching ungrouped positions found")
 
     return {"grouped": updated, "group_id": body.group_id}

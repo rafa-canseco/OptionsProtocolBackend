@@ -49,13 +49,16 @@ def backfill(apply: bool = False) -> None:
         .order("indexed_at")
         .execute()
     )
-    rows = result.data or []
+    if result.data is None:
+        logger.error("Query returned None — possible auth or network error")
+        sys.exit(1)
+    rows = result.data
     logger.info("Found %d ungrouped positions", len(rows))
 
     # Group candidates by (user, expiry, asset)
     buckets: dict[tuple, list[dict]] = {}
     for r in rows:
-        key = (r["user_address"], r["expiry"], r.get("asset", "eth"))
+        key = (r["user_address"], r["expiry"], r.get("asset") or "eth")
         buckets.setdefault(key, []).append(r)
 
     paired = 0
@@ -116,9 +119,17 @@ def backfill(apply: bool = False) -> None:
             )
 
             if apply:
-                client.table("order_events").update({"group_id": gid}).in_(
-                    "id", [put["id"], best_call["id"]]
-                ).execute()
+                try:
+                    client.table("order_events").update({"group_id": gid}).in_(
+                        "id", [put["id"], best_call["id"]]
+                    ).execute()
+                except Exception:
+                    logger.exception(
+                        "Failed to write group_id for put=%s call=%s",
+                        put["tx_hash"][:10],
+                        best_call["tx_hash"][:10],
+                    )
+                    continue
 
             used_call_ids.add(best_call["id"])
             paired += 1
