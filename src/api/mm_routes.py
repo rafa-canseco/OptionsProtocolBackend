@@ -146,6 +146,21 @@ async def submit_quotes(
     if rows_to_upsert:
         try:
             client = get_client()
+            # Deactivate old quotes for otokens being refreshed so
+            # stale signatures are no longer served via /prices.
+            otoken_addrs = list(
+                {r["otoken_address"] for r in rows_to_upsert}
+            )
+            client.table("mm_quotes").update(
+                {"is_active": False}
+            ).eq(
+                "mm_address", mm_address.lower()
+            ).eq(
+                "is_active", True
+            ).in_(
+                "otoken_address", otoken_addrs
+            ).execute()
+            # Upsert new quotes (re-sets is_active=True)
             client.table("mm_quotes").upsert(
                 rows_to_upsert, on_conflict="mm_address,quote_id"
             ).execute()

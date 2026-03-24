@@ -45,6 +45,11 @@ _read_hits: dict[str, list[float]] = defaultdict(list)
 
 _CAPACITY_STALE_SECONDS = 120  # MM reports every ~30s; 2min = stale
 
+# Minimum seconds of deadline remaining for a quote to be served.
+# Matches _PRICES_TTL so a cached response never contains an
+# already-expired quote. The MM controls user-facing time via deadline.
+_MIN_QUOTE_TTL = _PRICES_TTL
+
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP, preferring X-Forwarded-For for proxied requests."""
@@ -237,7 +242,7 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
         .select("*")
         .eq("is_active", True)
         .eq("asset", asset.value)
-        .gt("deadline", now_ts)
+        .gt("deadline", now_ts + _MIN_QUOTE_TTL)
         .gt("expiry", expiry_cutoff_ts)
         .execute()
     )
