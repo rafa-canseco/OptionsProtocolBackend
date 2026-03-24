@@ -2,11 +2,13 @@ import logging
 import math
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from src.config import settings
 from src.db.database import get_client
@@ -576,3 +578,71 @@ async def get_positions(address: str, request: Request):
         if pos.get("net_premium") is not None:
             pos["premium"] = pos["net_premium"]
     return positions
+
+
+class GroupPositionsRequest(BaseModel):
+    group_id: str
+    tx_hashes: list[str]
+    user_address: str
+
+
+@router.post(
+    "/positions/group",
+    tags=["Positions"],
+    summary="Link positions into a range group",
+)
+async def group_positions(body: GroupPositionsRequest, request: Request):
+    """Tag positions with a shared group_id so the frontend can
+    display range (put+call) pairs as a single unit.
+
+    The frontend calls this after both legs of a range order confirm.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if len(body.tx_hashes) < 2 or len(body.tx_hashes) > 10:
+        raise HTTPException(400, "tx_hashes must contain 2-10 entries")
+
+    try:
+        uuid.UUID(body.group_id)
+    except ValueError:
+        raise HTTPException(400, "group_id must be a valid UUID")
+
+    if not ETH_ADDRESS_RE.match(body.user_address):
+        raise HTTPException(400, "Invalid user_address")
+
+    for tx in body.tx_hashes:
+        if not re.match(r"^0x[0-9a-fA-F]{64}$", tx):
+            raise HTTPException(400, f"Invalid tx hash: {tx}")
+
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .update({"group_id": body.group_id})
+            .eq("user_address", body.user_address.lower())
+            .is_("group_id", "null")
+            .in_("tx_hash", [tx.lower() for tx in body.tx_hashes])
+            .execute()
+        )
+        updated = len(result.data) if result.data else 0
+    except Exception:
+        logger.exception("Failed to group positions")
+        raise HTTPException(502, "Could not update positions")
+
+    expected = len(body.tx_hashes)
+    if updated == 0:
+        raise HTTPException(404, "No matching ungrouped positions found")
+    if updated != expected:
+        logger.warning(
+            "Partial group: expected %d but matched %d (group_id=%s)",
+            expected,
+            updated,
+            body.group_id,
+        )
+        raise HTTPException(
+            409,
+            f"Expected {expected} positions but found {updated}. "
+            "Some tx hashes may not be indexed yet.",
+        )
+
+    return {"grouped": updated, "group_id": body.group_id}
