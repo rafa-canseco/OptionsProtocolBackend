@@ -52,10 +52,7 @@ _CAPACITY_STALE_SECONDS = 120  # MM reports every ~30s; 2min = stale
 # already-expired quote. The MM controls user-facing time via deadline.
 _MIN_QUOTE_TTL = _PRICES_TTL
 
-# Temporary beta measure: multiply raw position counts by this factor to
-# bootstrap social proof while on-chain volume is low. Remove once organic
-# volume is sufficient.
-ACTIVITY_MULTIPLIER = 3
+ACTIVITY_MULTIPLIER = 1
 
 
 def _get_client_ip(request: Request) -> str:
