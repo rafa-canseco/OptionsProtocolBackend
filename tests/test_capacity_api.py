@@ -554,13 +554,45 @@ class TestPositionCounts:
         assert items[0]["position_count"] == 2 * routes_mod.ACTIVITY_MULTIPLIER
 
 
-    def test_different_expiries_not_mixed(self, mock_db):
-        """Positions for the same strike but different expiry are NOT aggregated."""
+    def test_orphan_positions_roll_into_nearest_visible_expiry(self, mock_db):
+        """Positions from a non-visible expiry roll into nearest visible expiry."""
+        import src.api.routes as routes_mod
+
         quote = _make_quote(2400.0, True, expiry=9999999999)
         quotes_result = MagicMock(data=[quote])
-        # Position exists for same strike/type but different expiry
+        # Position at a different (orphaned) expiry — same strike/type
         positions_result = MagicMock(
             data=[{"strike_price": 240000000000, "is_put": True, "expiry": 8888888888}]
+        )
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert items[0]["position_count"] == routes_mod.ACTIVITY_MULTIPLIER
+
+    def test_orphan_dropped_when_no_visible_strike_match(self, mock_db):
+        """Orphaned positions with no visible (strike, option_type) are dropped."""
+        quote = _make_quote(2400.0, True, expiry=9999999999)
+        quotes_result = MagicMock(data=[quote])
+        # Position at a different strike — no visible match to roll into
+        positions_result = MagicMock(
+            data=[{"strike_price": 250000000000, "is_put": True, "expiry": 8888888888}]
         )
 
         def side_effect(table_name):

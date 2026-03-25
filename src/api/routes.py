@@ -476,14 +476,38 @@ async def get_prices(
     from src.pricing.black_scholes import OptionType
 
     result = []
+    visible_keys: dict[tuple, int] = {}  # (strike, is_put, expiry) -> index
     for q in best_quotes:
         pr = _quote_to_price_response(q)
         if pr is not None:
             if spot > 0:
                 pr.spot = spot
-            key = (pr.strike, pr.option_type == OptionType.PUT, q.get("expiry"))
-            pr.position_count = position_counts.get(key, 0) * ACTIVITY_MULTIPLIER
+            idx = len(result)
             result.append(pr)
+            is_put = pr.option_type == OptionType.PUT
+            visible_keys[(pr.strike, is_put, q.get("expiry"))] = idx
+
+    # Rollup: assign each position group to its visible key, or roll
+    # orphaned positions (e.g. within 48h cutoff) into the nearest
+    # visible expiry for the same (strike, option_type).
+    merged = [0] * len(result)
+    for (strike, is_put, expiry), count in position_counts.items():
+        if (strike, is_put, expiry) in visible_keys:
+            merged[visible_keys[(strike, is_put, expiry)]] += count
+        else:
+            candidates = [
+                (vis_exp, idx)
+                for (s, p, vis_exp), idx in visible_keys.items()
+                if s == strike and p == is_put
+            ]
+            if candidates:
+                nearest_idx = min(
+                    candidates, key=lambda x: abs(x[0] - expiry)
+                )[1]
+                merged[nearest_idx] += count
+
+    for i, pr in enumerate(result):
+        pr.position_count = merged[i] * ACTIVITY_MULTIPLIER
 
     _prices_cache[cache_key] = result
     _prices_cached_at[cache_key] = time.monotonic()
