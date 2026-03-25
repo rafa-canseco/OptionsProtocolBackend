@@ -51,6 +51,9 @@ class Settings(BaseSettings):
 
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
+    settlement_max_retries: int = 5
+    settlement_sweep_interval_seconds: int = 300  # 5 min between sweeps
+    settlement_sweep_max_cycles: int = 24  # ~2h of sweeps at 5min intervals
 
     # Physical settlement (flash loan + DEX swap)
     uniswap_v3_router_address: str = (
