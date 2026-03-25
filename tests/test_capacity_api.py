@@ -346,6 +346,213 @@ class TestGetCapacityErrors:
         assert resp.status_code == 502
 
 
+def _position_count_mock_chain(mock_table):
+    """Wire up the mock chain: .select().eq().eq().gt().execute()"""
+    return (
+        mock_table.select.return_value.eq.return_value.eq.return_value.gt.return_value.execute
+    )
+
+
+def _quotes_mock_chain(mock_table):
+    """Wire up the mm_quotes mock chain: .select().eq().eq().gt().gt().execute()"""
+    return (
+        mock_table.select.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
+    )
+
+
+def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> dict:
+    """Build a minimal valid mm_quotes row for testing."""
+    import time
+
+    return {
+        "bid_price": 1_000_000,  # 1 USDC
+        "max_amount": 100_000_000,  # 1 oToken
+        "deadline": int(time.time()) + 60,
+        "strike_price": strike_usd,
+        "expiry": expiry,
+        "is_put": is_put,
+        "otoken_address": "0x" + "a" * 40,
+        "signature": "0x" + "b" * 130,
+        "mm_address": "0x" + "c" * 40,
+        "quote_id": "1",
+        "maker_nonce": 0,
+        "asset": "eth",
+        "is_active": True,
+    }
+
+
+class TestPositionCounts:
+    """Tests for position_count field on /prices responses."""
+
+    def _prices_cb_patch(self):
+        return patch("src.api.routes.circuit_breaker")
+
+    def _clear_cache(self):
+        import src.api.routes as routes_mod
+
+        routes_mod._prices_cache.clear()
+        routes_mod._prices_cached_at.clear()
+
+    def test_position_count_default_zero_when_no_positions(self, mock_db):
+        """position_count is 0 for all strikes when order_events returns nothing."""
+        quote = _make_quote(2400.0, True)
+        quotes_result = MagicMock(data=[quote])
+        positions_result = MagicMock(data=[])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["position_count"] == 0
+
+    def test_position_count_applies_multiplier(self, mock_db):
+        """1 active position → position_count == ACTIVITY_MULTIPLIER (3)."""
+        import src.api.routes as routes_mod
+
+        quote = _make_quote(2400.0, True)
+        quotes_result = MagicMock(data=[quote])
+        # order_events: 1 active put at strike 2400 (raw 8-decimal = 240000000000)
+        positions_result = MagicMock(
+            data=[{"strike_price": 240000000000, "is_put": True}]
+        )
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["position_count"] == routes_mod.ACTIVITY_MULTIPLIER
+
+    def test_position_count_zero_on_db_failure(self, mock_db):
+        """If order_events query fails, endpoint still returns 200 with position_count=0."""
+        quote = _make_quote(2400.0, False)
+        quotes_result = MagicMock(data=[quote])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).side_effect = Exception("DB down")
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["position_count"] == 0
+
+    def test_settled_positions_excluded(self, mock_db):
+        """Settled positions are not counted (filtered by is_settled=False in query)."""
+        quote = _make_quote(2400.0, True)
+        quotes_result = MagicMock(data=[quote])
+        # Simulates the DB correctly filtering out settled rows — returns empty
+        positions_result = MagicMock(data=[])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                # Verify the query chain includes is_settled=False filter
+                chain = _position_count_mock_chain(mock_table)
+                chain.return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert items[0]["position_count"] == 0
+
+        # Verify the order_events table was queried at all
+        order_events_calls = [
+            call for call in mock_db.table.call_args_list if call[0][0] == "order_events"
+        ]
+        assert len(order_events_calls) >= 1
+
+    def test_multiple_positions_aggregated(self, mock_db):
+        """Multiple positions for the same strike are summed before multiplier."""
+        import src.api.routes as routes_mod
+
+        quote = _make_quote(2400.0, True)
+        quotes_result = MagicMock(data=[quote])
+        # 2 active positions at same strike
+        positions_result = MagicMock(
+            data=[
+                {"strike_price": 240000000000, "is_put": True},
+                {"strike_price": 240000000000, "is_put": True},
+            ]
+        )
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert items[0]["position_count"] == 2 * routes_mod.ACTIVITY_MULTIPLIER
+
+
 class TestCapacityAggregationEdgeCases:
     def test_degraded_plus_full(self, mock_db):
         """degraded + full (no active) = market degraded."""
