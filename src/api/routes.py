@@ -52,6 +52,11 @@ _CAPACITY_STALE_SECONDS = 120  # MM reports every ~30s; 2min = stale
 # already-expired quote. The MM controls user-facing time via deadline.
 _MIN_QUOTE_TTL = _PRICES_TTL
 
+# Temporary beta measure: multiply raw position counts by this factor to
+# bootstrap social proof while on-chain volume is low. Remove once organic
+# volume is sufficient.
+ACTIVITY_MULTIPLIER = 3
+
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP, preferring X-Forwarded-For for proxied requests."""
@@ -276,6 +281,40 @@ def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
     return list(by_option.values())
 
 
+def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
+    """Count active positions per (strike_usd, is_put) for the given asset.
+
+    Active = not settled and not expired. Returns empty dict on any failure
+    so callers can default position_count to 0 without surfacing the error.
+    """
+    now_ts = int(time.time())
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select("strike_price,is_put")
+            .eq("asset", asset.value)
+            .eq("is_settled", False)
+            .gt("expiry", now_ts)
+            .execute()
+        )
+        rows = result.data or []
+    except Exception:
+        logger.warning("Failed to fetch position counts; defaulting to 0", exc_info=True)
+        return {}
+
+    counts: dict[tuple, int] = {}
+    for row in rows:
+        try:
+            strike_usd = float(row["strike_price"]) / 1e8
+            is_put = row["is_put"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        key = (strike_usd, is_put)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _quote_to_price_response(q: dict) -> PriceResponse | None:
     """Convert a mm_quotes DB row to a PriceResponse for the frontend."""
     try:
@@ -433,6 +472,17 @@ async def get_prices(
             if spot > 0:
                 pr.spot = spot
             result.append(pr)
+
+    # Enrich with position counts for social proof (best effort)
+    try:
+        from src.pricing.black_scholes import OptionType
+
+        position_counts = _fetch_position_counts(asset)
+        for pr in result:
+            raw = position_counts.get((pr.strike, pr.option_type == OptionType.PUT), 0)
+            pr.position_count = raw * ACTIVITY_MULTIPLIER
+    except Exception:
+        logger.warning("Could not enrich position counts", exc_info=True)
 
     _prices_cache[cache_key] = result
     _prices_cached_at[cache_key] = time.monotonic()
