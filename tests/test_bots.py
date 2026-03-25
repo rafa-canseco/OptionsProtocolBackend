@@ -24,9 +24,9 @@ def test_strike_to_8_decimals():
 
 def _make_spec(strike=2000.0, expiry_ts=None, option_type=OptionType.PUT):
     if expiry_ts is None:
-        from src.pricing.utils import get_friday_expiries
+        from src.pricing.utils import get_expiries
 
-        expiry_ts = get_friday_expiries()[0]
+        expiry_ts = get_expiries()[0]
     return OTokenSpec(
         option_type=option_type,
         strike=strike,

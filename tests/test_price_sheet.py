@@ -1,5 +1,5 @@
 from src.pricing.price_sheet import generate_otoken_specs, generate_strikes
-from src.pricing.utils import get_friday_expiries
+from src.pricing.utils import get_expiries
 
 
 def test_generate_strikes_centered():
@@ -64,15 +64,15 @@ def test_otoken_specs_count():
 
 
 def test_otoken_specs_custom_expiries():
-    ts1 = get_friday_expiries()[0]
-    ts2 = get_friday_expiries()[1]
+    ts1 = get_expiries()[0]
+    ts2 = get_expiries()[1]
     specs = generate_otoken_specs(spot=2000.0, expiry_timestamps=[ts1, ts2])
     expiry_ts_set = {s.expiry_ts for s in specs}
     assert expiry_ts_set == {ts1, ts2}
 
 
 def test_otoken_specs_strikes_around_spot():
-    ts = get_friday_expiries()[0]
+    ts = get_expiries()[0]
     specs = generate_otoken_specs(spot=2500.0, expiry_timestamps=[ts], num_strikes=5)
     strikes = {s.strike for s in specs}
     assert 2500.0 in strikes  # center strike

@@ -14,10 +14,6 @@ SHORT_TERM_DAYS = 4
 _48H_SECONDS = 48 * 3600
 
 
-def _cutoff_hours() -> int:
-    return settings.expiry_cutoff_hours
-
-
 def cutoff_hours_for_expiry(expiry_ts: int, now_ts: int | None = None) -> int:
     """Return the cutoff hours for a given expiry based on current TTL.
 
@@ -79,7 +75,7 @@ def get_expiries(
         now = datetime.now(timezone.utc)
 
     short_cutoff = now + timedelta(hours=settings.short_expiry_cutoff_hours)
-    standard_cutoff = now + timedelta(hours=_cutoff_hours())
+    standard_cutoff = now + timedelta(hours=settings.expiry_cutoff_hours)
 
     # Daily (~1d): next 08:00 UTC after short cutoff
     exp_1d = _next_0800_utc(short_cutoff)
@@ -103,8 +99,3 @@ def get_expiries(
     return [int(f.timestamp()) for f in result]
 
 
-def get_friday_expiries(
-    now: datetime | None = None,
-) -> list[int]:
-    """Backward-compatible alias for get_expiries."""
-    return get_expiries(now)

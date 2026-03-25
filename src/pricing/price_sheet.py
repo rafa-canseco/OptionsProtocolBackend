@@ -63,7 +63,7 @@ def generate_otoken_specs(
         spot: Current price (used to center strikes).
         asset: Which underlying asset this is for.
         expiry_timestamps: Fixed 08:00 UTC timestamps.
-            Defaults to get_friday_expiries().
+            Defaults to get_expiries().
         num_strikes: Override number of strikes (defaults to asset config).
     """
     cfg = get_asset_config(asset)

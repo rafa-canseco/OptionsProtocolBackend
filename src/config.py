@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
-    # e.g. "1773950400,1774123200". If empty, get_friday_expiries() is used.
+    # e.g. "1773950400,1774123200". If empty, get_expiries() is used.
     custom_expiry_timestamps: str = ""
 
     # Hours before expiry to stop showing/creating options

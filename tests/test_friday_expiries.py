@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
-from src.pricing.utils import get_expiries, get_friday_expiries, FRIDAY_WEEKDAY
+from src.pricing.utils import cutoff_hours_for_expiry, get_expiries, FRIDAY_WEEKDAY
 
 
 def test_returns_at_least_four():
@@ -8,14 +8,36 @@ def test_returns_at_least_four():
     assert len(result) >= 4
 
 
-def test_backward_compat_alias():
-    result = get_friday_expiries()
-    assert result == get_expiries()
+class TestCutoffHoursForExpiry:
+    def test_short_term_returns_short_cutoff(self):
+        now_ts = 1000000
+        expiry_ts = now_ts + 24 * 3600  # 24h TTL
+        assert cutoff_hours_for_expiry(expiry_ts, now_ts) == 4
+
+    def test_standard_returns_standard_cutoff(self):
+        now_ts = 1000000
+        expiry_ts = now_ts + 72 * 3600  # 72h TTL
+        assert cutoff_hours_for_expiry(expiry_ts, now_ts) == 48
+
+    def test_exact_48h_boundary_uses_short_cutoff(self):
+        now_ts = 1000000
+        expiry_ts = now_ts + 48 * 3600  # exactly 48h
+        assert cutoff_hours_for_expiry(expiry_ts, now_ts) == 4
+
+    def test_just_above_48h_uses_standard_cutoff(self):
+        now_ts = 1000000
+        expiry_ts = now_ts + 48 * 3600 + 1
+        assert cutoff_hours_for_expiry(expiry_ts, now_ts) == 48
+
+    def test_negative_ttl_uses_short_cutoff(self):
+        now_ts = 1000000
+        expiry_ts = now_ts - 3600  # expired 1h ago
+        assert cutoff_hours_for_expiry(expiry_ts, now_ts) == 4
 
 
 def test_weekly_expiries_are_fridays():
     """The 7d and 14d expiries (last two) must be Fridays."""
-    result = get_friday_expiries()
+    result = get_expiries()
     # Weekly expiries are the two Fridays in the result
     fridays = [
         ts
@@ -26,7 +48,7 @@ def test_weekly_expiries_are_fridays():
 
 
 def test_all_satisfy_contract_constraint():
-    for ts in get_friday_expiries():
+    for ts in get_expiries():
         assert ts % 86400 == 28800, f"{ts} % 86400 = {ts % 86400}, not 28800"
 
 
@@ -45,13 +67,13 @@ def test_all_past_their_cutoff():
 
 def test_deterministic():
     now = datetime(2026, 3, 3, 12, 0, 0, tzinfo=timezone.utc)
-    a = get_friday_expiries(now=now)
-    b = get_friday_expiries(now=now)
+    a = get_expiries(now=now)
+    b = get_expiries(now=now)
     assert a == b
 
 
 def test_sorted_ascending():
-    result = get_friday_expiries()
+    result = get_expiries()
     assert result == sorted(result)
 
 
@@ -80,7 +102,7 @@ def test_wednesday_cutoff_removes_this_friday():
     """On Wednesday 08:00 UTC, this Friday is only 48h away.
     It should be excluded (cutoff is strictly >48h)."""
     wed = datetime(2026, 3, 4, 8, 0, 0, tzinfo=timezone.utc)
-    result = get_friday_expiries(now=wed)
+    result = get_expiries(now=wed)
     this_friday_ts = int(datetime(2026, 3, 6, 8, 0, 0, tzinfo=timezone.utc).timestamp())
     assert this_friday_ts not in result
 
@@ -105,6 +127,6 @@ def test_1day_slot_deduped_with_standard():
 def test_tuesday_includes_this_friday():
     """On Tuesday 07:00 UTC, this Friday is ~73h away — past cutoff."""
     tue = datetime(2026, 3, 3, 7, 0, 0, tzinfo=timezone.utc)
-    result = get_friday_expiries(now=tue)
+    result = get_expiries(now=tue)
     this_friday_ts = int(datetime(2026, 3, 6, 8, 0, 0, tzinfo=timezone.utc).timestamp())
     assert this_friday_ts in result

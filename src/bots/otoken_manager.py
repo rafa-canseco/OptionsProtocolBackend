@@ -214,13 +214,21 @@ def _prune_near_expiry_otokens() -> None:
     from src.pricing.utils import cutoff_hours_for_expiry
 
     now_ts = int(datetime.now(timezone.utc).timestamp())
+    max_cutoff_ts = now_ts + settings.expiry_cutoff_hours * 3600
     client = get_client()
-    result = client.table("available_otokens").select("id, expiry").execute()
+    result = (
+        client.table("available_otokens")
+        .select("id, expiry")
+        .lt("expiry", max_cutoff_ts)
+        .execute()
+    )
     rows = result.data or []
     prune_ids = [
         r["id"]
         for r in rows
-        if r["expiry"] <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
+        if r.get("expiry") is not None
+        and r["expiry"]
+        <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
     ]
     if prune_ids:
         client.table("available_otokens").delete().in_("id", prune_ids).execute()
