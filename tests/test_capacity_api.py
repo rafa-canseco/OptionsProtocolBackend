@@ -428,8 +428,9 @@ class TestPositionCounts:
         quote = _make_quote(2400.0, True)
         quotes_result = MagicMock(data=[quote])
         # order_events: 1 active put at strike 2400 (raw 8-decimal = 240000000000)
+        # expiry must match the quote's expiry (9999999999) for the key to match
         positions_result = MagicMock(
-            data=[{"strike_price": 240000000000, "is_put": True}]
+            data=[{"strike_price": 240000000000, "is_put": True, "expiry": 9999999999}]
         )
 
         def side_effect(table_name):
@@ -523,11 +524,11 @@ class TestPositionCounts:
 
         quote = _make_quote(2400.0, True)
         quotes_result = MagicMock(data=[quote])
-        # 2 active positions at same strike
+        # 2 active positions at same strike + expiry
         positions_result = MagicMock(
             data=[
-                {"strike_price": 240000000000, "is_put": True},
-                {"strike_price": 240000000000, "is_put": True},
+                {"strike_price": 240000000000, "is_put": True, "expiry": 9999999999},
+                {"strike_price": 240000000000, "is_put": True, "expiry": 9999999999},
             ]
         )
 
@@ -551,6 +552,37 @@ class TestPositionCounts:
         assert resp.status_code == 200
         items = resp.json()
         assert items[0]["position_count"] == 2 * routes_mod.ACTIVITY_MULTIPLIER
+
+
+    def test_different_expiries_not_mixed(self, mock_db):
+        """Positions for the same strike but different expiry are NOT aggregated."""
+        quote = _make_quote(2400.0, True, expiry=9999999999)
+        quotes_result = MagicMock(data=[quote])
+        # Position exists for same strike/type but different expiry
+        positions_result = MagicMock(
+            data=[{"strike_price": 240000000000, "is_put": True, "expiry": 8888888888}]
+        )
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+                resp = client.get("/prices")
+
+        assert resp.status_code == 200
+        items = resp.json()
+        assert items[0]["position_count"] == 0
 
 
 class TestCapacityAggregationEdgeCases:
