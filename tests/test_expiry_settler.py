@@ -286,6 +286,7 @@ class TestComputeSlippageParam:
 # _physical_redeem_with_retry
 # ---------------------------------------------------------------------------
 
+
 def _itm_position() -> dict:
     """Build a minimal ITM position for retry tests."""
     return {
@@ -310,7 +311,10 @@ class TestPhysicalRedeemWithRetry:
 
         async def run():
             return await _physical_redeem_with_retry(
-                pos, mock_settler, mock_account, 240000000000,
+                pos,
+                mock_settler,
+                mock_account,
+                240000000000,
             )
 
         with (
@@ -348,7 +352,10 @@ class TestPhysicalRedeemWithRetry:
 
         async def run():
             return await _physical_redeem_with_retry(
-                pos, mock_settler, mock_account, 240000000000,
+                pos,
+                mock_settler,
+                mock_account,
+                240000000000,
             )
 
         with (
@@ -362,7 +369,9 @@ class TestPhysicalRedeemWithRetry:
                 side_effect=build_tx_side_effect,
             ),
             patch("src.bots.expiry_settler.Web3") as mock_web3,
-            patch("src.bots.expiry_settler.asyncio.sleep", return_value=None) as mock_sleep,
+            patch(
+                "src.bots.expiry_settler.asyncio.sleep", return_value=None
+            ) as mock_sleep,
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
             tx_hash, contra = asyncio.run(run())
@@ -378,7 +387,10 @@ class TestPhysicalRedeemWithRetry:
 
         async def run():
             return await _physical_redeem_with_retry(
-                pos, mock_settler, mock_account, 240000000000,
+                pos,
+                mock_settler,
+                mock_account,
+                240000000000,
             )
 
         with (
@@ -402,7 +414,10 @@ class TestPhysicalRedeemWithRetry:
 
         async def run():
             return await _physical_redeem_with_retry(
-                pos, mock_settler, mock_account, None,
+                pos,
+                mock_settler,
+                mock_account,
+                None,
             )
 
         with (
@@ -412,7 +427,9 @@ class TestPhysicalRedeemWithRetry:
                 side_effect=RuntimeError("fail"),
             ),
             patch("src.bots.expiry_settler.Web3") as mock_web3,
-            patch("src.bots.expiry_settler.asyncio.sleep", return_value=None) as mock_sleep,
+            patch(
+                "src.bots.expiry_settler.asyncio.sleep", return_value=None
+            ) as mock_sleep,
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
             with pytest.raises(RuntimeError):
@@ -422,16 +439,54 @@ class TestPhysicalRedeemWithRetry:
         delays = [c[0][0] for c in mock_sleep.call_args_list]
         assert delays == [60, 300, 900]
 
+    def test_zero_max_retries_raises_immediately(self):
+        """max_retries=0 raises ValueError, not a silent None return."""
+        pos = _itm_position()
+
+        with patch.object(settler_module.settings, "settlement_max_retries", 0):
+            with pytest.raises(ValueError, match="settlement_max_retries must be >= 1"):
+                asyncio.run(
+                    _physical_redeem_with_retry(pos, MagicMock(), MagicMock(), None)
+                )
+
+    def test_zero_slippage_param_is_retried(self):
+        """slippage_param <= 0 triggers retry (ValueError inside loop)."""
+        pos = _itm_position()
+        mock_settler = MagicMock()
+
+        with (
+            patch.object(settler_module.settings, "settlement_max_retries", 2),
+            patch(
+                "src.bots.expiry_settler.compute_slippage_param",
+                return_value=(0, 500),
+            ),
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+            patch("src.bots.expiry_settler.asyncio.sleep", return_value=None),
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda x: x
+            with pytest.raises(ValueError, match="slippage_param=0"):
+                asyncio.run(
+                    _physical_redeem_with_retry(
+                        pos,
+                        mock_settler,
+                        MagicMock(),
+                        None,
+                    )
+                )
+
 
 # ---------------------------------------------------------------------------
 # _post_settle_sweep
 # ---------------------------------------------------------------------------
 
+
 class TestPostSettleSweep:
     def test_exits_when_no_unsettled(self):
         """Sweep exits immediately when no unsettled positions."""
         with (
-            patch.object(settler_module.settings, "settlement_sweep_interval_seconds", 1),
+            patch.object(
+                settler_module.settings, "settlement_sweep_interval_seconds", 1
+            ),
             patch.object(settler_module.settings, "settlement_sweep_max_cycles", 5),
             patch(
                 "src.bots.expiry_settler.get_expired_unsettled",
@@ -447,7 +502,9 @@ class TestPostSettleSweep:
     def test_exits_after_max_cycles(self):
         """Sweep stops after max_cycles even if positions remain."""
         with (
-            patch.object(settler_module.settings, "settlement_sweep_interval_seconds", 1),
+            patch.object(
+                settler_module.settings, "settlement_sweep_interval_seconds", 1
+            ),
             patch.object(settler_module.settings, "settlement_sweep_max_cycles", 3),
             patch(
                 "src.bots.expiry_settler.get_expired_unsettled",
@@ -472,7 +529,9 @@ class TestPostSettleSweep:
             return []
 
         with (
-            patch.object(settler_module.settings, "settlement_sweep_interval_seconds", 1),
+            patch.object(
+                settler_module.settings, "settlement_sweep_interval_seconds", 1
+            ),
             patch.object(settler_module.settings, "settlement_sweep_max_cycles", 10),
             patch(
                 "src.bots.expiry_settler.get_expired_unsettled",
@@ -484,3 +543,37 @@ class TestPostSettleSweep:
             asyncio.run(_post_settle_sweep())
 
         assert mock_settle.call_count == 1
+
+    def test_continues_after_settle_once_failure(self):
+        """If settle_once() raises, sweep continues to next cycle."""
+        call_count = 0
+
+        def unsettled_side_effect():
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return [{"id": 1}]
+            return []
+
+        async def settle_raise():
+            raise RuntimeError("on-chain failure")
+
+        with (
+            patch.object(
+                settler_module.settings, "settlement_sweep_interval_seconds", 1
+            ),
+            patch.object(settler_module.settings, "settlement_sweep_max_cycles", 5),
+            patch(
+                "src.bots.expiry_settler.get_expired_unsettled",
+                side_effect=unsettled_side_effect,
+            ),
+            patch(
+                "src.bots.expiry_settler.settle_once",
+                side_effect=settle_raise,
+            ) as mock_settle,
+            patch("src.bots.expiry_settler.asyncio.sleep", return_value=None),
+        ):
+            asyncio.run(_post_settle_sweep())
+
+        # 2 cycles with positions, settle_once called both times despite failure
+        assert mock_settle.call_count == 2

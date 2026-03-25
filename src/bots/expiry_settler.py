@@ -414,6 +414,8 @@ async def _physical_redeem_with_retry(
     Raises after all retries are exhausted.
     """
     max_retries = settings.settlement_max_retries
+    if max_retries < 1:
+        raise ValueError(f"settlement_max_retries must be >= 1, got {max_retries}")
     otoken_addr = pos["otoken_address"]
     user_addr = pos["user_address"]
     mm_addr = pos["mm_address"]
@@ -423,12 +425,12 @@ async def _physical_redeem_with_retry(
     for attempt in range(1, max_retries + 1):
         try:
             slippage_param, contra_amount = await asyncio.to_thread(
-                compute_slippage_param, pos, expiry_price_raw,
+                compute_slippage_param,
+                pos,
+                expiry_price_raw,
             )
             if slippage_param <= 0:
-                raise ValueError(
-                    f"slippage_param={slippage_param} for {otoken_addr}"
-                )
+                raise ValueError(f"slippage_param={slippage_param} for {otoken_addr}")
 
             tx_fn = settler.functions.physicalRedeem(
                 Web3.to_checksum_address(otoken_addr),
@@ -439,9 +441,12 @@ async def _physical_redeem_with_retry(
             )
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(
-                "Phase 2: delivery for %s vault %d "
-                "(attempt %d/%d), tx: %s",
-                user_addr, vault_id, attempt, max_retries, tx_hash,
+                "Phase 2: delivery for %s vault %d (attempt %d/%d), tx: %s",
+                user_addr,
+                vault_id,
+                attempt,
+                max_retries,
+                tx_hash,
             )
             return tx_hash, contra_amount
         except Exception as exc:
@@ -450,10 +455,13 @@ async def _physical_redeem_with_retry(
                     min(attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)
                 ]
                 logger.warning(
-                    "Phase 2 attempt %d/%d failed for %s vault %d: "
-                    "%s. Retrying in %ds",
-                    attempt, max_retries, user_addr, vault_id,
-                    exc, delay,
+                    "Phase 2 attempt %d/%d failed for %s vault %d: %s. Retrying in %ds",
+                    attempt,
+                    max_retries,
+                    user_addr,
+                    vault_id,
+                    exc,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:
@@ -461,7 +469,10 @@ async def _physical_redeem_with_retry(
                     "ALERT: All %d retries exhausted for %s vault %d. "
                     "Position requires manual intervention. "
                     "Last error: %s",
-                    max_retries, user_addr, vault_id, exc,
+                    max_retries,
+                    user_addr,
+                    vault_id,
+                    exc,
                 )
                 raise
 
@@ -566,15 +577,29 @@ async def settle_once():
                     "Phase 2 missing-mm mark",
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "ALERT: Failed to mark physical_failed for "
+                    "user=%s vault=%d (missing mm_address). "
+                    "Position has no settlement_type in DB.",
+                    user_addr,
+                    vault_id,
+                )
             continue
 
         # Physical delivery with retry (slippage + on-chain tx)
         try:
             tx_hash, contra_amount = await _physical_redeem_with_retry(
-                pos, settler, account, expiry_price_raw,
+                pos,
+                settler,
+                account,
+                expiry_price_raw,
             )
         except Exception:
+            logger.exception(
+                "Phase 2 delivery failed for user=%s vault=%d after retries exhausted",
+                user_addr,
+                vault_id,
+            )
             try:
                 _db_update(
                     user_addr,
@@ -590,7 +615,8 @@ async def settle_once():
                 logger.error(
                     "ALERT: Failed to mark physical_failed for "
                     "user=%s vault=%d after all retries exhausted.",
-                    user_addr, vault_id,
+                    user_addr,
+                    vault_id,
                 )
             continue
 
@@ -600,9 +626,7 @@ async def settle_once():
             pos_cfg = get_asset_config(Asset(pos_asset))
         except (ValueError, KeyError):
             pos_cfg = get_asset_config(Asset.ETH)
-        delivered_asset = (
-            pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
-        )
+        delivered_asset = pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
         try:
             _db_update(
                 user_addr,
@@ -618,10 +642,13 @@ async def settle_once():
                 "Phase 2 delivery mark",
             )
         except Exception:
-            logger.error(
+            logger.exception(
                 "ALERT: Physical delivery succeeded on-chain "
-                "(tx: %s) but DB write failed for user=%s vault=%d.",
-                tx_hash, user_addr, vault_id,
+                "(tx: %s) but DB write failed for user=%s vault=%d. "
+                "DB retains settlement_type='cash' from Phase 1.",
+                tx_hash,
+                user_addr,
+                vault_id,
             )
 
     # Update OTM positions with expiry price and ITM flag (display only).
@@ -750,7 +777,9 @@ async def _post_settle_sweep():
 
         logger.info(
             "Sweep cycle %d/%d: %d unsettled positions, retrying",
-            cycle, max_cycles, len(remaining),
+            cycle,
+            max_cycles,
+            len(remaining),
         )
         try:
             await settle_once()
@@ -780,7 +809,10 @@ async def run():
         await settle_once()
     except Exception:
         logger.exception("Startup catch-up settlement failed")
-    await _post_settle_sweep()
+    try:
+        await _post_settle_sweep()
+    except Exception:
+        logger.exception("Startup sweep failed")
 
     while True:
         await _wait_until_target_hour()
@@ -788,4 +820,7 @@ async def run():
             await settle_once()
         except Exception:
             logger.exception("Expiry settlement failed")
-        await _post_settle_sweep()
+        try:
+            await _post_settle_sweep()
+        except Exception:
+            logger.exception("Post-settlement sweep failed")
