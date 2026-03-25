@@ -347,9 +347,9 @@ class TestGetCapacityErrors:
 
 
 def _position_count_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().eq().gt().execute()"""
+    """Wire up the mock chain: .select().eq().or_().gt().execute()"""
     return (
-        mock_table.select.return_value.eq.return_value.eq.return_value.gt.return_value.execute
+        mock_table.select.return_value.eq.return_value.or_.return_value.gt.return_value.execute
     )
 
 

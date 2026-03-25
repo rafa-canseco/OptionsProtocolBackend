@@ -294,7 +294,7 @@ def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
             client.table("order_events")
             .select("strike_price,is_put,expiry")
             .eq("asset", asset.value)
-            .eq("is_settled", False)
+            .or_("is_settled.eq.false,is_settled.is.null")
             .gt("expiry", now_ts)
             .execute()
         )
