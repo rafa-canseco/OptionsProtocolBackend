@@ -54,13 +54,17 @@ def test_otoken_specs_both_types():
 
 
 def test_otoken_specs_count():
-    # At least 5 strikes (may be more due to min_otm_per_side) x 3 expiries x 2 types
     specs = generate_otoken_specs(spot=2000.0)
-    num_strikes = len({s.strike for s in specs})
     num_expiries = len({s.expiry_ts for s in specs})
-    assert num_strikes >= 5
     assert num_expiries >= 3
-    assert len(specs) == num_strikes * num_expiries * 2
+    # Each expiry has its own strike count (1d uses tighter steps)
+    for ts in {s.expiry_ts for s in specs}:
+        expiry_specs = [s for s in specs if s.expiry_ts == ts]
+        strikes = {s.strike for s in expiry_specs}
+        types = {s.option_type for s in expiry_specs}
+        assert len(strikes) >= 5
+        assert len(types) == 2
+        assert len(expiry_specs) == len(strikes) * len(types)
 
 
 def test_otoken_specs_custom_expiries():

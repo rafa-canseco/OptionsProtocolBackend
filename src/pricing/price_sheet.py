@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
-from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
+from src.pricing.utils import cutoff_hours_for_expiry, get_daily_expiry_ts, get_expiries
 
 
 @dataclass
@@ -79,15 +79,17 @@ def generate_otoken_specs(
     if num_strikes is None:
         num_strikes = cfg.num_strikes
 
-    strikes = generate_strikes(
-        spot,
-        step=cfg.strike_step,
-        num_strikes=num_strikes,
-        min_otm_per_side=cfg.min_otm_per_side,
-    )
+    daily_ts = get_daily_expiry_ts()
     specs: list[OTokenSpec] = []
 
     for ts in expiry_timestamps:
+        step = cfg.short_expiry_strike_step if ts == daily_ts else cfg.strike_step
+        strikes = generate_strikes(
+            spot,
+            step=step,
+            num_strikes=num_strikes,
+            min_otm_per_side=cfg.min_otm_per_side,
+        )
         for K in strikes:
             for opt_type in (OptionType.CALL, OptionType.PUT):
                 specs.append(

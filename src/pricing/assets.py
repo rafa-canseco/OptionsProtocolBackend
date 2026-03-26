@@ -22,6 +22,7 @@ class AssetConfig:
     deribit_index: str
     deribit_currency: str
     strike_step: float
+    short_expiry_strike_step: float
     num_strikes: int
     min_otm_per_side: int = 4
 
@@ -49,6 +50,7 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         deribit_index="eth_usd",
         deribit_currency="ETH",
         strike_step=50.0,
+        short_expiry_strike_step=25.0,
         num_strikes=5,
     ),
     Asset.BTC: AssetConfig(
@@ -57,6 +59,7 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         deribit_index="btc_usd",
         deribit_currency="BTC",
         strike_step=1000.0,
+        short_expiry_strike_step=500.0,
         num_strikes=5,
     ),
 }

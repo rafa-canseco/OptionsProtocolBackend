@@ -88,3 +88,11 @@ def get_expiries(
 
     result = sorted({exp_1d, exp_near_fri, exp_7d, exp_14d})
     return [int(f.timestamp()) for f in result]
+
+
+def get_daily_expiry_ts(now: datetime | None = None) -> int:
+    """Return the 1-day slot timestamp (for tighter strike step logic)."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    short_cutoff = now + timedelta(hours=settings.short_expiry_cutoff_hours)
+    return int(_next_0800_utc(short_cutoff).timestamp())
