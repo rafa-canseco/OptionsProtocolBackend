@@ -17,6 +17,7 @@ from src.bots.expiry_settler import (
     _compute_min_amount_out,
     _physical_redeem_with_retry,
     _post_settle_sweep,
+    _reconcile_settled_on_chain,
     compute_slippage_param,
 )
 
@@ -577,3 +578,99 @@ class TestPostSettleSweep:
 
         # 2 cycles with positions, settle_once called both times despite failure
         assert mock_settle.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_settled_on_chain
+# ---------------------------------------------------------------------------
+
+
+def _unsettled_position(user="0xuser", vault_id=1):
+    return {"user_address": user, "vault_id": vault_id}
+
+
+class TestReconcileSettledOnChain:
+    def test_settled_on_chain_removed_from_list(self):
+        """Position settled on-chain is removed and DB updated."""
+        pos = _unsettled_position()
+        mock_controller = MagicMock()
+        mock_controller.functions.vaultSettled.return_value.call.return_value = True
+
+        with (
+            patch(
+                "src.bots.expiry_settler.get_controller", return_value=mock_controller
+            ),
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+            patch("src.bots.expiry_settler._db_update") as mock_db,
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda x: x
+            result = _reconcile_settled_on_chain([pos])
+
+        assert result == []
+        mock_db.assert_called_once()
+        call_fields = mock_db.call_args[0][2]
+        assert call_fields["is_settled"] is True
+
+    def test_unsettled_on_chain_kept_in_list(self):
+        """Position not settled on-chain stays in the list."""
+        pos = _unsettled_position()
+        mock_controller = MagicMock()
+        mock_controller.functions.vaultSettled.return_value.call.return_value = False
+
+        with (
+            patch(
+                "src.bots.expiry_settler.get_controller", return_value=mock_controller
+            ),
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+            patch("src.bots.expiry_settler._db_update") as mock_db,
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda x: x
+            result = _reconcile_settled_on_chain([pos])
+
+        assert result == [pos]
+        mock_db.assert_not_called()
+
+    def test_rpc_failure_assumes_unsettled(self):
+        """If vaultSettled call fails, position stays in list."""
+        pos = _unsettled_position()
+        mock_controller = MagicMock()
+        mock_controller.functions.vaultSettled.return_value.call.side_effect = (
+            RuntimeError("RPC down")
+        )
+
+        with (
+            patch(
+                "src.bots.expiry_settler.get_controller", return_value=mock_controller
+            ),
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda x: x
+            result = _reconcile_settled_on_chain([pos])
+
+        assert result == [pos]
+
+    def test_mixed_positions(self):
+        """Mix of settled and unsettled — only unsettled remain."""
+        settled_pos = _unsettled_position("0xsettled", 1)
+        unsettled_pos = _unsettled_position("0xunsettled", 2)
+        mock_controller = MagicMock()
+
+        def vault_settled_side_effect(owner, vault_id):
+            mock_call = MagicMock()
+            mock_call.call.return_value = owner == "0xsettled"
+            return mock_call
+
+        mock_controller.functions.vaultSettled = vault_settled_side_effect
+
+        with (
+            patch(
+                "src.bots.expiry_settler.get_controller", return_value=mock_controller
+            ),
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+            patch("src.bots.expiry_settler._db_update"),
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda x: x
+            result = _reconcile_settled_on_chain([settled_pos, unsettled_pos])
+
+        assert len(result) == 1
+        assert result[0]["user_address"] == "0xunsettled"
