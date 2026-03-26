@@ -9,7 +9,7 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from web3 import Web3
 
@@ -206,18 +206,30 @@ def _is_valid_expiry(ts: int) -> bool:
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens expiring within cutoff window."""
-    cutoff_ts = int(
-        (datetime.now(timezone.utc) + timedelta(hours=settings.expiry_cutoff_hours)).timestamp()
-    )
+    """Delete rows from available_otokens within their dynamic cutoff.
+
+    Short-term expiries (TTL <= 48h) use short cutoff (4h).
+    Standard expiries use standard cutoff (48h).
+    """
+    from src.pricing.utils import cutoff_hours_for_expiry
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    max_cutoff_ts = now_ts + settings.expiry_cutoff_hours * 3600
     client = get_client()
     result = (
         client.table("available_otokens")
         .select("id, expiry")
-        .lt("expiry", cutoff_ts)
+        .lt("expiry", max_cutoff_ts)
         .execute()
     )
-    prune_ids = [r["id"] for r in (result.data or [])]
+    rows = result.data or []
+    prune_ids = [
+        r["id"]
+        for r in rows
+        if r.get("expiry") is not None
+        and r["expiry"]
+        <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
+    ]
     if prune_ids:
         client.table("available_otokens").delete().in_("id", prune_ids).execute()
     logger.info("Pruned %d available_otokens", len(prune_ids))
@@ -310,7 +322,9 @@ async def publish_once():
             logger.exception("Failed to fetch %s price, skipping asset", asset.value)
             continue
 
-        specs = generate_otoken_specs(spot=spot, asset=asset, expiry_timestamps=custom_expiries)
+        specs = generate_otoken_specs(
+            spot=spot, asset=asset, expiry_timestamps=custom_expiries
+        )
 
         paired = await asyncio.to_thread(ensure_otokens_exist, specs, asset)
         if not paired:

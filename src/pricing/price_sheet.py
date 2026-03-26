@@ -1,10 +1,9 @@
 import time
 from dataclasses import dataclass
 
-from src.config import settings
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
-from src.pricing.utils import get_friday_expiries
+from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
 
 
 @dataclass
@@ -64,20 +63,26 @@ def generate_otoken_specs(
         spot: Current price (used to center strikes).
         asset: Which underlying asset this is for.
         expiry_timestamps: Fixed 08:00 UTC timestamps.
-            Defaults to get_friday_expiries().
+            Defaults to get_expiries().
         num_strikes: Override number of strikes (defaults to asset config).
     """
     cfg = get_asset_config(asset)
     if expiry_timestamps is None:
-        expiry_timestamps = get_friday_expiries()
+        expiry_timestamps = get_expiries()
     else:
-        cutoff_ts = int(time.time()) + settings.expiry_cutoff_hours * 3600
-        expiry_timestamps = [ts for ts in expiry_timestamps if ts > cutoff_ts]
+        now_ts = int(time.time())
+        expiry_timestamps = [
+            ts
+            for ts in expiry_timestamps
+            if ts > now_ts + cutoff_hours_for_expiry(ts, now_ts) * 3600
+        ]
     if num_strikes is None:
         num_strikes = cfg.num_strikes
 
     strikes = generate_strikes(
-        spot, step=cfg.strike_step, num_strikes=num_strikes,
+        spot,
+        step=cfg.strike_step,
+        num_strikes=num_strikes,
         min_otm_per_side=cfg.min_otm_per_side,
     )
     specs: list[OTokenSpec] = []
