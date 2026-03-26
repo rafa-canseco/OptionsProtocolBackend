@@ -15,6 +15,7 @@ VALID_EMAIL = "user@example.com"
 def _reset_rate_limits():
     """Clear notification rate-limit state between tests."""
     from src.api import notifications as mod
+
     mod._wallet_hits.clear()
     mod._ip_hits.clear()
     yield
@@ -30,7 +31,12 @@ def _mock_client_with_data(data):
     # Support arbitrary chaining
     chain = mock.table.return_value
     for method in [
-        "select", "eq", "is_", "upsert", "update", "insert",
+        "select",
+        "eq",
+        "is_",
+        "upsert",
+        "update",
+        "insert",
     ]:
         sub = getattr(chain, method).return_value
         sub.execute.return_value = mock_result
@@ -40,6 +46,7 @@ def _mock_client_with_data(data):
 
 
 # --- POST /notifications/email ---
+
 
 def test_submit_email_success():
     mock_db = _mock_client_with_data([{"wallet_address": VALID_WALLET.lower()}])
@@ -125,6 +132,7 @@ def test_submit_email_clears_unsubscribed():
 
 # --- POST /notifications/verify ---
 
+
 def test_verify_success():
     now = datetime.now(timezone.utc)
     row = {
@@ -176,6 +184,7 @@ def test_verify_expired_code():
 
 # --- GET /notifications/status ---
 
+
 def test_status_verified_user():
     row = {
         "wallet_address": VALID_WALLET.lower(),
@@ -204,13 +213,12 @@ def test_status_no_email():
 
 # --- GET /notifications/unsubscribe ---
 
+
 def test_unsubscribe_with_valid_token():
     mock_db = _mock_client_with_data([{"wallet_address": VALID_WALLET.lower()}])
     with (
         patch("src.api.notifications.get_client", return_value=mock_db),
-        patch(
-            "src.api.notifications.verify_unsubscribe_token", return_value=True
-        ),
+        patch("src.api.notifications.verify_unsubscribe_token", return_value=True),
     ):
         resp = client.get(
             f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=valid"
@@ -220,10 +228,6 @@ def test_unsubscribe_with_valid_token():
 
 
 def test_unsubscribe_with_invalid_token():
-    with patch(
-        "src.api.notifications.verify_unsubscribe_token", return_value=False
-    ):
-        resp = client.get(
-            f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=bad"
-        )
+    with patch("src.api.notifications.verify_unsubscribe_token", return_value=False):
+        resp = client.get(f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=bad")
     assert resp.status_code == 403

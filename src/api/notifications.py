@@ -50,30 +50,22 @@ def _check_wallet_rate_limit(wallet: str) -> None:
     now = time.monotonic()
     if len(_wallet_hits) > _MAX_TRACKED:
         stale = [
-            k for k, v in _wallet_hits.items()
-            if not v or now - v[-1] >= _WALLET_WINDOW
+            k for k, v in _wallet_hits.items() if not v or now - v[-1] >= _WALLET_WINDOW
         ]
         for k in stale:
             del _wallet_hits[k]
 
     hits = _wallet_hits[wallet]
-    _wallet_hits[wallet] = [
-        t for t in hits if now - t < _WALLET_WINDOW
-    ]
+    _wallet_hits[wallet] = [t for t in hits if now - t < _WALLET_WINDOW]
     if len(_wallet_hits[wallet]) >= _WALLET_MAX:
-        raise HTTPException(
-            429, "Too many verification attempts, try again later"
-        )
+        raise HTTPException(429, "Too many verification attempts, try again later")
     _wallet_hits[wallet].append(now)
 
 
 def _check_ip_rate_limit(ip: str) -> None:
     now = time.monotonic()
     if len(_ip_hits) > _MAX_TRACKED:
-        stale = [
-            k for k, v in _ip_hits.items()
-            if not v or now - v[-1] >= _IP_WINDOW
-        ]
+        stale = [k for k, v in _ip_hits.items() if not v or now - v[-1] >= _IP_WINDOW]
         for k in stale:
             del _ip_hits[k]
 
@@ -95,9 +87,7 @@ async def submit_email(body: EmailSubmitRequest, request: Request):
     _check_ip_rate_limit(_get_client_ip(request))
 
     code = f"{random.randint(0, 999999):06d}"
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(minutes=10)
-    ).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     now = datetime.now(timezone.utc).isoformat()
 
     client = get_client()
@@ -259,6 +249,4 @@ def _process_unsubscribe(wallet: str, token: str) -> HTMLResponse:
     except Exception:
         logger.exception("Failed to unsubscribe wallet %s", wallet)
 
-    return HTMLResponse(
-        content=render_unsubscribe_page(), status_code=200
-    )
+    return HTMLResponse(content=render_unsubscribe_page(), status_code=200)

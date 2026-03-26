@@ -51,10 +51,12 @@ def generate_unsubscribe_url(wallet_address: str) -> str:
         wallet_address.lower().encode(),
         hashlib.sha256,
     ).hexdigest()
-    params = urllib.parse.urlencode({
-        "token": token,
-        "wallet": wallet_address.lower(),
-    })
+    params = urllib.parse.urlencode(
+        {
+            "token": token,
+            "wallet": wallet_address.lower(),
+        }
+    )
     base = settings.api_base_url.rstrip("/")
     return f"{base}/notifications/unsubscribe?{params}"
 

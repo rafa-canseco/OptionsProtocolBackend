@@ -123,6 +123,7 @@ def test_unsubscribe_token_roundtrip():
         assert "wallet=" in url
         # Extract token from URL
         import urllib.parse
+
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
         token = params["token"][0]

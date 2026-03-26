@@ -38,9 +38,7 @@ border-radius:12px;padding:40px;">
 
 def _wrap(content: str, footer: str = "") -> str:
     # _BASE_STYLE is an f-string: {{content}} became {content} at eval time
-    return _BASE_STYLE.replace("{content}", content).replace(
-        "{footer}", footer
-    )
+    return _BASE_STYLE.replace("{content}", content).replace("{footer}", footer)
 
 
 def _unsub_footer() -> str:
@@ -72,7 +70,9 @@ def render_reminder_email(
     option_type: str,
     expiry_date: str,
 ) -> tuple[str, str]:
-    subject = f"Your {asset} ${strike_usd} {option_type} expires tomorrow at 8:00 AM UTC"
+    subject = (
+        f"Your {asset} ${strike_usd} {option_type} expires tomorrow at 8:00 AM UTC"
+    )
     content = f"""
     <p style="color:{_TEXT_COLOR};font-size:16px;line-height:1.6;margin:0 0 16px;">
     Your <strong style="color:white;">{asset} ${strike_usd} {option_type}</strong>
