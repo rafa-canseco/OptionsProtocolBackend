@@ -67,6 +67,35 @@ def test_otoken_specs_count():
         assert len(expiry_specs) == len(strikes) * len(types)
 
 
+def test_1day_slot_uses_tighter_strike_step():
+    """The 1-day (smallest) expiry uses $25 steps, others use $50."""
+    specs = generate_otoken_specs(spot=2000.0)
+    expiry_set = sorted({s.expiry_ts for s in specs})
+    assert len(expiry_set) >= 2
+
+    daily_ts = expiry_set[0]
+    standard_ts = expiry_set[-1]
+
+    daily_strikes = sorted({s.strike for s in specs if s.expiry_ts == daily_ts})
+    standard_strikes = sorted({s.strike for s in specs if s.expiry_ts == standard_ts})
+
+    # Daily should have tighter spacing ($25)
+    daily_diffs = {
+        daily_strikes[i + 1] - daily_strikes[i] for i in range(len(daily_strikes) - 1)
+    }
+    assert 25.0 in daily_diffs, f"Expected $25 step in daily, got {daily_diffs}"
+
+    # Standard should have wider spacing ($50)
+    standard_diffs = {
+        standard_strikes[i + 1] - standard_strikes[i]
+        for i in range(len(standard_strikes) - 1)
+    }
+    assert 50.0 in standard_diffs, (
+        f"Expected $50 step in standard, got {standard_diffs}"
+    )
+    assert 25.0 not in standard_diffs, "Standard expiry should not have $25 steps"
+
+
 def test_otoken_specs_custom_expiries():
     ts1 = get_expiries()[0]
     ts2 = get_expiries()[1]

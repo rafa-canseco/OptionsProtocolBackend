@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
-from src.pricing.utils import cutoff_hours_for_expiry, get_daily_expiry_ts, get_expiries
+from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
 
 
 @dataclass
@@ -79,11 +79,14 @@ def generate_otoken_specs(
     if num_strikes is None:
         num_strikes = cfg.num_strikes
 
-    daily_ts = get_daily_expiry_ts()
+    # The smallest timestamp is the 1-day slot — use tighter steps
+    daily_ts = min(expiry_timestamps) if expiry_timestamps else None
+    now_ts = int(time.time())
     specs: list[OTokenSpec] = []
 
     for ts in expiry_timestamps:
-        step = cfg.short_expiry_strike_step if ts == daily_ts else cfg.strike_step
+        is_daily = ts == daily_ts and (ts - now_ts) <= 48 * 3600
+        step = cfg.short_expiry_strike_step if is_daily else cfg.strike_step
         strikes = generate_strikes(
             spot,
             step=step,
