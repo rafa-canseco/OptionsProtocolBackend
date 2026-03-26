@@ -42,7 +42,7 @@ def test_generate_strikes_min_otm_both_sides():
 def test_otoken_specs_default_expiries():
     specs = generate_otoken_specs(spot=2000.0)
     expiry_ts_set = {s.expiry_ts for s in specs}
-    assert len(expiry_ts_set) >= 4  # 1d + 3d + 7d + 14d
+    assert len(expiry_ts_set) >= 3  # 1d + near_fri + 7d + 14d (dedup may collapse)
     for ts in expiry_ts_set:
         assert ts % 86400 == 28800, f"{ts} is not 08:00 UTC"
 
@@ -59,7 +59,7 @@ def test_otoken_specs_count():
     num_strikes = len({s.strike for s in specs})
     num_expiries = len({s.expiry_ts for s in specs})
     assert num_strikes >= 5
-    assert num_expiries >= 4
+    assert num_expiries >= 3
     assert len(specs) == num_strikes * num_expiries * 2
 
 
