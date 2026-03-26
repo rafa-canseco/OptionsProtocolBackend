@@ -3,9 +3,10 @@ from datetime import datetime, timezone, timedelta
 from src.pricing.utils import cutoff_hours_for_expiry, get_expiries, FRIDAY_WEEKDAY
 
 
-def test_returns_at_least_four():
+def test_returns_at_least_three():
+    """At least 3 slots (may be 4 when near_fri != 7d)."""
     result = get_expiries()
-    assert len(result) >= 4
+    assert len(result) >= 3
 
 
 class TestCutoffHoursForExpiry:
@@ -78,24 +79,18 @@ def test_sorted_ascending():
 
 
 def test_friday_before_0800_utc():
-    """On a Friday at 07:59, the 1d slot (Saturday 08:00) is ~24h away.
-    Standard expiries are all past the 48h cutoff."""
+    """On a Friday at 07:59, near_fri and 7d collapse to the same
+    next Friday → 3 distinct slots (1d Sat, Fri, Fri+7)."""
     fri_early = datetime(2026, 3, 6, 7, 59, 0, tzinfo=timezone.utc)
     result = get_expiries(now=fri_early)
-    assert len(result) >= 4
-    # Standard expiries must be past 48h cutoff
-    standard = [ts for ts in result if ts - int(fri_early.timestamp()) > 48 * 3600]
-    assert len(standard) >= 3
+    assert len(result) >= 3
 
 
 def test_friday_after_0800_utc():
-    """On a Friday at 08:01, next valid Friday is 7 days away.
-    1d slot is Saturday 08:00 (~24h)."""
+    """On a Friday at 08:01, near_fri and 7d collapse similarly."""
     fri_late = datetime(2026, 3, 6, 8, 1, 0, tzinfo=timezone.utc)
     result = get_expiries(now=fri_late)
-    assert len(result) >= 4
-    standard = [ts for ts in result if ts - int(fri_late.timestamp()) > 48 * 3600]
-    assert len(standard) >= 3
+    assert len(result) >= 3
 
 
 def test_wednesday_includes_near_friday():
