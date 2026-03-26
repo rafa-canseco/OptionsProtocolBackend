@@ -131,6 +131,61 @@ def render_result_email_itm(
     return subject, _wrap(content, _unsub_footer())
 
 
+def render_result_email_consolidated(positions: list[dict]) -> tuple[str, str]:
+    """Render a consolidated settlement result email listing all positions.
+
+    Each position dict must have: asset, strike_usd, is_itm, option_type.
+    OTM positions also need: collateral_usd, premium_usd.
+    ITM positions also need: amount.
+    """
+    n = len(positions)
+    if n == 1:
+        subject = f"Your {positions[0]['asset']} position settled"
+    else:
+        subject = f"Your {n} positions settled"
+
+    rows = []
+    for pos in positions:
+        asset = pos["asset"]
+        strike_usd = pos["strike_usd"]
+        option_type = pos.get("option_type", "put")
+        if pos["is_itm"]:
+            verb = "Bought" if option_type == "put" else "Sold"
+            row = (
+                f'<tr><td style="padding:12px 0;border-bottom:1px solid #2a2a3a;">'
+                f'<span style="color:{_TEXT_COLOR};">'
+                f'<strong style="color:white;">{asset} ${strike_usd} {option_type}</strong>'
+                f" — ITM</span><br>"
+                f'<span style="color:{_MUTED_COLOR};font-size:14px;">'
+                f"{verb} {pos['amount']} {asset} at ${strike_usd}</span>"
+                f"</td></tr>"
+            )
+        else:
+            row = (
+                f'<tr><td style="padding:12px 0;border-bottom:1px solid #2a2a3a;">'
+                f'<span style="color:{_TEXT_COLOR};">'
+                f'<strong style="color:white;">{asset} ${strike_usd} {option_type}</strong>'
+                f" — OTM</span><br>"
+                f'<span style="color:{_MUTED_COLOR};font-size:14px;">'
+                f"${pos['collateral_usd']} returned"
+                f' + <span style="color:#34d399;">${pos["premium_usd"]}</span> premium kept'
+                f"</span></td></tr>"
+            )
+        rows.append(row)
+
+    rows_html = "\n".join(rows)
+    content = f"""
+    <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+    {rows_html}
+    </table>
+    <div style="text-align:center;">
+    <a href="https://app.b1nary.app" style="display:inline-block;background:{_BRAND_COLOR};
+    color:white;padding:12px 32px;border-radius:8px;text-decoration:none;
+    font-weight:600;font-size:14px;">View positions</a></div>
+    """
+    return subject, _wrap(content, _unsub_footer())
+
+
 def render_unsubscribe_page() -> str:
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Unsubscribed</title></head>
