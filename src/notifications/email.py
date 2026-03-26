@@ -17,6 +17,7 @@ from src.notifications.templates import (
     render_reminder_email as _render_reminder,
     render_result_email_otm as _render_otm,
     render_result_email_itm as _render_itm,
+    render_result_email_consolidated as _render_consolidated,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,29 @@ def build_result_email_otm(
 ) -> dict:
     """Build an OTM result email dict ready for send_batch."""
     subject, html = _render_otm(collateral_usd, premium_usd, asset)
+    html = _inject_unsubscribe_url(html, wallet_address)
+    unsub_url = generate_unsubscribe_url(wallet_address)
+    return {
+        "to": email,
+        "subject": subject,
+        "html": html,
+        "headers": {
+            "List-Unsubscribe": f"<{unsub_url}>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        },
+    }
+
+
+def build_consolidated_result_email(
+    email: str,
+    wallet_address: str,
+    positions: list[dict],
+) -> dict:
+    """Build a consolidated settlement result email for all of a wallet's positions.
+
+    Each position dict must satisfy render_result_email_consolidated's requirements.
+    """
+    subject, html = _render_consolidated(positions)
     html = _inject_unsubscribe_url(html, wallet_address)
     unsub_url = generate_unsubscribe_url(wallet_address)
     return {
