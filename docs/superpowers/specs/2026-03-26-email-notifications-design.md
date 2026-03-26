@@ -48,8 +48,8 @@ These enforce the "max 2 emails per position" rule. Before sending, the bot chec
 | File | Purpose |
 |---|---|
 | `src/api/notifications.py` | 3 API endpoints + 1 GET unsubscribe |
-| `src/services/email.py` | Resend wrapper: send_verification, send_reminder_batch, send_result_batch |
-| `src/services/email_templates.py` | Branded HTML templates for all 3 email types |
+| `src/notifications/email.py` | Resend wrapper: send_verification, send_reminder_batch, send_result_batch |
+| `src/notifications/templates.py` | Branded HTML templates for all 3 email types |
 | `src/bots/notification_bot.py` | Reminder check every 30 min |
 | `supabase/migrations/20260326_user_emails.sql` | Migration for new table + columns |
 
