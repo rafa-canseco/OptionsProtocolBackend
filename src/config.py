@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC
     eth_staking_apy: float = 0.035  # 3.5% annualized
 
+    # Email notifications (Resend)
+    resend_api_key: str = ""
+    email_from: str = "b1nary <notifications@b1nary.app>"
+    api_base_url: str = "https://api.b1nary.app"  # for absolute URLs in emails
+    unsubscribe_secret: str = ""
+    notification_check_interval_seconds: int = 1800  # 30 min
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

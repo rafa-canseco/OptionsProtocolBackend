@@ -13,6 +13,7 @@ dependencies = [
     "uvicorn>=0.40.0",
     "web3>=7.14.1",
     "email-validator>=2.0",
+    "resend>=2.26.0",
 ]
 
 [dependency-groups]
