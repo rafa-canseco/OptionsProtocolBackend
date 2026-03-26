@@ -235,11 +235,14 @@ async def get_capacity(
 def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
     """Read active, non-expired quotes from mm_quotes for a given asset.
 
-    Excludes quotes whose oToken expiry is within 48h of now so that
-    near-expiry options are never shown even if the DB has stale rows.
+    Uses a dynamic cutoff: short-term expiries (TTL <= 48h) get a 4h
+    cutoff, standard expiries get 48h. SQL uses the minimum cutoff (4h)
+    to cast a wide net, then Python applies per-quote dynamic cutoff.
     """
+    from src.pricing.utils import cutoff_hours_for_expiry
+
     now_ts = int(time.time())
-    expiry_cutoff_ts = now_ts + settings.expiry_cutoff_hours * 3600
+    min_cutoff_ts = now_ts + settings.short_expiry_cutoff_hours * 3600
     client = get_client()
     result = (
         client.table("mm_quotes")
@@ -247,12 +250,19 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
         .eq("is_active", True)
         .eq("asset", asset.value)
         .gt("deadline", now_ts + _MIN_QUOTE_TTL)
-        .gt("expiry", expiry_cutoff_ts)
+        .gt("expiry", min_cutoff_ts)
         .execute()
     )
     quotes = result.data or []
 
-    return quotes
+    # Apply per-quote dynamic cutoff
+    filtered = []
+    for q in quotes:
+        expiry = q.get("expiry", 0)
+        cutoff_h = cutoff_hours_for_expiry(expiry, now_ts)
+        if expiry > now_ts + cutoff_h * 3600:
+            filtered.append(q)
+    return filtered
 
 
 def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
@@ -297,7 +307,9 @@ def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
         )
         rows = result.data or []
     except Exception:
-        logger.warning("Failed to fetch position counts; defaulting to 0", exc_info=True)
+        logger.warning(
+            "Failed to fetch position counts; defaulting to 0", exc_info=True
+        )
         return {}
 
     counts: dict[tuple, int] = {}
@@ -498,9 +510,7 @@ async def get_prices(
                 if s == strike and p == is_put
             ]
             if candidates:
-                nearest_idx = min(
-                    candidates, key=lambda x: abs(x[0] - expiry)
-                )[1]
+                nearest_idx = min(candidates, key=lambda x: abs(x[0] - expiry))[1]
                 merged[nearest_idx] += count
 
     for i, pr in enumerate(result):

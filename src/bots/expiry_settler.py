@@ -19,6 +19,7 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import (
     get_batch_settler,
+    get_controller,
     get_oracle,
     get_uniswap_quoter,
     get_operator_account,
@@ -46,7 +47,7 @@ def get_expired_unsettled() -> list[dict]:
         .select(
             "user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address, asset"
         )
-        .eq("is_settled", False)
+        .or_("is_settled.eq.false,is_settled.is.null")
         .lte("expiry", now)
         .not_.is_("strike_price", "null")
         .not_.is_("is_put", "null")
@@ -399,11 +400,155 @@ def _ensure_expiry_prices_set(expiries: set[int]) -> None:
                     )
 
 
+_RETRY_BACKOFF_SECONDS = [60, 300, 900, 1800, 3600]  # 1m, 5m, 15m, 30m, 60m
+
+
+async def _physical_redeem_with_retry(
+    pos: dict,
+    settler,
+    account,
+    expiry_price_raw: int | None,
+) -> tuple[str, int]:
+    """Attempt physical delivery with exponential backoff retry.
+
+    Returns (tx_hash, contra_amount) on success.
+    Raises after all retries are exhausted.
+    """
+    max_retries = settings.settlement_max_retries
+    if max_retries < 1:
+        raise ValueError(f"settlement_max_retries must be >= 1, got {max_retries}")
+    otoken_addr = pos["otoken_address"]
+    user_addr = pos["user_address"]
+    mm_addr = pos["mm_address"]
+    amount_raw = int(pos["amount"])
+    vault_id = pos["vault_id"]
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            slippage_param, contra_amount = await asyncio.to_thread(
+                compute_slippage_param,
+                pos,
+                expiry_price_raw,
+            )
+            if slippage_param <= 0:
+                raise ValueError(f"slippage_param={slippage_param} for {otoken_addr}")
+
+            tx_fn = settler.functions.physicalRedeem(
+                Web3.to_checksum_address(otoken_addr),
+                Web3.to_checksum_address(user_addr),
+                amount_raw,
+                slippage_param,
+                Web3.to_checksum_address(mm_addr),
+            )
+            tx_hash = build_and_send_tx(tx_fn, account)
+            logger.info(
+                "Phase 2: delivery for %s vault %d (attempt %d/%d), tx: %s",
+                user_addr,
+                vault_id,
+                attempt,
+                max_retries,
+                tx_hash,
+            )
+            return tx_hash, contra_amount
+        except Exception as exc:
+            if attempt < max_retries:
+                delay = _RETRY_BACKOFF_SECONDS[
+                    min(attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                logger.warning(
+                    "Phase 2 attempt %d/%d failed for %s vault %d: %s. Retrying in %ds",
+                    attempt,
+                    max_retries,
+                    user_addr,
+                    vault_id,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error(
+                    "ALERT: All %d retries exhausted for %s vault %d. "
+                    "Position requires manual intervention. "
+                    "Last error: %s",
+                    max_retries,
+                    user_addr,
+                    vault_id,
+                    exc,
+                )
+                raise
+
+
+def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
+    """Check on-chain settlement state and reconcile DB for any mismatches.
+
+    Positions already settled on-chain but not marked in DB are updated
+    and removed from the returned list. This prevents re-settlement
+    attempts that would revert with VaultAlreadySettled.
+    """
+    controller = get_controller()
+    remaining = []
+    reconciled = 0
+    db_failures = 0
+
+    for pos in positions:
+        owner = Web3.to_checksum_address(pos["user_address"])
+        vault_id = pos["vault_id"]
+        try:
+            settled = controller.functions.vaultSettled(owner, vault_id).call()
+        except Exception:
+            logger.warning(
+                "Could not check vaultSettled for user=%s vault=%d, assuming unsettled",
+                pos["user_address"],
+                vault_id,
+            )
+            remaining.append(pos)
+            continue
+
+        if settled:
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                _db_update(
+                    pos["user_address"],
+                    vault_id,
+                    {"is_settled": True, "settled_at": now},
+                    "Reconcile on-chain settled",
+                )
+            except Exception:
+                logger.exception(
+                    "ALERT: Reconcile DB write failed for user=%s "
+                    "vault=%d (settled on-chain)",
+                    pos["user_address"],
+                    vault_id,
+                )
+                db_failures += 1
+            reconciled += 1
+        else:
+            remaining.append(pos)
+
+    if reconciled:
+        msg = "Reconciled %d positions (settled on-chain but not in DB)"
+        if db_failures:
+            msg += " — %d DB writes failed, will retry next cycle"
+            logger.warning(msg, reconciled, db_failures)
+        else:
+            logger.warning(msg, reconciled)
+    return remaining
+
+
 async def settle_once():
     """Single settlement cycle: 2-phase (batch settle + physical delivery for ITM)."""
     positions = get_expired_unsettled()
     if not positions:
         logger.info("No expired positions to settle")
+        return
+
+    # --- Reconcile: check on-chain state for DB/chain mismatches ---
+    try:
+        positions = await asyncio.to_thread(_reconcile_settled_on_chain, positions)
+    except Exception:
+        logger.exception("Reconciliation failed, proceeding with all positions")
+    if not positions:
+        logger.info("All positions reconciled (already settled on-chain)")
         return
 
     # --- Phase 0: set expiry prices on Oracle from Chainlink ---
@@ -429,10 +574,29 @@ async def settle_once():
             logger.info(f"Phase 1: settled {len(batch)} vaults on-chain, tx: {tx_hash}")
         except Exception:
             logger.exception(
-                f"Phase 1: batchSettleVaults tx failed for {len(batch)} vaults"
+                "Phase 1: batchSettleVaults tx failed for %d vaults, "
+                "reconciling batch on-chain",
+                len(batch),
             )
-            phase1_failed = True
-            break
+            # Check which vaults are already settled on-chain
+            unsettled = _reconcile_settled_on_chain(batch)
+            already_settled = [p for p in batch if p not in unsettled]
+            if already_settled:
+                settled_positions.extend(already_settled)
+            if unsettled:
+                logger.error(
+                    "Phase 1: %d/%d vaults unsettled after "
+                    "reconciliation, aborting batch loop",
+                    len(unsettled),
+                    len(batch),
+                )
+                phase1_failed = True
+                break
+            logger.info(
+                "Phase 1: all %d vaults in failed batch were already settled on-chain",
+                len(batch),
+            )
+            continue
 
         # On-chain succeeded — these vaults ARE settled regardless of DB outcome
         settled_positions.extend(batch)
@@ -472,10 +636,8 @@ async def settle_once():
     usdc = settings.usdc_address.lower()
 
     for pos in itm_positions:
-        otoken_addr = pos["otoken_address"]
         user_addr = pos["user_address"]
         mm_addr = pos.get("mm_address", "")
-        amount_raw = int(pos["amount"])
         vault_id = pos["vault_id"]
         expiry_price_raw = pos.get("expiry_price_raw")
         expiry_price_str = (
@@ -501,48 +663,26 @@ async def settle_once():
                     "Phase 2 missing-mm mark",
                 )
             except Exception:
-                pass
+                logger.exception(
+                    "ALERT: Failed to mark physical_failed for "
+                    "user=%s vault=%d (missing mm_address). "
+                    "Position has no settlement_type in DB.",
+                    user_addr,
+                    vault_id,
+                )
             continue
 
-        # Step 1: get slippage param (maxCollateralSpent for puts, minAmountOut for calls)
+        # Physical delivery with retry (slippage + on-chain tx)
         try:
-            slippage_param, contra_amount = await asyncio.to_thread(
-                compute_slippage_param,
+            tx_hash, contra_amount = await _physical_redeem_with_retry(
                 pos,
+                settler,
+                account,
                 expiry_price_raw,
             )
         except Exception:
             logger.exception(
-                f"ALERT: Skipping physical delivery for {otoken_addr} user={user_addr} "
-                f"(slippage param computation failed). Position requires manual review."
-            )
-            try:
-                _db_update(
-                    user_addr,
-                    vault_id,
-                    {
-                        "settlement_type": "physical_failed",
-                        "is_itm": True,
-                        "expiry_price": expiry_price_str,
-                    },
-                    "Phase 2 quote-fail mark",
-                )
-            except Exception:
-                logger.error(
-                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
-                    f"vault={vault_id}. Position is ITM but has no settlement_type in DB."
-                )
-            continue
-
-        # Last-resort guard: a zero slippage_param would let physicalRedeem accept
-        # any swap output including zero. This should never happen if compute_slippage_param
-        # is correct, but we refuse to call the contract with it regardless.
-        if slippage_param <= 0:
-            logger.error(
-                "ALERT: slippage_param=%d for %s user=%s vault=%d. "
-                "Refusing physicalRedeem with zero/negative slippage bound.",
-                slippage_param,
-                otoken_addr,
+                "Phase 2 delivery failed for user=%s vault=%d after retries exhausted",
                 user_addr,
                 vault_id,
             )
@@ -555,83 +695,47 @@ async def settle_once():
                         "is_itm": True,
                         "expiry_price": expiry_price_str,
                     },
-                    "Phase 2 zero-slippage-param mark",
+                    "Phase 2 all-retries-exhausted mark",
                 )
             except Exception:
                 logger.error(
-                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
-                    f"vault={vault_id} (zero slippage param)."
+                    "ALERT: Failed to mark physical_failed for "
+                    "user=%s vault=%d after all retries exhausted.",
+                    user_addr,
+                    vault_id,
                 )
             continue
 
-        # Step 2: on-chain physical delivery
-        delivery_succeeded = False
-        tx_hash = None
+        # DB mark (separate from on-chain to prevent misattribution)
+        pos_asset = pos.get("asset", "eth")
         try:
-            tx_fn = settler.functions.physicalRedeem(
-                Web3.to_checksum_address(otoken_addr),
-                Web3.to_checksum_address(user_addr),
-                amount_raw,
-                slippage_param,
-                Web3.to_checksum_address(mm_addr),
-            )
-            tx_hash = build_and_send_tx(tx_fn, account)
-            delivery_succeeded = True
-            logger.info(
-                f"Phase 2: physical delivery for {user_addr} vault {vault_id}, tx: {tx_hash}"
+            pos_cfg = get_asset_config(Asset(pos_asset))
+        except (ValueError, KeyError):
+            pos_cfg = get_asset_config(Asset.ETH)
+        delivered_asset = pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
+        try:
+            _db_update(
+                user_addr,
+                vault_id,
+                {
+                    "settlement_type": "physical",
+                    "is_itm": True,
+                    "expiry_price": expiry_price_str,
+                    "delivery_tx_hash": tx_hash,
+                    "delivered_asset": delivered_asset,
+                    "delivered_amount": str(contra_amount),
+                },
+                "Phase 2 delivery mark",
             )
         except Exception:
             logger.exception(
-                f"ALERT: physicalRedeem tx failed for {otoken_addr} user={user_addr} "
-                f"vault={vault_id}. Position requires manual review."
+                "ALERT: Physical delivery succeeded on-chain "
+                "(tx: %s) but DB write failed for user=%s vault=%d. "
+                "DB retains settlement_type='cash' from Phase 1.",
+                tx_hash,
+                user_addr,
+                vault_id,
             )
-
-        # Step 3: mark DB (separate from on-chain to prevent misattribution)
-        if delivery_succeeded:
-            pos_asset = pos.get("asset", "eth")
-            try:
-                pos_cfg = get_asset_config(Asset(pos_asset))
-            except (ValueError, KeyError):
-                pos_cfg = get_asset_config(Asset.ETH)
-            delivered_asset = pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
-            delivered_amount = str(contra_amount)
-            try:
-                _db_update(
-                    user_addr,
-                    vault_id,
-                    {
-                        "settlement_type": "physical",
-                        "is_itm": True,
-                        "expiry_price": expiry_price_str,
-                        "delivery_tx_hash": tx_hash,
-                        "delivered_asset": delivered_asset,
-                        "delivered_amount": delivered_amount,
-                    },
-                    "Phase 2 delivery mark",
-                )
-            except Exception:
-                logger.error(
-                    f"ALERT: Physical delivery succeeded on-chain (tx: {tx_hash}) but "
-                    f"DB write failed for user={user_addr} vault={vault_id}. "
-                    f"DB shows 'cash' but user received physical delivery."
-                )
-        else:
-            try:
-                _db_update(
-                    user_addr,
-                    vault_id,
-                    {
-                        "settlement_type": "physical_failed",
-                        "is_itm": True,
-                        "expiry_price": expiry_price_str,
-                    },
-                    "Phase 2 delivery-fail mark",
-                )
-            except Exception:
-                logger.error(
-                    f"ALERT: Failed to mark physical_failed for user={user_addr} "
-                    f"vault={vault_id}. Position is ITM but has no settlement_type in DB."
-                )
 
     # Update OTM positions with expiry price and ITM flag (display only).
     # Exclude both ITM positions and skipped positions (oracle unavailable)
@@ -741,12 +845,48 @@ async def _wait_until_target_hour():
     await asyncio.sleep(wait_seconds)
 
 
+async def _post_settle_sweep():
+    """Sweep for remaining unsettled positions every N seconds.
+
+    Runs after the primary settle_once() at 08:00 UTC. Exits early
+    when no unsettled positions remain or max cycles are reached.
+    """
+    interval = settings.settlement_sweep_interval_seconds
+    max_cycles = settings.settlement_sweep_max_cycles
+
+    for cycle in range(1, max_cycles + 1):
+        await asyncio.sleep(interval)
+        remaining = get_expired_unsettled()
+        if not remaining:
+            logger.info("Sweep cycle %d: no unsettled positions, done", cycle)
+            return
+
+        logger.info(
+            "Sweep cycle %d/%d: %d unsettled positions, retrying",
+            cycle,
+            max_cycles,
+            len(remaining),
+        )
+        try:
+            await settle_once()
+        except Exception:
+            logger.exception("Sweep cycle %d failed", cycle)
+
+    logger.warning(
+        "ALERT: Sweep exhausted %d cycles. Unsettled positions "
+        "may require manual intervention.",
+        max_cycles,
+    )
+
+
 async def run():
-    """Main loop: settle at 08:00 UTC daily.
+    """Main loop: settle at 08:00 UTC daily, then sweep for stragglers.
 
     On startup, runs settle_once() immediately to catch any
     expired positions that were missed (e.g. deploy during
     settlement window). Then enters the daily wait loop.
+    After each settlement trigger, sweeps every 5 min for
+    remaining unsettled positions.
     """
     logger.info("Expiry settler starting (physical settlement enabled)")
 
@@ -755,6 +895,10 @@ async def run():
         await settle_once()
     except Exception:
         logger.exception("Startup catch-up settlement failed")
+    try:
+        await _post_settle_sweep()
+    except Exception:
+        logger.exception("Startup sweep failed")
 
     while True:
         await _wait_until_target_hour()
@@ -762,3 +906,7 @@ async def run():
             await settle_once()
         except Exception:
             logger.exception("Expiry settlement failed")
+        try:
+            await _post_settle_sweep()
+        except Exception:
+            logger.exception("Post-settlement sweep failed")

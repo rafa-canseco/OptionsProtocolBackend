@@ -16,7 +16,9 @@ class Settings(BaseSettings):
 
     # Asset addresses (Base mainnet)
     weth_address: str = "0x4200000000000000000000000000000000000006"
-    wbtc_address: str = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"  # Base mainnet cbBTC
+    wbtc_address: str = (
+        "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"  # Base mainnet cbBTC
+    )
     usdc_address: str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     # Contract addresses (set after deployment)
@@ -43,14 +45,18 @@ class Settings(BaseSettings):
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
-    # e.g. "1773950400,1774123200". If empty, get_friday_expiries() is used.
+    # e.g. "1773950400,1774123200". If empty, get_expiries() is used.
     custom_expiry_timestamps: str = ""
 
-    # Hours before expiry to stop showing/creating options (default 48h)
-    expiry_cutoff_hours: int = 48
+    # Hours before expiry to stop showing/creating options
+    expiry_cutoff_hours: int = 48  # standard (3d/7d/14d)
+    short_expiry_cutoff_hours: int = 4  # near-expiry (TTL <= 48h)
 
     # Expiry settlement
     expiry_settle_hour_utc: int = 8  # 08:00 UTC
+    settlement_max_retries: int = 5
+    settlement_sweep_interval_seconds: int = 300  # 5 min between sweeps
+    settlement_sweep_max_cycles: int = 24  # ~2h of sweeps at 5min intervals
 
     # Physical settlement (flash loan + DEX swap)
     uniswap_v3_router_address: str = (
