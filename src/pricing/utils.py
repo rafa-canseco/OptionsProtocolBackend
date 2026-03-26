@@ -86,6 +86,10 @@ def get_expiries(
     if exp_3d <= standard_cutoff:
         exp_3d = _next_0800_utc(standard_cutoff)
 
+    # Near Friday: first Friday after short cutoff (catches Fridays
+    # within the 48h standard cutoff that have open positions)
+    exp_near_fri = _next_friday_8am(short_cutoff)
+
     # Weekly: first 2 Fridays after standard cutoff
     exp_7d = _next_friday_8am(standard_cutoff)
     exp_14d = exp_7d + timedelta(weeks=1)
@@ -94,8 +98,6 @@ def get_expiries(
     if exp_3d == exp_7d:
         exp_3d = exp_7d + timedelta(days=1)
 
-    # Dedup (1-day may coincide with 3d or Friday slot)
-    result = sorted({exp_1d, exp_3d, exp_7d, exp_14d})
+    # Dedup (near_fri == 7d when no Friday in the gap)
+    result = sorted({exp_1d, exp_near_fri, exp_3d, exp_7d, exp_14d})
     return [int(f.timestamp()) for f in result]
-
-

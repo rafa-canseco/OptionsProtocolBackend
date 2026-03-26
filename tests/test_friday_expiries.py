@@ -98,13 +98,14 @@ def test_friday_after_0800_utc():
     assert len(standard) >= 3
 
 
-def test_wednesday_cutoff_removes_this_friday():
-    """On Wednesday 08:00 UTC, this Friday is only 48h away.
-    It should be excluded (cutoff is strictly >48h)."""
+def test_wednesday_includes_near_friday():
+    """On Wednesday 08:00 UTC, this Friday is 48h away.
+    It's within the short cutoff window (4h) so it should be included
+    as a near-Friday slot."""
     wed = datetime(2026, 3, 4, 8, 0, 0, tzinfo=timezone.utc)
     result = get_expiries(now=wed)
     this_friday_ts = int(datetime(2026, 3, 6, 8, 0, 0, tzinfo=timezone.utc).timestamp())
-    assert this_friday_ts not in result
+    assert this_friday_ts in result
 
 
 def test_1day_slot_is_next_day_0800():
