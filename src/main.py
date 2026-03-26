@@ -72,15 +72,6 @@ async def lifespan(app: FastAPI):
     tasks.append(asyncio.create_task(weekly_aggregator.run()))
     logger.info("Weekly aggregator started")
 
-    # Notification bot only needs Resend API key, not on-chain config
-    if settings.resend_api_key:
-        from src.bots import notification_bot
-
-        tasks.append(asyncio.create_task(notification_bot.run()))
-        logger.info("Notification bot started")
-    else:
-        logger.info("Notification bot not started: RESEND_API_KEY not configured")
-
     yield
 
     for task in tasks:
