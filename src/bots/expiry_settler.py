@@ -19,6 +19,7 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import (
     get_batch_settler,
+    get_controller,
     get_oracle,
     get_uniswap_quoter,
     get_operator_account,
@@ -477,11 +478,73 @@ async def _physical_redeem_with_retry(
                 raise
 
 
+def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
+    """Check on-chain settlement state and reconcile DB for any mismatches.
+
+    Positions already settled on-chain but not marked in DB are updated
+    and removed from the returned list. This prevents re-settlement
+    attempts that would revert with VaultAlreadySettled.
+    """
+    controller = get_controller()
+    remaining = []
+    reconciled = 0
+
+    for pos in positions:
+        owner = Web3.to_checksum_address(pos["user_address"])
+        vault_id = pos["vault_id"]
+        try:
+            settled = controller.functions.vaultSettled(owner, vault_id).call()
+        except Exception:
+            logger.warning(
+                "Could not check vaultSettled for user=%s vault=%d, assuming unsettled",
+                pos["user_address"],
+                vault_id,
+            )
+            remaining.append(pos)
+            continue
+
+        if settled:
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                _db_update(
+                    pos["user_address"],
+                    vault_id,
+                    {"is_settled": True, "settled_at": now},
+                    "Reconcile on-chain settled",
+                )
+            except Exception:
+                logger.exception(
+                    "ALERT: Reconcile DB write failed for user=%s "
+                    "vault=%d (settled on-chain)",
+                    pos["user_address"],
+                    vault_id,
+                )
+            reconciled += 1
+        else:
+            remaining.append(pos)
+
+    if reconciled:
+        logger.warning(
+            "Reconciled %d positions (settled on-chain but not in DB)",
+            reconciled,
+        )
+    return remaining
+
+
 async def settle_once():
     """Single settlement cycle: 2-phase (batch settle + physical delivery for ITM)."""
     positions = get_expired_unsettled()
     if not positions:
         logger.info("No expired positions to settle")
+        return
+
+    # --- Reconcile: check on-chain state for DB/chain mismatches ---
+    try:
+        positions = await asyncio.to_thread(_reconcile_settled_on_chain, positions)
+    except Exception:
+        logger.exception("Reconciliation failed, proceeding with all positions")
+    if not positions:
+        logger.info("All positions reconciled (already settled on-chain)")
         return
 
     # --- Phase 0: set expiry prices on Oracle from Chainlink ---
@@ -505,7 +568,22 @@ async def settle_once():
             tx_fn = settler.functions.batchSettleVaults(owners, vault_ids)
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(f"Phase 1: settled {len(batch)} vaults on-chain, tx: {tx_hash}")
-        except Exception:
+        except Exception as exc:
+            if "VaultAlreadySettled" in str(exc):
+                logger.warning(
+                    "Phase 1: VaultAlreadySettled for batch of %d — "
+                    "marking as settled in DB and continuing",
+                    len(batch),
+                )
+                now = datetime.now(timezone.utc).isoformat()
+                try:
+                    _mark_batch_settled(owners, vault_ids, "already-settled", now)
+                except Exception:
+                    logger.exception(
+                        "Phase 1: failed to mark already-settled batch in DB"
+                    )
+                settled_positions.extend(batch)
+                continue
             logger.exception(
                 f"Phase 1: batchSettleVaults tx failed for {len(batch)} vaults"
             )
