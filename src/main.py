@@ -11,6 +11,7 @@ from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
 from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
+from src.api.notifications import router as notifications_router
 from src.config import settings
 
 logging.basicConfig(
@@ -111,6 +112,10 @@ openapi_tags = [
         "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
     },
     {
+        "name": "Notifications",
+        "description": "Email notification opt-in, verification, and unsubscribe.",
+    },
+    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -149,6 +154,7 @@ app.include_router(analytics_router)
 app.include_router(mm_router)
 app.include_router(mm_ws_router)
 app.include_router(activity_router)
+app.include_router(notifications_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
