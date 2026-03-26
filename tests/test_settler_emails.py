@@ -118,6 +118,33 @@ def test_skips_wallet_without_email():
         mock_send.assert_not_called()
 
 
+def test_skips_position_with_result_sent_at():
+    """Idempotency: positions with result_sent_at already set must not re-send."""
+    pos = _make_position("0xuser1", 1, is_itm=False)
+    pos["result_sent_at"] = "2026-03-26T12:00:00Z"
+    mock_db = _mock_db_with_emails({"0xuser1": "user1@test.com"})
+
+    with (
+        patch("src.bots.expiry_settler.get_client", return_value=mock_db),
+        patch("src.bots.expiry_settler.send_batch") as mock_send,
+    ):
+        _send_settlement_emails([pos], [])
+        mock_send.assert_not_called()
+
+
+def test_skips_when_resend_not_configured():
+    """_send_settlement_emails is a no-op when RESEND_API_KEY is not set."""
+    pos = _make_position("0xuser1", 1, is_itm=False)
+
+    with (
+        patch("src.bots.expiry_settler.settings") as mock_settings,
+        patch("src.bots.expiry_settler.get_client") as mock_get_client,
+    ):
+        mock_settings.resend_api_key = ""
+        _send_settlement_emails([pos], [])
+        mock_get_client.assert_not_called()
+
+
 def test_email_failure_does_not_raise():
     pos = _make_position("0xuser1", 1, is_itm=False)
     mock_db = _mock_db_with_emails({"0xuser1": "user1@test.com"})

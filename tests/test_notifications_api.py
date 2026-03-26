@@ -231,3 +231,39 @@ def test_unsubscribe_with_invalid_token():
     with patch("src.api.notifications.verify_unsubscribe_token", return_value=False):
         resp = client.get(f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=bad")
     assert resp.status_code == 403
+
+
+def test_unsubscribe_post_one_click():
+    """RFC 8058 one-click POST unsubscribe should succeed with valid token."""
+    mock_db = _mock_client_with_data([{"wallet_address": VALID_WALLET.lower()}])
+    with (
+        patch("src.api.notifications.get_client", return_value=mock_db),
+        patch("src.api.notifications.verify_unsubscribe_token", return_value=True),
+    ):
+        resp = client.post(
+            f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=valid"
+        )
+    assert resp.status_code == 200
+    assert "unsubscribed" in resp.text.lower()
+
+
+def test_status_invalid_wallet():
+    """GET /notifications/status with a malformed wallet returns 400."""
+    resp = client.get("/notifications/status?wallet=not-an-address")
+    assert resp.status_code == 400
+
+
+def test_unsubscribe_db_failure_returns_502():
+    """If the DB write fails, unsubscribe returns 502 instead of a false success."""
+    mock_db = MagicMock()
+    mock_db.table.return_value.update.return_value.eq.return_value.execute.side_effect = Exception(
+        "db down"
+    )
+    with (
+        patch("src.api.notifications.get_client", return_value=mock_db),
+        patch("src.api.notifications.verify_unsubscribe_token", return_value=True),
+    ):
+        resp = client.get(
+            f"/notifications/unsubscribe?wallet={VALID_WALLET}&token=valid"
+        )
+    assert resp.status_code == 502

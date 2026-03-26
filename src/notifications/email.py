@@ -46,6 +46,11 @@ def send_verification_email(email: str, code: str) -> None:
 
 
 def generate_unsubscribe_url(wallet_address: str) -> str:
+    if not settings.unsubscribe_secret:
+        raise RuntimeError(
+            "UNSUBSCRIBE_SECRET must be set when email notifications are enabled. "
+            'Generate with: python -c "import secrets; print(secrets.token_hex(32))"'
+        )
     token = hmac.new(
         settings.unsubscribe_secret.encode(),
         wallet_address.lower().encode(),
@@ -62,6 +67,8 @@ def generate_unsubscribe_url(wallet_address: str) -> str:
 
 
 def verify_unsubscribe_token(wallet_address: str, token: str) -> bool:
+    if not settings.unsubscribe_secret:
+        return False
     expected = hmac.new(
         settings.unsubscribe_secret.encode(),
         wallet_address.lower().encode(),
@@ -102,6 +109,11 @@ def send_batch(emails: list[dict]) -> list[dict]:
             for e in chunk
         ]
         results = resend.Batch.send(params_list)
+        if not isinstance(results, list):
+            raise TypeError(
+                f"resend.Batch.send returned unexpected type "
+                f"{type(results).__name__}: {results!r}"
+            )
         all_results.extend(results)
 
     logger.info("Batch email sent: %d emails", len(all_results))
@@ -138,6 +150,7 @@ def build_result_email_otm(
     premium_usd: str,
     asset: str,
 ) -> dict:
+    """Build an OTM result email dict ready for send_batch."""
     subject, html = _render_otm(collateral_usd, premium_usd, asset)
     html = _inject_unsubscribe_url(html, wallet_address)
     unsub_url = generate_unsubscribe_url(wallet_address)
@@ -160,6 +173,7 @@ def build_result_email_itm(
     strike_usd: str,
     is_put: bool,
 ) -> dict:
+    """Build an ITM result email dict ready for send_batch."""
     subject, html = _render_itm(asset, amount, strike_usd, is_put)
     html = _inject_unsubscribe_url(html, wallet_address)
     unsub_url = generate_unsubscribe_url(wallet_address)

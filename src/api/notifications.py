@@ -1,6 +1,6 @@
 import logging
-import random
 import re
+import secrets
 import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
@@ -83,10 +83,11 @@ async def submit_email(body: EmailSubmitRequest, request: Request):
     Sends a 6-digit verification code via Resend. Rate limited to
     3 per wallet per hour and 10 per IP per hour.
     """
-    _check_wallet_rate_limit(body.wallet_address)
+    wallet = body.wallet_address.lower()
+    _check_wallet_rate_limit(wallet)
     _check_ip_rate_limit(_get_client_ip(request))
 
-    code = f"{random.randint(0, 999999):06d}"
+    code = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
     now = datetime.now(timezone.utc).isoformat()
 
@@ -94,7 +95,7 @@ async def submit_email(body: EmailSubmitRequest, request: Request):
     try:
         client.table("user_emails").upsert(
             {
-                "wallet_address": body.wallet_address,
+                "wallet_address": wallet,
                 "email": body.email,
                 "verification_code": code,
                 "code_expires_at": expires_at,
@@ -123,12 +124,13 @@ async def verify_email(body: EmailVerifyRequest):
 
     On success, sets verified_at and clears the code.
     """
+    wallet = body.wallet_address.lower()
     client = get_client()
     try:
         result = (
             client.table("user_emails")
             .select("verification_code, code_expires_at")
-            .eq("wallet_address", body.wallet_address)
+            .eq("wallet_address", wallet)
             .execute()
         )
     except Exception:
@@ -159,7 +161,7 @@ async def verify_email(body: EmailVerifyRequest):
                 "code_expires_at": None,
                 "updated_at": now,
             }
-        ).eq("wallet_address", body.wallet_address).execute()
+        ).eq("wallet_address", wallet).execute()
     except Exception:
         logger.exception("Failed to update verified_at")
         raise HTTPException(502, "Verification failed")
@@ -248,5 +250,13 @@ def _process_unsubscribe(wallet: str, token: str) -> HTMLResponse:
         ).eq("wallet_address", wallet.lower()).execute()
     except Exception:
         logger.exception("Failed to unsubscribe wallet %s", wallet)
+        return HTMLResponse(
+            content=(
+                "<html><body style='font-family:sans-serif;text-align:center;padding:40px;'>"
+                "<p>Unsubscribe failed — please try again later.</p>"
+                "</body></html>"
+            ),
+            status_code=502,
+        )
 
     return HTMLResponse(content=render_unsubscribe_page(), status_code=200)

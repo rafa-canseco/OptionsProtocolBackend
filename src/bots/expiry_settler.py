@@ -540,43 +540,16 @@ def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
     return remaining
 
 
-def _send_settlement_emails(
-    settled_positions: list[dict],
-    itm_positions: list[dict],
-) -> None:
-    """Send settlement result emails (fire-and-forget).
+def _prepare_settlement_email_batch(
+    all_positions: list[dict],
+    email_map: dict[str, str],
+    itm_keys: set[tuple[str, int]],
+) -> tuple[list[dict], list[tuple[str, int]]]:
+    """Build email dicts and position refs for settlement result emails.
 
-    Queries user_emails for verified/subscribed wallets, builds
-    OTM or ITM result emails, sends via Resend batch.
+    Returns (emails_to_send, position_refs) — parallel lists.
+    itm_positions must be a subset of all_positions (i.e. settled_positions).
     """
-    if not settings.resend_api_key:
-        return
-
-    all_positions = settled_positions
-    wallets = list({p["user_address"] for p in all_positions})
-    if not wallets:
-        return
-
-    client = get_client()
-    try:
-        result = (
-            client.table("user_emails")
-            .select("wallet_address, email")
-            .in_("wallet_address", wallets)
-            .not_.is_("verified_at", "null")
-            .is_("unsubscribed_at", "null")
-            .execute()
-        )
-        email_map = {row["wallet_address"]: row["email"] for row in (result.data or [])}
-    except Exception:
-        logger.exception("Failed to fetch user emails for settlement results")
-        return
-
-    if not email_map:
-        return
-
-    itm_keys = {(p["user_address"], p["vault_id"]) for p in itm_positions}
-
     emails_to_send: list[dict] = []
     position_refs: list[tuple[str, int]] = []
 
@@ -585,17 +558,26 @@ def _send_settlement_emails(
         email = email_map.get(wallet)
         if not email:
             continue
+        vault_id = pos["vault_id"]
         if pos.get("result_sent_at"):
+            logger.debug(
+                "Skipping result email for %s vault %d (already sent)", wallet, vault_id
+            )
             continue
 
-        vault_id = pos["vault_id"]
         asset = (pos.get("asset") or "eth").upper()
         strike_raw = int(pos.get("strike_price", 0))
         strike_usd = f"{strike_raw / 1e8:,.0f}"
         amount_raw = int(pos.get("amount", 0))
         amount_human = f"{amount_raw / 1e8:.4f}"
-        premium_raw = int(pos.get("net_premium") or pos.get("premium") or 0)
-        premium_usd = f"{premium_raw / 1e6:.2f}"
+        _premium = pos.get("net_premium") or pos.get("premium")
+        if _premium is None:
+            logger.warning(
+                "No premium field for %s vault %d — email will show $0.00",
+                wallet,
+                vault_id,
+            )
+        premium_usd = f"{int(_premium or 0) / 1e6:.2f}"
         collateral_raw = amount_raw * strike_raw // 10**8
         collateral_usd = f"{collateral_raw / 1e6:,.0f}"
 
@@ -621,10 +603,51 @@ def _send_settlement_emails(
             position_refs.append((wallet, vault_id))
         except Exception:
             logger.exception(
-                "Failed to build result email for %s vault %d",
-                wallet,
-                vault_id,
+                "Failed to build result email for %s vault %d", wallet, vault_id
             )
+
+    return emails_to_send, position_refs
+
+
+def _send_settlement_emails(
+    settled_positions: list[dict],
+    itm_positions: list[dict],
+) -> None:
+    """Send settlement result emails (fire-and-forget).
+
+    Queries user_emails for verified/subscribed wallets, builds
+    OTM or ITM result emails, sends via Resend batch.
+    itm_positions must be a subset of settled_positions.
+    """
+    if not settings.resend_api_key:
+        return
+
+    wallets = list({p["user_address"] for p in settled_positions})
+    if not wallets:
+        return
+
+    client = get_client()
+    try:
+        result = (
+            client.table("user_emails")
+            .select("wallet_address, email")
+            .in_("wallet_address", wallets)
+            .not_.is_("verified_at", "null")
+            .is_("unsubscribed_at", "null")
+            .execute()
+        )
+        email_map = {row["wallet_address"]: row["email"] for row in (result.data or [])}
+    except Exception:
+        logger.exception("Failed to fetch user emails for settlement results")
+        return
+
+    if not email_map:
+        return
+
+    itm_keys = {(p["user_address"], p["vault_id"]) for p in itm_positions}
+    emails_to_send, position_refs = _prepare_settlement_email_batch(
+        settled_positions, email_map, itm_keys
+    )
 
     if not emails_to_send:
         return

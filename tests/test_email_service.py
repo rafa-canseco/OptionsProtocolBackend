@@ -1,3 +1,12 @@
+import urllib.parse
+from unittest.mock import patch
+
+from src.notifications.email import (
+    send_verification_email,
+    send_batch,
+    generate_unsubscribe_url,
+    verify_unsubscribe_token,
+)
 from src.notifications.templates import (
     render_verification_email,
     render_reminder_email,
@@ -68,15 +77,6 @@ def test_unsubscribe_page():
     assert "<html" in html.lower()
 
 
-from unittest.mock import patch, MagicMock
-from src.notifications.email import (
-    send_verification_email,
-    send_batch,
-    generate_unsubscribe_url,
-    verify_unsubscribe_token,
-)
-
-
 def test_send_verification_email_calls_resend():
     with patch("src.notifications.email.resend") as mock_resend:
         mock_resend.Emails.send.return_value = {"id": "test-id"}
@@ -122,8 +122,6 @@ def test_unsubscribe_token_roundtrip():
         assert "token=" in url
         assert "wallet=" in url
         # Extract token from URL
-        import urllib.parse
-
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)
         token = params["token"][0]
