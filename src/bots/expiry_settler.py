@@ -488,6 +488,7 @@ def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
     controller = get_controller()
     remaining = []
     reconciled = 0
+    db_failures = 0
 
     for pos in positions:
         owner = Web3.to_checksum_address(pos["user_address"])
@@ -519,15 +520,18 @@ def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
                     pos["user_address"],
                     vault_id,
                 )
+                db_failures += 1
             reconciled += 1
         else:
             remaining.append(pos)
 
     if reconciled:
-        logger.warning(
-            "Reconciled %d positions (settled on-chain but not in DB)",
-            reconciled,
-        )
+        msg = "Reconciled %d positions (settled on-chain but not in DB)"
+        if db_failures:
+            msg += " — %d DB writes failed, will retry next cycle"
+            logger.warning(msg, reconciled, db_failures)
+        else:
+            logger.warning(msg, reconciled)
     return remaining
 
 
@@ -568,27 +572,31 @@ async def settle_once():
             tx_fn = settler.functions.batchSettleVaults(owners, vault_ids)
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(f"Phase 1: settled {len(batch)} vaults on-chain, tx: {tx_hash}")
-        except Exception as exc:
-            if "VaultAlreadySettled" in str(exc):
-                logger.warning(
-                    "Phase 1: VaultAlreadySettled for batch of %d — "
-                    "marking as settled in DB and continuing",
+        except Exception:
+            logger.exception(
+                "Phase 1: batchSettleVaults tx failed for %d vaults, "
+                "reconciling batch on-chain",
+                len(batch),
+            )
+            # Check which vaults are already settled on-chain
+            unsettled = _reconcile_settled_on_chain(batch)
+            already_settled = [p for p in batch if p not in unsettled]
+            if already_settled:
+                settled_positions.extend(already_settled)
+            if unsettled:
+                logger.error(
+                    "Phase 1: %d/%d vaults unsettled after "
+                    "reconciliation, aborting batch loop",
+                    len(unsettled),
                     len(batch),
                 )
-                now = datetime.now(timezone.utc).isoformat()
-                try:
-                    _mark_batch_settled(owners, vault_ids, "already-settled", now)
-                except Exception:
-                    logger.exception(
-                        "Phase 1: failed to mark already-settled batch in DB"
-                    )
-                settled_positions.extend(batch)
-                continue
-            logger.exception(
-                f"Phase 1: batchSettleVaults tx failed for {len(batch)} vaults"
+                phase1_failed = True
+                break
+            logger.info(
+                "Phase 1: all %d vaults in failed batch were already settled on-chain",
+                len(batch),
             )
-            phase1_failed = True
-            break
+            continue
 
         # On-chain succeeded — these vaults ARE settled regardless of DB outcome
         settled_positions.extend(batch)
