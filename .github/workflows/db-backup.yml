@@ -19,12 +19,16 @@ jobs:
 
       - name: Run pg_dump
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
           set -euo pipefail
           TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
           FILENAME="backup_${TIMESTAMP}.sql.gz"
-          pg_dump "${DATABASE_URL}" \
+          pg_dump \
+            --host=db.kcqalauwcfkefqetezzu.supabase.co \
+            --port=5432 \
+            --username=postgres \
+            --dbname=postgres \
             --no-owner \
             --no-privileges \
             --clean \
