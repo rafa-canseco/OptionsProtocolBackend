@@ -12,10 +12,12 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Install PostgreSQL client
+      - name: Install PostgreSQL 17 client
         run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+          sudo apt-get install -y -qq postgresql-client-17
 
       - name: Run pg_dump
         env:
