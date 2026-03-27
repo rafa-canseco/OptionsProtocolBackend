@@ -20,15 +20,20 @@ jobs:
       - name: Run pg_dump
         env:
           PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          DB_HOST: db.kcqalauwcfkefqetezzu.supabase.co
         run: |
           set -euo pipefail
+          IPV4=$(getent ahostsv4 "${DB_HOST}" \
+            | head -1 | awk '{print $1}')
+          if [ -z "${IPV4}" ]; then
+            echo "Failed to resolve ${DB_HOST} to IPv4"
+            exit 1
+          fi
+          echo "Resolved ${DB_HOST} -> ${IPV4}"
           TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
           FILENAME="backup_${TIMESTAMP}.sql.gz"
           pg_dump \
-            --host=db.kcqalauwcfkefqetezzu.supabase.co \
-            --port=5432 \
-            --username=postgres \
-            --dbname=postgres \
+            "host=${IPV4} port=5432 user=postgres dbname=postgres sslmode=require" \
             --no-owner \
             --no-privileges \
             --clean \
