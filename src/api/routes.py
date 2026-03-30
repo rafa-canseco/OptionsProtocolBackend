@@ -452,8 +452,6 @@ async def get_prices(
 
     if not all_quotes:
         logger.info("No active quotes in mm_quotes for %s", cache_key)
-        _prices_cache[cache_key] = []
-        _prices_cached_at[cache_key] = time.monotonic()
         return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
