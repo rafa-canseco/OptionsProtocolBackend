@@ -20,15 +20,10 @@ import sys
 from src.db.database import get_client
 from src.pricing.assets import Asset
 from src.pricing.chainlink import get_asset_price_at_block
+from src.pricing.utils import collateral_to_usd
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-# Collateral token decimals per asset for CALL options
-_CALL_DECIMALS: dict[str, int] = {
-    "eth": 18,
-    "btc": 8,
-}
 
 _ASSET_ENUM: dict[str, Asset] = {
     "eth": Asset.ETH,
@@ -41,18 +36,21 @@ def _compute_collateral_usd(
     price_cache: dict[tuple[str, int], float],
 ) -> float:
     """Return collateral_usd for a single row, fetching Chainlink price if needed."""
-    collateral = int(row["collateral"])
     is_put = row.get("is_put")
     asset_str = (row.get("asset") or "eth").lower()
 
-    # PUT options are collateralized in USDC (6 decimals) — no spot price needed
+    # PUT options are collateralized in USDC — no spot price needed
     if is_put is True or is_put is None:
-        return collateral / 1_000_000
+        return collateral_to_usd(row, 0.0, 0.0)
 
-    # CALL option — collateral is the underlying asset
-    block_number: int = row["block_number"]
+    # CALL option — need historical spot price at the block this position was created
+    block_number = row.get("block_number")
+    if block_number is None:
+        raise ValueError(
+            f"Row id={row['id']} has NULL block_number — cannot fetch historical price"
+        )
+
     cache_key = (asset_str, block_number)
-
     if cache_key not in price_cache:
         asset_enum = _ASSET_ENUM.get(asset_str)
         if asset_enum is None:
@@ -60,11 +58,9 @@ def _compute_collateral_usd(
         price_cache[cache_key] = get_asset_price_at_block(asset_enum, block_number)
 
     spot = price_cache[cache_key]
-    decimals = _CALL_DECIMALS.get(asset_str)
-    if decimals is None:
-        raise ValueError(f"No decimals config for asset '{asset_str}' for row id={row['id']}")
-
-    return spot * (collateral / 10**decimals)
+    if asset_str == "btc":
+        return collateral_to_usd(row, 0.0, spot)
+    return collateral_to_usd(row, spot, 0.0)
 
 
 def backfill(apply: bool = False) -> None:
@@ -85,6 +81,7 @@ def backfill(apply: bool = False) -> None:
 
     price_cache: dict[tuple[str, int], float] = {}
     updated = 0
+    failed = 0
 
     for row in rows:
         row_id = row["id"]
@@ -92,16 +89,18 @@ def backfill(apply: bool = False) -> None:
             value = _compute_collateral_usd(row, price_cache)
         except Exception:
             logger.exception("Failed to compute collateral_usd for row id=%s", row_id)
+            failed += 1
             continue
 
         if apply:
             try:
-                client.table("order_events").update(
-                    {"collateral_usd": value}
-                ).eq("id", row_id).execute()
+                client.table("order_events").update({"collateral_usd": value}).eq(
+                    "id", row_id
+                ).execute()
                 logger.info("Updated row %s: collateral_usd = %.2f", row_id, value)
             except Exception:
                 logger.exception("Failed to update row id=%s", row_id)
+                failed += 1
                 continue
         else:
             logger.info("Would update row %s: collateral_usd = %.2f", row_id, value)
@@ -112,6 +111,10 @@ def backfill(apply: bool = False) -> None:
     logger.info("Done. %s %d rows.", action, updated)
     if not apply and updated > 0:
         logger.info("Dry run. Re-run with --apply to write to DB.")
+
+    if failed > 0:
+        logger.error("%d rows could not be backfilled. See errors above.", failed)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

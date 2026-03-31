@@ -40,16 +40,6 @@ def _make_row(
     }
 
 
-def _mock_db(rows: list[dict]):
-    """Return a mock get_client() that yields the given rows via .eq() chain."""
-    mock_client = MagicMock()
-    mock_result = MagicMock()
-    mock_result.data = rows
-    (
-        mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value
-    ) = mock_result
-    return mock_client
-
 
 def _mock_db_in(rows: list[dict]):
     """Return a mock get_client() that yields the given rows via .in_() chain."""

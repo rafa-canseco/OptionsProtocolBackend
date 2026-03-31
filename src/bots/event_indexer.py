@@ -106,17 +106,29 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
 def _enrich_with_collateral_usd(event_data: dict) -> dict:
     """Compute collateral_usd from Chainlink spot prices and attach to event_data.
 
-    Sets collateral_usd to None if either Chainlink call fails; the upsert
-    still succeeds and a backfill script can fill the gap later.
+    PUT options use USDC collateral — no Chainlink call needed.
+    CALL options fetch only the relevant asset's spot price.
+    Sets collateral_usd to None on RPC failure; the backfill script can fill the gap.
     """
+    is_put = event_data.get("is_put")
+    asset = event_data.get("asset") or "eth"
+
+    if is_put is True or is_put is None:
+        # PUT: USDC collateral, conversion is purely arithmetic
+        event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, 0.0)
+        return event_data
+
     try:
-        eth_spot, _ = get_asset_price(Asset.ETH)
-        btc_spot, _ = get_asset_price(Asset.BTC)
-        event_data["collateral_usd"] = collateral_to_usd(event_data, eth_spot, btc_spot)
+        if asset == "btc":
+            btc_spot, _ = get_asset_price(Asset.BTC)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, btc_spot)
+        else:
+            eth_spot, _ = get_asset_price(Asset.ETH)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, eth_spot, 0.0)
     except Exception:
         logger.warning(
-            "Could not fetch Chainlink prices to compute collateral_usd for tx=%s. "
-            "Will be backfilled later.",
+            "Could not fetch Chainlink spot for %s CALL tx=%s. Will be backfilled later.",
+            asset,
             event_data.get("tx_hash"),
         )
         event_data["collateral_usd"] = None
