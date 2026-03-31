@@ -110,8 +110,8 @@ def _enrich_with_collateral_usd(event_data: dict) -> dict:
     still succeeds and a backfill script can fill the gap later.
     """
     try:
-        eth_spot, _ = get_asset_price(Asset.eth)
-        btc_spot, _ = get_asset_price(Asset.btc)
+        eth_spot, _ = get_asset_price(Asset.ETH)
+        btc_spot, _ = get_asset_price(Asset.BTC)
         event_data["collateral_usd"] = collateral_to_usd(event_data, eth_spot, btc_spot)
     except Exception:
         logger.warning(
