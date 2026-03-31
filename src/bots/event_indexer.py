@@ -21,6 +21,9 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 from src.api.mm_ws import notify_mm_fill
+from src.pricing.chainlink import get_asset_price
+from src.pricing.assets import Asset
+from src.pricing.utils import collateral_to_usd
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,38 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
             "This position will lack settlement-critical fields.",
             event_data["otoken_address"],
         )
+    return event_data
+
+
+def _enrich_with_collateral_usd(event_data: dict) -> dict:
+    """Compute collateral_usd from Chainlink spot prices and attach to event_data.
+
+    PUT options use USDC collateral — no Chainlink call needed.
+    CALL options fetch only the relevant asset's spot price.
+    Sets collateral_usd to None on RPC failure; the backfill script can fill the gap.
+    """
+    is_put = event_data.get("is_put")
+    asset = event_data.get("asset") or "eth"
+
+    if is_put is True or is_put is None:
+        # PUT: USDC collateral, conversion is purely arithmetic
+        event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, 0.0)
+        return event_data
+
+    try:
+        if asset == "btc":
+            btc_spot, _ = get_asset_price(Asset.BTC)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, btc_spot)
+        else:
+            eth_spot, _ = get_asset_price(Asset.ETH)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, eth_spot, 0.0)
+    except Exception:
+        logger.warning(
+            "Could not fetch Chainlink spot for %s CALL tx=%s. Will be backfilled later.",
+            asset,
+            event_data.get("tx_hash"),
+        )
+        event_data["collateral_usd"] = None
     return event_data
 
 
@@ -203,6 +238,7 @@ def _fetch_and_store_order_events(
     for ev in raw_events:
         event_data = _build_order_event_data(ev)
         event_data = _enrich_with_otoken_metadata(event_data)
+        event_data = _enrich_with_collateral_usd(event_data)
         events_to_store.append(event_data)
 
     stored = _store_events(events_to_store)
@@ -408,6 +444,7 @@ def _process_order_subscription_log(settler, log) -> None:
 
     event_data = _build_order_event_data(decoded)
     event_data = _enrich_with_otoken_metadata(event_data)
+    event_data = _enrich_with_collateral_usd(event_data)
 
     try:
         _store_events([event_data])

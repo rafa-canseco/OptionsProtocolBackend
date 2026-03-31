@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from src.db.database import get_client
 
@@ -61,6 +61,19 @@ def _parse_date(ts: str | None) -> date | None:
         return None
 
 
+def _deduplicate(rows: list[dict]) -> list[dict]:
+    """Deduplicate rows by id, keeping first occurrence."""
+    seen: set[str] = set()
+    result = []
+    for row in rows:
+        row_id = row.get("id")
+        if row_id is None or row_id not in seen:
+            if row_id is not None:
+                seen.add(row_id)
+            result.append(row)
+    return result
+
+
 def _compute_metrics(rows: list[dict]) -> dict:
     """Aggregate order_events rows into per-wallet activity metrics."""
     if not rows:
@@ -70,6 +83,9 @@ def _compute_metrics(rows: list[dict]) -> dict:
             "positionCount": 0,
             "activeDays": 0,
             "daysSinceFirst": 0,
+            "total_collateral_usd": 0.0,
+            "total_premium_usd": 0.0,
+            "earning_rate": None,
         }
 
     total_volume = sum(_collateral_usd(r) for r in rows)
@@ -84,12 +100,25 @@ def _compute_metrics(rows: list[dict]) -> dict:
     first_date = min(dates) if dates else today
     days_since_first = (today - first_date).days
 
+    total_collateral_usd = round(
+        sum(float(r.get("collateral_usd") or 0.0) for r in rows), 2
+    )
+    total_premium_usd = round(total_premium, 2)
+    earning_rate = (
+        round(total_premium_usd / total_collateral_usd, 6)
+        if total_collateral_usd > 0
+        else None
+    )
+
     return {
         "totalVolume": round(total_volume, 2),
         "totalPremiumEarned": round(total_premium, 2),
         "positionCount": position_count,
         "activeDays": active_days,
         "daysSinceFirst": days_since_first,
+        "total_collateral_usd": total_collateral_usd,
+        "total_premium_usd": total_premium_usd,
+        "earning_rate": earning_rate,
     }
 
 
@@ -98,30 +127,48 @@ def _compute_metrics(rows: list[dict]) -> dict:
     tags=["Activity"],
     summary="Get per-wallet activity metrics",
 )
-async def get_activity(wallet_address: str):
+async def get_activity(
+    wallet_address: str,
+    also: str | None = Query(None),
+):
     """Return aggregated on-chain activity metrics for a wallet.
 
     Data is sourced from indexed OrderExecuted events. Returns zeroes for
     wallets with no activity. Metrics are computed on-the-fly from the
     order_events table — no pre-aggregation required.
+
+    Use ?also=<address> to aggregate across two addresses (e.g. a wallet
+    and its smart account). Duplicate rows (same id) are deduplicated.
     """
     if not ETH_ADDRESS_RE.match(wallet_address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
+    addresses = [wallet_address.lower()]
+
+    if also is not None:
+        if not ETH_ADDRESS_RE.match(also):
+            raise HTTPException(
+                status_code=400, detail="Invalid Ethereum address in 'also' param"
+            )
+        also_lower = also.lower()
+        if also_lower not in addresses:
+            addresses.append(also_lower)
 
     try:
         client = get_client()
         result = (
             client.table("order_events")
             .select(
-                "collateral,net_premium,premium,is_put,strike_price,asset,indexed_at"
+                "id,collateral,collateral_usd,net_premium,premium,"
+                "is_put,strike_price,asset,indexed_at"
             )
-            .eq("user_address", wallet_address.lower())
+            .in_("user_address", addresses)
             .execute()
         )
     except Exception:
         logger.exception("Failed to fetch activity for %s", wallet_address)
         raise HTTPException(status_code=502, detail="Could not fetch activity data")
 
-    rows = result.data or []
+    rows = _deduplicate(result.data or [])
     metrics = _compute_metrics(rows)
     return {"wallet": wallet_address.lower(), **metrics}
