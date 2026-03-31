@@ -87,6 +87,26 @@ def get_asset_price(asset: Asset) -> tuple[float, int]:
     return answer / (10**decimals), updated_at
 
 
+def get_asset_price_at_block(asset: Asset, block_number: int) -> float:
+    """Read USD price from Chainlink at a specific historical block.
+
+    Uses block_identifier override on latestRoundData() call.
+    Requires an archive node or a provider that supports historical eth_call (e.g. Alchemy).
+    Returns the price as a float.
+    """
+    feed = _get_feed(asset)
+    decimals = _get_decimals(asset)
+    (_, answer, _, _, _) = feed.functions.latestRoundData().call(
+        block_identifier=block_number
+    )
+    if answer <= 0:
+        raise ValueError(
+            f"Chainlink returned non-positive price for {asset.value} at block"
+            f" {block_number}: {answer}"
+        )
+    return answer / (10**decimals)
+
+
 def get_eth_price_raw() -> tuple[int, int, int]:
     """Read raw ETH/USD price from Chainlink (backward compat)."""
     return get_asset_price_raw(Asset.ETH)
