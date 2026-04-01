@@ -195,9 +195,9 @@ def test_wheel_detection_applies_1_5x():
     follow_call = _make_pos(
         user_address="0xwheel",
         is_put=False,
-        is_itm=False,
+        is_itm=True,  # must also be assigned to complete the cycle
         asset="eth",
-        settled_at=None,
+        settled_at="2026-04-05T10:00:00+00:00",
         indexed_at=follow_ts,
         pos_id=9002,
     )
@@ -279,9 +279,9 @@ def test_wheel_priority_over_perfect_week():
     follow_call = _make_pos(
         user_address="0xboth",
         is_put=False,
-        is_itm=False,
+        is_itm=True,  # must also be assigned to complete the cycle
         asset="eth",
-        settled_at=None,
+        settled_at="2026-04-04T08:00:00+00:00",
         indexed_at=follow_ts,
         pos_id=7002,
     )
@@ -692,3 +692,35 @@ def test_progress_values_capped_at_1():
     assert resp.status_code == 200
     entry = resp.json()["track1"][0]
     assert entry["progress"]["collateral_pct"] == 1.0
+
+
+def test_wheel_requires_both_assignments():
+    """Follow-up opened within 24h but not assigned (is_itm=False) does NOT earn wheel bonus."""
+    base_rows = _make_qualifying_rows(user_address="0xhalfwheel", n=8)
+
+    itm_put = _make_pos(
+        user_address="0xhalfwheel",
+        is_put=True,
+        is_itm=True,
+        asset="eth",
+        settled_at="2026-04-01T10:00:00+00:00",
+        indexed_at=_DAY2,
+        pos_id=8801,
+    )
+    follow_call = _make_pos(
+        user_address="0xhalfwheel",
+        is_put=False,
+        is_itm=False,  # opened within 24h but expired OTM — wheel incomplete
+        asset="eth",
+        settled_at="2026-04-05T10:00:00+00:00",
+        indexed_at="2026-04-01T20:00:00+00:00",
+        pos_id=8802,
+    )
+
+    rows = base_rows + [itm_put, follow_call]
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 200
+    entry = resp.json()["track1"][0]
+    assert entry["wheel_count"] == 0
