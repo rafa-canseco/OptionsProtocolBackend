@@ -1,9 +1,12 @@
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
 from src.db.database import get_client
+
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 logger = logging.getLogger(__name__)
 
@@ -338,4 +341,90 @@ async def get_leaderboard(
         "track1": _build_track1(wallet_stats),
         "track2": _build_track2(wallet_stats),
         "meta": meta,
+    }
+
+
+@router.get(
+    "/leaderboard/me",
+    tags=["Leaderboard"],
+    summary="Personal Earnings Challenge stats (no eligibility filter)",
+)
+async def get_leaderboard_me(
+    address: str = Query(...),
+    start: int = Query(default=_DEFAULT_START),
+    end: int = Query(default=_DEFAULT_END),
+):
+    """Return stats for a single wallet regardless of eligibility.
+
+    Includes a `qualifies` field showing whether the wallet meets the
+    $500 collateral and 8 active-day thresholds for the leaderboard prize.
+    """
+    if not _ETH_ADDRESS_RE.match(address):
+        raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+    if start >= end:
+        raise HTTPException(status_code=400, detail="start must be before end")
+    if end - start > _MAX_RANGE_SECS:
+        raise HTTPException(status_code=400, detail="Range must not exceed 90 days")
+
+    addr = address.lower()
+    start_iso = datetime.fromtimestamp(start, tz=timezone.utc).isoformat()
+    end_iso = datetime.fromtimestamp(end, tz=timezone.utc).isoformat()
+
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select(
+                "id,user_address,collateral_usd,net_premium,premium,"
+                "is_put,asset,indexed_at,expiry,is_itm,settled_at"
+            )
+            .eq("user_address", addr)
+            .gte("indexed_at", start_iso)
+            .lte("indexed_at", end_iso)
+            .limit(10000)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to fetch leaderboard/me data for %s", addr)
+        raise HTTPException(status_code=502, detail="Could not fetch leaderboard data")
+
+    if result.data is None:
+        logger.error("leaderboard/me DB query returned None for %s", addr)
+        raise HTTPException(status_code=502, detail="Could not fetch leaderboard data")
+
+    rows = result.data
+    if not rows:
+        return {
+            "wallet": addr,
+            "position_count": 0,
+            "total_collateral_usd": 0.0,
+            "total_earned_usd": 0.0,
+            "earning_rate": None,
+            "active_days": 0,
+            "wheel_count": 0,
+            "otm_streak": 0,
+            "qualifies": False,
+        }
+
+    try:
+        stats = _compute_wallet_stats(rows, start)
+    except Exception:
+        logger.exception("Failed to compute stats for wallet %s", addr)
+        raise HTTPException(status_code=502, detail="Could not compute wallet stats")
+
+    qualifies = (
+        stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+        and stats["active_days"] >= _MIN_ACTIVE_DAYS
+    )
+
+    return {
+        "wallet": addr,
+        "position_count": stats["position_count"],
+        "total_collateral_usd": round(stats["total_collateral_usd"], 2),
+        "total_earned_usd": round(stats["adjusted_premium"], 6),
+        "earning_rate": stats["earning_rate"],
+        "active_days": stats["active_days"],
+        "wheel_count": stats["wheel_count"],
+        "otm_streak": stats["otm_streak"],
+        "qualifies": qualifies,
     }
