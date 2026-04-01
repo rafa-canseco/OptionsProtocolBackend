@@ -65,9 +65,9 @@ def _make_pos(
 
 
 def _make_qualifying_rows(user_address="0xaaaa", n=10, **overrides) -> list[dict]:
-    """Return n rows that together qualify (>= $500 collateral, >= 8 active days).
+    """Return n rows that together qualify (>= $500 collateral).
 
-    Each row is indexed on a different day to guarantee 8+ active days.
+    Each row is indexed on a different day.
     """
     days = [
         _DAY0,
@@ -145,7 +145,10 @@ def test_qualifying_filter_collateral():
 
 
 def test_qualifying_filter_active_days():
-    """Wallet with < 8 active days appears with rank=null and qualified=False."""
+    """Active days no longer factor into qualification — only collateral matters.
+
+    A wallet with $600 collateral and few active days still qualifies.
+    """
     short_expiry = int(datetime(2026, 4, 2, 0, 0, 0, tzinfo=timezone.utc).timestamp())
     rows = [
         _make_pos(
@@ -156,7 +159,7 @@ def test_qualifying_filter_active_days():
         )
         for _ in range(10)
     ]
-    # Total collateral: 600 — passes collateral filter but only ~3 active days
+    # Total collateral: 600 — qualifies on collateral alone
 
     with _mock_db(rows):
         resp = client.get("/leaderboard")
@@ -164,11 +167,10 @@ def test_qualifying_filter_active_days():
     assert resp.status_code == 200
     data = resp.json()
     assert data["meta"]["total_participants"] == 1
-    assert data["meta"]["qualified_participants"] == 0
+    assert data["meta"]["qualified_participants"] == 1
     entry = data["track1"][0]
-    assert entry["rank"] is None
-    assert entry["qualified"] is False
-    assert entry["progress"]["days_pct"] < 1.0
+    assert entry["rank"] == 1
+    assert entry["qualified"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +226,7 @@ def test_wheel_detection_applies_1_5x():
 
 def test_perfect_week_bonus():
     """Wallet with zero ITM in week 1 → OTM settled in week 1 get 1.5× premium."""
-    # 10 base rows (all OTM, no settled_at) ensure >= $500 collateral and >= 8 active days
+    # 10 base rows (all OTM, no settled_at) ensure >= $500 collateral
     rows = _make_qualifying_rows(
         user_address="0xperfect", n=10, is_itm=False, settled_at=None
     )
@@ -546,29 +548,25 @@ def test_boundary_collateral_exactly_500_qualifies():
     assert resp.json()["meta"]["total_participants"] == 1
 
 
-def test_boundary_active_days_exactly_8_qualifies():
-    """Wallet with exactly 8 active days qualifies."""
-    days_8 = [_DAY0, _DAY1, _DAY2, _DAY3, _DAY4, _DAY5, _DAY6, _DAY7]
-    rows = []
-    for i, day in enumerate(days_8):
-        dt = datetime.fromisoformat(day)
-        # Expiry at end of same day — covers exactly 1 day per position
-        day_end_ts = int(dt.replace(hour=23, minute=59, second=59).timestamp())
-        rows.append(
-            _make_pos(
-                user_address="0xdays8",
-                collateral_usd=100.0,  # 8 * 100 = 800, passes $500 filter
-                indexed_at=day,
-                expiry=day_end_ts,
-                pos_id=2000 + i,
-            )
+def test_single_position_qualifies_on_collateral_alone():
+    """A wallet with one position and $600 collateral qualifies — no days requirement."""
+    rows = [
+        _make_pos(
+            user_address="0xonepos",
+            collateral_usd=600.0,
+            indexed_at=_DAY0,
+            pos_id=2001,
         )
+    ]
 
     with _mock_db(rows):
         resp = client.get("/leaderboard")
 
     assert resp.status_code == 200
-    assert resp.json()["meta"]["total_participants"] == 1
+    data = resp.json()
+    assert data["meta"]["total_participants"] == 1
+    assert data["meta"]["qualified_participants"] == 1
+    assert data["track1"][0]["rank"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +656,7 @@ def test_qualified_wallet_has_rank_and_flag():
     assert entry["rank"] == 1
     assert entry["qualified"] is True
     assert entry["progress"]["collateral_pct"] == 1.0
-    assert entry["progress"]["days_pct"] == 1.0
+    assert entry["progress"]["collateral_pct"] == 1.0
 
 
 def test_mixed_qualified_and_non_qualified_ordering():

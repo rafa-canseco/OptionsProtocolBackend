@@ -24,7 +24,6 @@ _WEEK2_END = datetime(2026, 4, 12, 23, 59, 59, tzinfo=timezone.utc)
 
 _USDC_DECIMALS = 1_000_000
 _MIN_COLLATERAL_USD = 500.0
-_MIN_ACTIVE_DAYS = 8
 _BONUS_MULTIPLIER = 1.5
 _WHEEL_WINDOW_HOURS = 24
 _MAX_RANGE_SECS = 90 * 24 * 3600  # 90-day query cap
@@ -225,13 +224,11 @@ def _current_week() -> int:
 def _qualification(stats: dict) -> dict:
     """Return qualified flag and progress fields for a wallet."""
     collateral = stats["total_collateral_usd"]
-    days = stats["active_days"]
-    qualified = collateral >= _MIN_COLLATERAL_USD and days >= _MIN_ACTIVE_DAYS
+    qualified = collateral >= _MIN_COLLATERAL_USD
     return {
         "qualified": qualified,
         "progress": {
             "collateral_pct": round(min(collateral / _MIN_COLLATERAL_USD, 1.0), 4),
-            "days_pct": round(min(days / _MIN_ACTIVE_DAYS, 1.0), 4),
         },
     }
 
@@ -246,15 +243,11 @@ def _build_track1(wallet_stats: dict[str, dict]) -> list[dict]:
         (addr, stats)
         for addr, stats in wallet_stats.items()
         if stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-        and stats["active_days"] >= _MIN_ACTIVE_DAYS
     ]
     non_qualified = [
         (addr, stats)
         for addr, stats in wallet_stats.items()
-        if not (
-            stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-            and stats["active_days"] >= _MIN_ACTIVE_DAYS
-        )
+        if not (stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD)
     ]
 
     def _sort_key(kv: tuple) -> tuple:
@@ -305,15 +298,11 @@ def _build_track2(wallet_stats: dict[str, dict]) -> list[dict]:
         (addr, stats)
         for addr, stats in wallet_stats.items()
         if stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-        and stats["active_days"] >= _MIN_ACTIVE_DAYS
     ]
     non_qualified = [
         (addr, stats)
         for addr, stats in wallet_stats.items()
-        if not (
-            stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-            and stats["active_days"] >= _MIN_ACTIVE_DAYS
-        )
+        if not (stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD)
     ]
 
     def _sort_key(kv: tuple) -> tuple:
@@ -411,7 +400,6 @@ async def get_leaderboard(
         1
         for s in wallet_stats.values()
         if s["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-        and s["active_days"] >= _MIN_ACTIVE_DAYS
     )
     total_volume_usd = round(
         sum(s["total_collateral_usd"] for s in wallet_stats.values()), 2
@@ -500,10 +488,7 @@ async def get_leaderboard_me(
         logger.exception("Failed to compute stats for wallet %s", addr)
         raise HTTPException(status_code=502, detail="Could not compute wallet stats")
 
-    qualifies = (
-        stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-        and stats["active_days"] >= _MIN_ACTIVE_DAYS
-    )
+    qualifies = stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
 
     return {
         "wallet": addr,
