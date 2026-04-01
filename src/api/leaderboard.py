@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Competition defaults: 2026-03-30 00:00 UTC → 2026-04-12 23:59:59 UTC
-_DEFAULT_START = 1743292800
-_DEFAULT_END = 1744502399
+_DEFAULT_START = 1774828800
+_DEFAULT_END = 1776038399
 
 # Fixed week boundaries
 _WEEK1_START = datetime(2026, 3, 30, 0, 0, 0, tzinfo=timezone.utc)

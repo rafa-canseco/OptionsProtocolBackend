@@ -13,8 +13,8 @@ client = TestClient(app)
 _id_counter = count(1)
 
 # Competition window timestamps
-_START = 1743292800  # 2026-03-30 00:00 UTC
-_END = 1744502399  # 2026-04-12 23:59:59 UTC
+_START = 1774828800  # 2026-03-30 00:00 UTC
+_END = 1776038399  # 2026-04-12 23:59:59 UTC
 
 # Enough collateral for one wallet to qualify on its own (>= $500)
 _QUAL_COLLATERAL = 55.0  # 10 positions * 55 = 550
