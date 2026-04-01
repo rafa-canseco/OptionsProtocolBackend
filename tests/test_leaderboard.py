@@ -104,6 +104,15 @@ def _mock_db(rows: list[dict]):
     return patch("src.api.leaderboard.get_client", return_value=mock_client)
 
 
+def _mock_db_me(rows: list[dict]):
+    """Mock for /leaderboard/me — chain includes .eq() before .gte()."""
+    mock_client = MagicMock()
+    chain = mock_client.table.return_value.select.return_value
+    chain = chain.eq.return_value.gte.return_value.lte.return_value.limit.return_value
+    chain.execute.return_value.data = rows
+    return patch("src.api.leaderboard.get_client", return_value=mock_client)
+
+
 # ---------------------------------------------------------------------------
 # Test 1: qualifying filter — collateral
 # ---------------------------------------------------------------------------
@@ -563,3 +572,64 @@ def test_start_gte_end_returns_400():
     """start >= end returns 400."""
     resp = client.get(f"/leaderboard?start={_END}&end={_START}")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# /leaderboard/me tests
+# ---------------------------------------------------------------------------
+
+_ME_ADDR = "0xaaaa000000000000000000000000000000000001"
+
+
+def test_leaderboard_me_no_positions():
+    """Wallet with no positions returns zero stats and qualifies=False."""
+    with _mock_db_me([]):
+        resp = client.get(f"/leaderboard/me?address={_ME_ADDR}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["wallet"] == _ME_ADDR
+    assert data["position_count"] == 0
+    assert data["qualifies"] is False
+    assert data["earning_rate"] is None
+
+
+def test_leaderboard_me_below_threshold_returns_stats():
+    """Wallet below $500 threshold still gets stats, qualifies=False."""
+    rows = [
+        _make_pos(user_address=_ME_ADDR, collateral_usd=49.0, pos_id=3001),
+        _make_pos(user_address=_ME_ADDR, collateral_usd=49.0, pos_id=3002),
+    ]
+    with _mock_db_me(rows):
+        resp = client.get(f"/leaderboard/me?address={_ME_ADDR}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_collateral_usd"] == 98.0
+    assert data["qualifies"] is False
+    assert data["earning_rate"] is not None
+
+
+def test_leaderboard_me_qualifying_wallet():
+    """Qualifying wallet gets qualifies=True."""
+    rows = _make_qualifying_rows(user_address=_ME_ADDR, n=10)
+    with _mock_db_me(rows):
+        resp = client.get(f"/leaderboard/me?address={_ME_ADDR}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["qualifies"] is True
+    assert data["position_count"] == 10
+    assert "earning_rate" in data
+    assert "active_days" in data
+    assert "wheel_count" in data
+    assert "otm_streak" in data
+
+
+def test_leaderboard_me_invalid_address():
+    """Invalid address returns 400."""
+    resp = client.get("/leaderboard/me?address=0xnotvalid")
+    assert resp.status_code == 400
+
+
+def test_leaderboard_me_missing_address():
+    """Missing address param returns 422."""
+    resp = client.get("/leaderboard/me")
+    assert resp.status_code == 422
