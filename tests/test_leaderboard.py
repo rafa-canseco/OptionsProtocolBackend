@@ -119,7 +119,7 @@ def _mock_db_me(rows: list[dict]):
 
 
 def test_qualifying_filter_collateral():
-    """Wallet with total collateral_usd < 500 must not appear in leaderboard."""
+    """Wallet below $500 collateral appears with rank=null and qualified=False."""
     rows = _make_qualifying_rows(user_address="0xlow", n=10)
     # Override collateral so total is only 490 (49 * 10)
     for r in rows:
@@ -130,9 +130,13 @@ def test_qualifying_filter_collateral():
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["meta"]["total_participants"] == 0
-    assert data["track1"] == []
-    assert data["track2"] == []
+    assert data["meta"]["total_participants"] == 1
+    assert data["meta"]["qualified_participants"] == 0
+    assert len(data["track1"]) == 1
+    entry = data["track1"][0]
+    assert entry["rank"] is None
+    assert entry["qualified"] is False
+    assert entry["progress"]["collateral_pct"] < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +145,7 @@ def test_qualifying_filter_collateral():
 
 
 def test_qualifying_filter_active_days():
-    """Wallet with < 8 active days must not appear in leaderboard."""
-    # All 10 rows on the same day → 1 active day (with far expiry: multiple days
-    # but we need < 8). Use an expiry that ends before day 8.
+    """Wallet with < 8 active days appears with rank=null and qualified=False."""
     short_expiry = int(datetime(2026, 4, 2, 0, 0, 0, tzinfo=timezone.utc).timestamp())
     rows = [
         _make_pos(
@@ -161,7 +163,12 @@ def test_qualifying_filter_active_days():
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["meta"]["total_participants"] == 0
+    assert data["meta"]["total_participants"] == 1
+    assert data["meta"]["qualified_participants"] == 0
+    entry = data["track1"][0]
+    assert entry["rank"] is None
+    assert entry["qualified"] is False
+    assert entry["progress"]["days_pct"] < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +415,7 @@ def test_metadata_fields():
     assert "competition_start" in meta
     assert "competition_end" in meta
     assert "total_participants" in meta
+    assert "qualified_participants" in meta
     assert "total_volume_usd" in meta
     assert "current_week" in meta
     assert meta["competition_start"] == _START
@@ -633,3 +641,54 @@ def test_leaderboard_me_missing_address():
     """Missing address param returns 422."""
     resp = client.get("/leaderboard/me")
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# B1N-265: qualified flag, progress, rank=null for non-qualified
+# ---------------------------------------------------------------------------
+
+
+def test_qualified_wallet_has_rank_and_flag():
+    """Qualifying wallet gets rank=1, qualified=True, progress=1.0."""
+    rows = _make_qualifying_rows(user_address="0xqual", n=10)
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+    assert resp.status_code == 200
+    entry = resp.json()["track1"][0]
+    assert entry["rank"] == 1
+    assert entry["qualified"] is True
+    assert entry["progress"]["collateral_pct"] == 1.0
+    assert entry["progress"]["days_pct"] == 1.0
+
+
+def test_mixed_qualified_and_non_qualified_ordering():
+    """Qualified wallet ranked first (rank=1), non-qualified wallet has rank=null after."""
+    qual_rows = _make_qualifying_rows(user_address="0xqual2", n=10)
+    non_qual_rows = [
+        _make_pos(user_address="0xnonqual", collateral_usd=49.0, pos_id=9900 + i)
+        for i in range(3)
+    ]
+    with _mock_db(qual_rows + non_qual_rows):
+        resp = client.get("/leaderboard")
+    assert resp.status_code == 200
+    track1 = resp.json()["track1"]
+    assert len(track1) == 2
+    assert track1[0]["wallet"] == "0xqual2"
+    assert track1[0]["rank"] == 1
+    assert track1[0]["qualified"] is True
+    assert track1[1]["wallet"] == "0xnonqual"
+    assert track1[1]["rank"] is None
+    assert track1[1]["qualified"] is False
+
+
+def test_progress_values_capped_at_1():
+    """Progress fields are capped at 1.0 for qualifying wallets."""
+    rows = _make_qualifying_rows(user_address="0xcapped", n=10)
+    # Double the collateral so collateral_pct would be >1 without cap
+    for r in rows:
+        r["collateral_usd"] = 200.0
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+    assert resp.status_code == 200
+    entry = resp.json()["track1"][0]
+    assert entry["progress"]["collateral_pct"] == 1.0
