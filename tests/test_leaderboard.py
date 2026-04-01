@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from itertools import count
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from src.main import app
@@ -99,9 +98,9 @@ def _make_qualifying_rows(user_address="0xaaaa", n=10, **overrides) -> list[dict
 def _mock_db(rows: list[dict]):
     """Return a context manager that patches get_client with the given rows."""
     mock_client = MagicMock()
-    (
-        mock_client.table.return_value.select.return_value.gte.return_value.lte.return_value.execute.return_value.data
-    ) = rows
+    chain = mock_client.table.return_value.select.return_value
+    chain = chain.gte.return_value.lte.return_value.limit.return_value
+    chain.execute.return_value.data = rows
     return patch("src.api.leaderboard.get_client", return_value=mock_client)
 
 
@@ -203,7 +202,7 @@ def test_wheel_detection_applies_1_5x():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Perfect Week bonus
+# Test 4: Perfect Week bonus — week 1
 # ---------------------------------------------------------------------------
 
 
@@ -407,3 +406,160 @@ def test_metadata_fields():
     assert meta["total_participants"] == 1
     assert isinstance(meta["total_volume_usd"], float)
     assert meta["current_week"] in (1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Perfect Week — week 2
+# ---------------------------------------------------------------------------
+
+
+def test_perfect_week_week2_bonus():
+    """Zero ITM in week 2 → OTM positions settled in week 2 get 1.5× premium."""
+    rows = _make_qualifying_rows(
+        user_address="0xpw2", n=10, is_itm=False, settled_at=None
+    )
+
+    week2_pos = _make_pos(
+        user_address="0xpw2",
+        is_itm=False,
+        settled_at="2026-04-09T12:00:00+00:00",  # week 2
+        indexed_at=_DAY7,
+        pos_id=6001,
+        net_premium="100000",  # 0.10 USDC
+    )
+    rows.append(week2_pos)
+
+    total_col = _QUAL_COLLATERAL * 11
+    plain_premium = 10 * 0.05
+    bonus_premium = 0.10 * 1.5
+    expected_rate = round((plain_premium + bonus_premium) / total_col, 6)
+
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 200
+    entry = resp.json()["track1"][0]
+    assert abs(entry["earning_rate"] - expected_rate) < 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Cross-asset wheel rejected
+# ---------------------------------------------------------------------------
+
+
+def test_cross_asset_wheel_rejected():
+    """ETH ITM PUT + BTC CALL do not form a wheel pair (different assets)."""
+    base_rows = _make_qualifying_rows(user_address="0xcross", n=8, is_itm=False)
+
+    itm_eth = _make_pos(
+        user_address="0xcross",
+        is_put=True,
+        is_itm=True,
+        asset="eth",
+        settled_at="2026-04-01T10:00:00+00:00",
+        indexed_at=_DAY2,
+        pos_id=4001,
+    )
+    follow_btc = _make_pos(
+        user_address="0xcross",
+        is_put=False,
+        is_itm=False,
+        asset="btc",  # different asset — must not pair
+        indexed_at="2026-04-01T15:00:00+00:00",
+        settled_at=None,
+        pos_id=4002,
+    )
+
+    rows = base_rows + [itm_eth, follow_btc]
+
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 200
+    entry = resp.json()["track1"][0]
+    assert entry["wheel_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 11: DB error → 502
+# ---------------------------------------------------------------------------
+
+
+def test_db_exception_returns_502():
+    """Database connection failure returns 502."""
+    mock_client = MagicMock()
+    chain = mock_client.table.return_value.select.return_value
+    chain = chain.gte.return_value.lte.return_value.limit.return_value
+    chain.execute.side_effect = Exception("DB down")
+
+    with patch("src.api.leaderboard.get_client", return_value=mock_client):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 502
+
+
+def test_db_none_data_returns_502():
+    """When DB returns result.data=None, endpoint returns 502."""
+    mock_client = MagicMock()
+    chain = mock_client.table.return_value.select.return_value
+    chain = chain.gte.return_value.lte.return_value.limit.return_value
+    chain.execute.return_value.data = None
+
+    with patch("src.api.leaderboard.get_client", return_value=mock_client):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Boundary values
+# ---------------------------------------------------------------------------
+
+
+def test_boundary_collateral_exactly_500_qualifies():
+    """Wallet at exactly $500.00 total collateral qualifies."""
+    rows = _make_qualifying_rows(user_address="0xboundary500", n=10)
+    for r in rows:
+        r["collateral_usd"] = 50.0  # 10 * 50 = 500.00 exactly
+
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 200
+    assert resp.json()["meta"]["total_participants"] == 1
+
+
+def test_boundary_active_days_exactly_8_qualifies():
+    """Wallet with exactly 8 active days qualifies."""
+    days_8 = [_DAY0, _DAY1, _DAY2, _DAY3, _DAY4, _DAY5, _DAY6, _DAY7]
+    rows = []
+    for i, day in enumerate(days_8):
+        dt = datetime.fromisoformat(day)
+        # Expiry at end of same day — covers exactly 1 day per position
+        day_end_ts = int(dt.replace(hour=23, minute=59, second=59).timestamp())
+        rows.append(
+            _make_pos(
+                user_address="0xdays8",
+                collateral_usd=100.0,  # 8 * 100 = 800, passes $500 filter
+                indexed_at=day,
+                expiry=day_end_ts,
+                pos_id=2000 + i,
+            )
+        )
+
+    with _mock_db(rows):
+        resp = client.get("/leaderboard")
+
+    assert resp.status_code == 200
+    assert resp.json()["meta"]["total_participants"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 13: start >= end validation
+# ---------------------------------------------------------------------------
+
+
+def test_start_gte_end_returns_400():
+    """start >= end returns 400."""
+    resp = client.get(f"/leaderboard?start={_END}&end={_START}")
+    assert resp.status_code == 400

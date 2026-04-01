@@ -1,6 +1,5 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from itertools import count
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -25,6 +24,7 @@ _MIN_COLLATERAL_USD = 500.0
 _MIN_ACTIVE_DAYS = 8
 _BONUS_MULTIPLIER = 1.5
 _WHEEL_WINDOW_HOURS = 24
+_MAX_RANGE_SECS = 90 * 24 * 3600  # 90-day query cap
 
 
 def _parse_dt(ts: str | None) -> datetime | None:
@@ -40,7 +40,11 @@ def _parse_dt(ts: str | None) -> datetime | None:
 
 def _premium_human(row: dict) -> float:
     """Return net premium in USDC. Falls back to gross premium for old rows."""
-    raw = row.get("net_premium") or row.get("premium") or 0
+    raw = row.get("net_premium")
+    if raw is None:
+        raw = row.get("premium")
+    if raw is None:
+        return 0.0
     return int(raw) / _USDC_DECIMALS
 
 
@@ -62,7 +66,11 @@ def _compute_active_days(rows: list[dict], start: int) -> int:
             covered.add(indexed_day)
             continue
 
-        expiry_dt = datetime.fromtimestamp(int(expiry_ts), tz=timezone.utc)
+        try:
+            expiry_dt = datetime.fromtimestamp(int(expiry_ts), tz=timezone.utc)
+        except (ValueError, OSError):
+            covered.add(indexed_day)
+            continue
         expiry_date = expiry_dt.date()
 
         # Walk from indexed_day up to and including expiry_date, since
@@ -80,18 +88,17 @@ def _detect_wheels(rows: list[dict]) -> dict[str, bool]:
 
     A Wheel pair: one ITM settled position followed (within 24 h) by a
     same-asset, opposite-direction position. Each id can appear in at most
-    one pair.
+    one pair. Rows without an id are skipped.
     """
     wheel_ids: dict[str, bool] = {}
     itm_settled = [
         r for r in rows if r.get("is_itm") is True and r.get("settled_at") is not None
     ]
     used_ids: set = set()
-    _id_gen = count()
 
     for itm in itm_settled:
-        itm_id = itm.get("id", next(_id_gen))
-        if itm_id in used_ids:
+        itm_id = itm.get("id")
+        if itm_id is None or itm_id in used_ids:
             continue
         settled_dt = _parse_dt(itm.get("settled_at"))
         if settled_dt is None:
@@ -99,8 +106,8 @@ def _detect_wheels(rows: list[dict]) -> dict[str, bool]:
         window_end = settled_dt + timedelta(hours=_WHEEL_WINDOW_HOURS)
 
         for follow in rows:
-            follow_id = follow.get("id", next(_id_gen))
-            if follow_id in used_ids or follow_id == itm_id:
+            follow_id = follow.get("id")
+            if follow_id is None or follow_id in used_ids or follow_id == itm_id:
                 continue
             if follow.get("asset") != itm.get("asset"):
                 continue
@@ -182,7 +189,8 @@ def _compute_wallet_stats(rows: list[dict], start: int) -> dict:
 
     settled = [r for r in rows if r.get("settled_at") is not None]
     streak = max_streak = 0
-    for pos in sorted(settled, key=lambda r: r.get("settled_at") or ""):
+    _dt_min = datetime.min.replace(tzinfo=timezone.utc)
+    for pos in sorted(settled, key=lambda r: _parse_dt(r.get("settled_at")) or _dt_min):
         if pos.get("is_itm") is False:
             streak += 1
             max_streak = max(max_streak, streak)
@@ -206,6 +214,53 @@ def _current_week() -> int:
     return 1 if now < _WEEK2_START else 2
 
 
+def _build_track1(wallet_stats: dict[str, dict]) -> list[dict]:
+    """Build Track 1 (earning rate) rankings."""
+    ranked = sorted(
+        wallet_stats.items(),
+        key=lambda kv: (
+            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
+            kv[1]["total_collateral_usd"],
+        ),
+        reverse=True,
+    )
+    return [
+        {
+            "rank": idx + 1,
+            "wallet": addr,
+            "earning_rate": stats["earning_rate"],
+            "total_earned_usd": round(stats["adjusted_premium"], 6),
+            "total_collateral_usd": round(stats["total_collateral_usd"], 2),
+            "position_count": stats["position_count"],
+            "wheel_count": stats["wheel_count"],
+            "active_days": stats["active_days"],
+        }
+        for idx, (addr, stats) in enumerate(ranked)
+    ]
+
+
+def _build_track2(wallet_stats: dict[str, dict]) -> list[dict]:
+    """Build Track 2 (OTM streak) rankings."""
+    ranked = sorted(
+        wallet_stats.items(),
+        key=lambda kv: (
+            kv[1]["otm_streak"],
+            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
+        ),
+        reverse=True,
+    )
+    return [
+        {
+            "rank": idx + 1,
+            "wallet": addr,
+            "otm_streak": stats["otm_streak"],
+            "position_count": stats["position_count"],
+            "earning_rate": stats["earning_rate"],
+        }
+        for idx, (addr, stats) in enumerate(ranked)
+    ]
+
+
 @router.get(
     "/leaderboard", tags=["Leaderboard"], summary="Earnings Challenge leaderboard"
 )
@@ -219,6 +274,11 @@ async def get_leaderboard(
     Track 2 ranks by consecutive OTM streak. Only wallets with >= $500
     collateral and >= 8 active days qualify.
     """
+    if start >= end:
+        raise HTTPException(status_code=400, detail="start must be before end")
+    if end - start > _MAX_RANGE_SECS:
+        raise HTTPException(status_code=400, detail="Range must not exceed 90 days")
+
     start_iso = datetime.fromtimestamp(start, tz=timezone.utc).isoformat()
     end_iso = datetime.fromtimestamp(end, tz=timezone.utc).isoformat()
 
@@ -232,73 +292,36 @@ async def get_leaderboard(
             )
             .gte("indexed_at", start_iso)
             .lte("indexed_at", end_iso)
+            .limit(10000)
             .execute()
         )
     except Exception:
         logger.exception("Failed to fetch leaderboard data")
         raise HTTPException(status_code=502, detail="Could not fetch leaderboard data")
 
-    rows = result.data or []
+    if result.data is None:
+        logger.error("Leaderboard DB query returned None")
+        raise HTTPException(status_code=502, detail="Could not fetch leaderboard data")
+    rows = result.data
 
-    # Group by wallet
     by_wallet: dict[str, list[dict]] = {}
     for row in rows:
         addr = (row.get("user_address") or "").lower()
         if addr:
             by_wallet.setdefault(addr, []).append(row)
 
-    # Compute stats and filter qualifying wallets
     wallet_stats: dict[str, dict] = {}
     for addr, wallet_rows in by_wallet.items():
-        stats = _compute_wallet_stats(wallet_rows, start)
+        try:
+            stats = _compute_wallet_stats(wallet_rows, start)
+        except Exception:
+            logger.exception("Failed to compute stats for wallet %s", addr)
+            continue
         if (
             stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
             and stats["active_days"] >= _MIN_ACTIVE_DAYS
         ):
             wallet_stats[addr] = stats
-
-    # Track 1: rank by earning_rate desc, tiebreak total_collateral_usd desc
-    track1_sorted = sorted(
-        wallet_stats.items(),
-        key=lambda kv: (
-            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
-            kv[1]["total_collateral_usd"],
-        ),
-        reverse=True,
-    )
-    track1 = [
-        {
-            "rank": idx + 1,
-            "wallet": addr,
-            "earning_rate": stats["earning_rate"],
-            "total_earned_usd": round(stats["adjusted_premium"], 6),
-            "total_collateral_usd": round(stats["total_collateral_usd"], 2),
-            "position_count": stats["position_count"],
-            "wheel_count": stats["wheel_count"],
-            "active_days": stats["active_days"],
-        }
-        for idx, (addr, stats) in enumerate(track1_sorted)
-    ]
-
-    # Track 2: rank by otm_streak desc, tiebreak earning_rate desc
-    track2_sorted = sorted(
-        wallet_stats.items(),
-        key=lambda kv: (
-            kv[1]["otm_streak"],
-            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
-        ),
-        reverse=True,
-    )
-    track2 = [
-        {
-            "rank": idx + 1,
-            "wallet": addr,
-            "otm_streak": stats["otm_streak"],
-            "position_count": stats["position_count"],
-            "earning_rate": stats["earning_rate"],
-        }
-        for idx, (addr, stats) in enumerate(track2_sorted)
-    ]
 
     total_volume_usd = round(
         sum(s["total_collateral_usd"] for s in wallet_stats.values()), 2
@@ -311,4 +334,8 @@ async def get_leaderboard(
         "current_week": _current_week(),
     }
 
-    return {"track1": track1, "track2": track2, "meta": meta}
+    return {
+        "track1": _build_track1(wallet_stats),
+        "track2": _build_track2(wallet_stats),
+        "meta": meta,
+    }
