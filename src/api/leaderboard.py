@@ -87,11 +87,16 @@ def _compute_active_days(rows: list[dict], start: int) -> int:
 
 
 def _detect_wheels(rows: list[dict]) -> dict[str, bool]:
-    """Detect Wheel pairs and return a set of position ids with wheel_bonus.
+    """Detect completed Wheel cycles and return position ids that earn the bonus.
 
-    A Wheel pair: one ITM settled position followed (within 24 h) by a
-    same-asset, opposite-direction position. Each id can appear in at most
-    one pair. Rows without an id are skipped.
+    A Wheel cycle requires both assignments to complete:
+      1. A position expires ITM (assigned) — leg 1.
+      2. The wallet opens the opposite side (same asset, flipped is_put) within
+         24 h of leg 1's settled_at — leg 2.
+      3. Leg 2 also expires ITM (assigned again).
+
+    Both legs receive the 1.5x premium bonus. Each position id can appear in
+    at most one cycle.
     """
     wheel_ids: dict[str, bool] = {}
     itm_settled = [
@@ -108,7 +113,7 @@ def _detect_wheels(rows: list[dict]) -> dict[str, bool]:
             continue
         window_end = settled_dt + timedelta(hours=_WHEEL_WINDOW_HOURS)
 
-        for follow in rows:
+        for follow in itm_settled:  # follow must also be ITM settled
             follow_id = follow.get("id")
             if follow_id is None or follow_id in used_ids or follow_id == itm_id:
                 continue
