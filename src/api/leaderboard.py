@@ -217,51 +217,131 @@ def _current_week() -> int:
     return 1 if now < _WEEK2_START else 2
 
 
+def _qualification(stats: dict) -> dict:
+    """Return qualified flag and progress fields for a wallet."""
+    collateral = stats["total_collateral_usd"]
+    days = stats["active_days"]
+    qualified = collateral >= _MIN_COLLATERAL_USD and days >= _MIN_ACTIVE_DAYS
+    return {
+        "qualified": qualified,
+        "progress": {
+            "collateral_pct": round(min(collateral / _MIN_COLLATERAL_USD, 1.0), 4),
+            "days_pct": round(min(days / _MIN_ACTIVE_DAYS, 1.0), 4),
+        },
+    }
+
+
 def _build_track1(wallet_stats: dict[str, dict]) -> list[dict]:
-    """Build Track 1 (earning rate) rankings."""
-    ranked = sorted(
-        wallet_stats.items(),
-        key=lambda kv: (
-            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
-            kv[1]["total_collateral_usd"],
-        ),
-        reverse=True,
-    )
-    return [
-        {
-            "rank": idx + 1,
-            "wallet": addr,
-            "earning_rate": stats["earning_rate"],
-            "total_earned_usd": round(stats["adjusted_premium"], 6),
-            "total_collateral_usd": round(stats["total_collateral_usd"], 2),
-            "position_count": stats["position_count"],
-            "wheel_count": stats["wheel_count"],
-            "active_days": stats["active_days"],
-        }
-        for idx, (addr, stats) in enumerate(ranked)
+    """Build Track 1 (earning rate) rankings.
+
+    Qualified wallets are ranked 1, 2, 3… Non-qualified wallets have rank=null
+    and appear after qualified ones, sorted by earning_rate desc.
+    """
+    qualified = [
+        (addr, stats)
+        for addr, stats in wallet_stats.items()
+        if stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+        and stats["active_days"] >= _MIN_ACTIVE_DAYS
     ]
+    non_qualified = [
+        (addr, stats)
+        for addr, stats in wallet_stats.items()
+        if not (
+            stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+            and stats["active_days"] >= _MIN_ACTIVE_DAYS
+        )
+    ]
+
+    def _sort_key(kv: tuple) -> tuple:
+        er = kv[1]["earning_rate"]
+        return (er if er is not None else -1, kv[1]["total_collateral_usd"])
+
+    qualified_sorted = sorted(qualified, key=_sort_key, reverse=True)
+    non_qualified_sorted = sorted(non_qualified, key=_sort_key, reverse=True)
+
+    result = []
+    for idx, (addr, stats) in enumerate(qualified_sorted):
+        result.append(
+            {
+                "rank": idx + 1,
+                "wallet": addr,
+                "earning_rate": stats["earning_rate"],
+                "total_earned_usd": round(stats["adjusted_premium"], 6),
+                "total_collateral_usd": round(stats["total_collateral_usd"], 2),
+                "position_count": stats["position_count"],
+                "wheel_count": stats["wheel_count"],
+                "active_days": stats["active_days"],
+                **_qualification(stats),
+            }
+        )
+    for addr, stats in non_qualified_sorted:
+        result.append(
+            {
+                "rank": None,
+                "wallet": addr,
+                "earning_rate": stats["earning_rate"],
+                "total_earned_usd": round(stats["adjusted_premium"], 6),
+                "total_collateral_usd": round(stats["total_collateral_usd"], 2),
+                "position_count": stats["position_count"],
+                "wheel_count": stats["wheel_count"],
+                "active_days": stats["active_days"],
+                **_qualification(stats),
+            }
+        )
+    return result
 
 
 def _build_track2(wallet_stats: dict[str, dict]) -> list[dict]:
-    """Build Track 2 (OTM streak) rankings."""
-    ranked = sorted(
-        wallet_stats.items(),
-        key=lambda kv: (
-            kv[1]["otm_streak"],
-            kv[1]["earning_rate"] if kv[1]["earning_rate"] is not None else -1,
-        ),
-        reverse=True,
-    )
-    return [
-        {
-            "rank": idx + 1,
-            "wallet": addr,
-            "otm_streak": stats["otm_streak"],
-            "position_count": stats["position_count"],
-            "earning_rate": stats["earning_rate"],
-        }
-        for idx, (addr, stats) in enumerate(ranked)
+    """Build Track 2 (OTM streak) rankings.
+
+    Qualified wallets are ranked 1, 2, 3… Non-qualified wallets have rank=null.
+    """
+    qualified = [
+        (addr, stats)
+        for addr, stats in wallet_stats.items()
+        if stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+        and stats["active_days"] >= _MIN_ACTIVE_DAYS
     ]
+    non_qualified = [
+        (addr, stats)
+        for addr, stats in wallet_stats.items()
+        if not (
+            stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+            and stats["active_days"] >= _MIN_ACTIVE_DAYS
+        )
+    ]
+
+    def _sort_key(kv: tuple) -> tuple:
+        er = kv[1]["earning_rate"]
+        return (kv[1]["otm_streak"], er if er is not None else -1)
+
+    qualified_sorted = sorted(qualified, key=_sort_key, reverse=True)
+    non_qualified_sorted = sorted(non_qualified, key=_sort_key, reverse=True)
+
+    result = []
+    for idx, (addr, stats) in enumerate(qualified_sorted):
+        result.append(
+            {
+                "rank": idx + 1,
+                "wallet": addr,
+                "otm_streak": stats["otm_streak"],
+                "position_count": stats["position_count"],
+                "earning_rate": stats["earning_rate"],
+                **_qualification(stats),
+            }
+        )
+    for addr, stats in non_qualified_sorted:
+        result.append(
+            {
+                "rank": None,
+                "wallet": addr,
+                "otm_streak": stats["otm_streak"],
+                "position_count": stats["position_count"],
+                "earning_rate": stats["earning_rate"],
+                **_qualification(stats),
+            }
+        )
+    return result
 
 
 @router.get(
@@ -320,12 +400,14 @@ async def get_leaderboard(
         except Exception:
             logger.exception("Failed to compute stats for wallet %s", addr)
             continue
-        if (
-            stats["total_collateral_usd"] >= _MIN_COLLATERAL_USD
-            and stats["active_days"] >= _MIN_ACTIVE_DAYS
-        ):
-            wallet_stats[addr] = stats
+        wallet_stats[addr] = stats
 
+    qualified_count = sum(
+        1
+        for s in wallet_stats.values()
+        if s["total_collateral_usd"] >= _MIN_COLLATERAL_USD
+        and s["active_days"] >= _MIN_ACTIVE_DAYS
+    )
     total_volume_usd = round(
         sum(s["total_collateral_usd"] for s in wallet_stats.values()), 2
     )
@@ -333,6 +415,7 @@ async def get_leaderboard(
         "competition_start": start,
         "competition_end": end,
         "total_participants": len(wallet_stats),
+        "qualified_participants": qualified_count,
         "total_volume_usd": total_volume_usd,
         "current_week": _current_week(),
     }
