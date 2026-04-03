@@ -54,7 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_yield_allocations_distribution
 CREATE INDEX IF NOT EXISTS idx_yield_allocations_pending
     ON yield_allocations (status) WHERE status = 'pending';
 
--- Yield indexer state (id=2, separate from event indexer id=1)
-INSERT INTO indexer_state (id, last_indexed_block)
-VALUES (2, 0)
+-- Separate state table for yield indexer (indexer_state has CHECK id=1)
+CREATE TABLE IF NOT EXISTS yield_indexer_state (
+    id int PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    last_indexed_block bigint NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO yield_indexer_state (id, last_indexed_block)
+VALUES (1, 0)
 ON CONFLICT (id) DO NOTHING;

@@ -29,7 +29,7 @@ CONFIRMATION_BLOCKS = 2
 RESCAN_BLOCKS = 50
 MAX_RECONNECT_DELAY = 60
 
-_INDEXER_STATE_ID = 2  # separate from event_indexer (id=1)
+_YIELD_STATE_TABLE = "yield_indexer_state"
 
 _COLLATERAL_DEPOSITED_TOPIC = Web3.keccak(
     text="CollateralDeposited(address,uint256,address,uint256)"
@@ -41,9 +41,9 @@ _YIELD_HARVESTED_TOPIC = Web3.keccak(text="YieldHarvested(address,address,uint25
 def _get_last_indexed_block() -> int:
     client = get_client()
     result = (
-        client.table("indexer_state")
+        client.table(_YIELD_STATE_TABLE)
         .select("last_indexed_block")
-        .eq("id", _INDEXER_STATE_ID)
+        .eq("id", 1)
         .execute()
     )
     if result.data:
@@ -53,8 +53,8 @@ def _get_last_indexed_block() -> int:
 
 def _set_last_indexed_block(block: int) -> None:
     client = get_client()
-    client.table("indexer_state").upsert(
-        {"id": _INDEXER_STATE_ID, "last_indexed_block": block}
+    client.table(_YIELD_STATE_TABLE).upsert(
+        {"id": 1, "last_indexed_block": block}
     ).execute()
 
 
