@@ -23,12 +23,15 @@ def calculate_allocations(
     period_start: datetime,
     period_end: datetime,
     asset: str,
-    total_yield: int,
-) -> list[dict]:
+    distributable: int,
+) -> tuple[list[dict], int]:
     """Calculate time-weighted pro-rata yield allocations for a period.
 
-    Returns a list of allocation dicts ready for DB insert.
-    The 4% protocol fee is deducted before distribution.
+    Args:
+        distributable: Post-fee amount to distribute to users.
+
+    Returns:
+        (allocations, dust) where dust is the rounding remainder.
     """
     client = get_client()
     result = (
@@ -75,17 +78,14 @@ def calculate_allocations(
         logger.warning("Total weight is zero for asset=%s", asset)
         return [], 0
 
-    # Deduct platform fee
-    fee_bps = settings.protocol_fee_bps
-    platform_fee = total_yield * fee_bps // 10_000
-    distributable = total_yield - platform_fee
-
     allocations = []
+    allocated_total = 0
     for pos, weight in weights:
         share = weight / total_weight
         amount = int(distributable * share)
         if amount == 0:
             continue
+        allocated_total += amount
         allocations.append(
             {
                 "distribution_id": distribution_id,
@@ -97,7 +97,16 @@ def calculate_allocations(
             }
         )
 
-    return allocations, platform_fee
+    # Assign rounding dust to largest allocation
+    dust = distributable - allocated_total
+    if dust > 0 and allocations:
+        allocations[0]["amount"] += dust
+        allocated_total += dust
+
+    if dust > 0:
+        logger.info("Assigned %d dust to largest allocation for %s", dust, asset)
+
+    return allocations, dust
 
 
 def save_allocations(allocations: list[dict]) -> int:
@@ -116,11 +125,10 @@ def estimate_pending_yield(
     period_start: datetime,
     period_end: datetime,
     total_accrued: int,
-) -> float:
+) -> int:
     """Estimate a user's share of currently accrued (unharvested) yield.
 
-    Returns the estimated yield amount as a raw integer.
-    Used by the API to show real-time estimated yield.
+    Returns the estimated yield amount as a raw integer (post-fee).
     """
     client = get_client()
     result = (

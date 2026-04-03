@@ -37,6 +37,7 @@ async def main(bot_name: str):
             expiry_settler,
             circuit_breaker_bot,
             weekly_aggregator,
+            yield_indexer,
         )
 
         await asyncio.gather(
@@ -45,6 +46,7 @@ async def main(bot_name: str):
             expiry_settler.run(),
             circuit_breaker_bot.run(),
             weekly_aggregator.run(),
+            yield_indexer.run(),
         )
     elif bot_name in BOTS:
         import importlib

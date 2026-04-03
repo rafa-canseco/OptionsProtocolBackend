@@ -37,9 +37,6 @@ _COLLATERAL_DEPOSITED_TOPIC = Web3.keccak(
 _VAULT_SETTLED_TOPIC = Web3.keccak(text="VaultSettled(address,uint256,uint256)")
 _YIELD_HARVESTED_TOPIC = Web3.keccak(text="YieldHarvested(address,address,uint256)")
 
-# Aave was enabled on-chain 2026-04-02. Skip blocks before this.
-_AAVE_ENABLE_TIMESTAMP = datetime(2026, 4, 2, 0, 0, 0, tzinfo=timezone.utc)
-
 
 def _get_last_indexed_block() -> int:
     client = get_client()
@@ -76,6 +73,7 @@ def _asset_address_to_symbol(addr: str) -> str:
         return "eth"
     if normalized == settings.wbtc_address.lower():
         return "btc"
+    logger.warning("Unknown asset address %s — storing raw address", addr)
     return normalized
 
 
@@ -327,8 +325,11 @@ async def run() -> None:
         logger.info("No WSS URL configured, yield indexer running in poll mode")
         while True:
             await asyncio.sleep(settings.event_poll_interval_seconds)
-            new_block = w3.eth.block_number - CONFIRMATION_BLOCKS
-            if new_block > current_block:
-                _fetch_and_process_logs(current_block + 1, new_block)
-                _set_last_indexed_block(new_block)
-                current_block = new_block
+            try:
+                new_block = w3.eth.block_number - CONFIRMATION_BLOCKS
+                if new_block > current_block:
+                    _fetch_and_process_logs(current_block + 1, new_block)
+                    _set_last_indexed_block(new_block)
+                    current_block = new_block
+            except Exception:
+                logger.exception("Yield poll cycle failed, retrying next interval")

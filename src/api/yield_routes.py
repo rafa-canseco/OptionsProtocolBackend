@@ -2,7 +2,6 @@
 
 import logging
 import re
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 from web3 import Web3
@@ -16,8 +15,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-
-_AAVE_ENABLE = datetime(2026, 4, 2, 0, 0, 0, tzinfo=timezone.utc)
 
 _ASSET_ADDRESSES = {
     "usdc": settings.usdc_address,
@@ -202,7 +199,8 @@ async def get_yield_stats():
             accrued = pool.functions.getAccruedYield(checksum).call()
             accrued_by_asset[asset_symbol] = accrued
         except Exception:
-            accrued_by_asset[asset_symbol] = 0
+            logger.exception("Failed to read accrued yield for %s", asset_symbol)
+            accrued_by_asset[asset_symbol] = None
 
     assets = []
     for asset in _ASSET_ADDRESSES:
