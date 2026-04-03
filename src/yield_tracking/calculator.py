@@ -41,7 +41,7 @@ def calculate_allocations(
 
     if result.data is None:
         logger.error("yield_positions query returned None for asset=%s", asset)
-        return []
+        return [], 0
 
     # Filter: positions active during the period
     positions = []
@@ -53,7 +53,7 @@ def calculate_allocations(
 
     if not positions:
         logger.warning("No active positions for asset=%s in period", asset)
-        return []
+        return [], 0
 
     # Calculate time-weighted shares
     weights: list[tuple[dict, float]] = []
@@ -73,7 +73,7 @@ def calculate_allocations(
 
     if total_weight == 0:
         logger.warning("Total weight is zero for asset=%s", asset)
-        return []
+        return [], 0
 
     # Deduct platform fee
     fee_bps = settings.protocol_fee_bps
