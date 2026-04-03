@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # Protocol fee
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
+    treasury_address: str = "0x0744e5Abb82A0337B2F6ac65aC83D1e9861C9740"
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
     # e.g. "1773950400,1774123200". If empty, get_expiries() is used.

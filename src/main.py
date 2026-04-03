@@ -13,6 +13,7 @@ from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
 from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
+from src.api.yield_routes import router as yield_router
 from src.config import settings
 
 logging.basicConfig(
@@ -66,6 +67,13 @@ async def lifespan(app: FastAPI):
         logger.info(
             "On-chain bots not started: contract addresses or operator key not configured"
         )
+
+    # Yield indexer needs controller + margin pool addresses
+    if settings.controller_address and settings.margin_pool_address:
+        from src.bots import yield_indexer
+
+        tasks.append(asyncio.create_task(yield_indexer.run()))
+        logger.info("Yield indexer started")
 
     # Weekly aggregator only needs DB access, not on-chain config
     from src.bots import weekly_aggregator
@@ -126,6 +134,10 @@ openapi_tags = [
         "description": "Earnings Challenge leaderboard — two tracks per wallet.",
     },
     {
+        "name": "Yield",
+        "description": "Aave yield tracking, distributions, and per-user stats.",
+    },
+    {
         "name": "Notifications",
         "description": "Email notification opt-in, verification, and unsubscribe.",
     },
@@ -170,6 +182,7 @@ app.include_router(mm_ws_router)
 app.include_router(activity_router)
 app.include_router(leaderboard_router)
 app.include_router(notifications_router)
+app.include_router(yield_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router

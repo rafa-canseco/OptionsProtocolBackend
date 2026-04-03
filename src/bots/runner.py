@@ -8,6 +8,7 @@ Usage:
     uv run python -m src.bots.runner circuit_breaker
     uv run python -m src.bots.runner all
 """
+
 import asyncio
 import logging
 import sys
@@ -23,6 +24,8 @@ BOTS = {
     "expiry_settler": "src.bots.expiry_settler",
     "circuit_breaker": "src.bots.circuit_breaker_bot",
     "weekly_aggregator": "src.bots.weekly_aggregator",
+    "yield_indexer": "src.bots.yield_indexer",
+    "yield_airdrop": "src.bots.yield_airdrop",
 }
 
 
@@ -34,16 +37,20 @@ async def main(bot_name: str):
             expiry_settler,
             circuit_breaker_bot,
             weekly_aggregator,
+            yield_indexer,
         )
+
         await asyncio.gather(
             otoken_manager.run(),
             event_indexer.run(),
             expiry_settler.run(),
             circuit_breaker_bot.run(),
             weekly_aggregator.run(),
+            yield_indexer.run(),
         )
     elif bot_name in BOTS:
         import importlib
+
         mod = importlib.import_module(BOTS[bot_name])
         await mod.run()
     else:
