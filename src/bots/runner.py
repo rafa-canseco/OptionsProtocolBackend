@@ -25,6 +25,7 @@ BOTS = {
     "circuit_breaker": "src.bots.circuit_breaker_bot",
     "weekly_aggregator": "src.bots.weekly_aggregator",
     "yield_indexer": "src.bots.yield_indexer",
+    "yield_airdrop": "src.bots.yield_airdrop",
 }
 
 
