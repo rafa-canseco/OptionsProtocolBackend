@@ -50,10 +50,24 @@ def get_solana_operator() -> Keypair:
 
     path = Path(raw)
     if path.is_file():
-        data = json.loads(path.read_text())
-        _operator = Keypair.from_bytes(bytes(data))
+        try:
+            data = json.loads(path.read_text())
+            _operator = Keypair.from_bytes(bytes(data))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Failed to load Solana keypair from {path}. "
+                "Expected a JSON file with a byte array "
+                "(Solana CLI format)."
+            ) from exc
     else:
-        _operator = Keypair.from_base58_string(raw)
+        try:
+            _operator = Keypair.from_base58_string(raw)
+        except Exception as exc:
+            raise ValueError(
+                "Failed to parse SOLANA_OPERATOR_KEYPAIR as base58. "
+                "Provide a valid base58 secret key or path to a "
+                "JSON keyfile."
+            ) from exc
 
     logger.info("Solana operator loaded: %s", _operator.pubkey())
     return _operator
@@ -62,6 +76,12 @@ def get_solana_operator() -> Keypair:
 def get_pubkey(address: str) -> Pubkey:
     """Parse a base58 string into a Pubkey."""
     return Pubkey.from_string(address)
+
+
+def _check_rpc_error(resp, context: str) -> None:
+    """Raise if a Solana RPC response contains an error."""
+    if hasattr(resp, "error") and resp.error:
+        raise RuntimeError(f"Solana RPC error ({context}): {resp.error}")
 
 
 def get_balance(owner: str, mint: str) -> int:
@@ -85,29 +105,39 @@ def get_balance(owner: str, mint: str) -> int:
 
     resp = client.get_token_account_balance(ata)
     if resp.value is None:
-        return 0
+        _check_rpc_error(resp, f"get_token_account_balance({owner[:8]}...)")
+        return 0  # ATA does not exist
     return int(resp.value.amount)
 
 
 def get_sol_balance(owner: str) -> int:
     """Read native SOL balance in lamports."""
     client = get_solana_client()
-    resp = client.get_balance(Pubkey.from_string(owner), commitment=Confirmed)
+    try:
+        resp = client.get_balance(Pubkey.from_string(owner), commitment=Confirmed)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read SOL balance for {owner[:8]}...") from exc
+    _check_rpc_error(resp, f"get_balance({owner[:8]}...)")
     return resp.value
 
 
-def build_and_send_solana_tx(
-    tx: VersionedTransaction,
-    timeout: int = 60,
-) -> str:
+def build_and_send_solana_tx(tx: VersionedTransaction) -> str:
     """Send a signed transaction and wait for confirmation.
 
     Returns the transaction signature as a string.
     """
     client = get_solana_client()
-    resp = client.send_transaction(tx)
-    sig = str(resp.value)
+    try:
+        resp = client.send_transaction(tx)
+    except Exception as exc:
+        raise RuntimeError("Failed to send Solana transaction") from exc
 
-    client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+    sig = str(resp.value)
+    try:
+        client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+    except Exception as exc:
+        logger.error("Tx sent but confirmation failed: %s", sig)
+        raise RuntimeError(f"Transaction {sig} sent but confirmation failed") from exc
+
     logger.info("Solana tx confirmed: %s", sig)
     return sig

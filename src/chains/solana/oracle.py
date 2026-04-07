@@ -3,7 +3,7 @@
 Uses the Pyth HTTP API (Hermes) to fetch prices without
 requiring an on-chain Pyth account read. This avoids the
 complexity of deserializing PriceUpdateV2 accounts from
-the backend — the on-chain Pyth flow is used by the
+the backend -- the on-chain Pyth flow is used by the
 Solana programs directly.
 """
 
@@ -12,8 +12,8 @@ import time
 
 import httpx
 
-from src.pricing.assets import Asset, get_asset_config
 from src.chains import Chain
+from src.pricing.assets import Asset, get_asset_config
 
 logger = logging.getLogger(__name__)
 
@@ -42,24 +42,38 @@ def get_pyth_price(asset: Asset) -> tuple[float, int]:
     if cached and (now - cached[2]) < _CACHE_TTL:
         return cached[0], cached[1]
 
-    resp = httpx.get(
-        HERMES_URL,
-        params={"ids[]": feed_id, "parsed": "true"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = httpx.get(
+            HERMES_URL,
+            params={"ids[]": feed_id, "parsed": "true"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"Pyth Hermes API request failed for {asset.value}") from exc
 
-    parsed = data["parsed"]
+    try:
+        parsed = data["parsed"]
+    except KeyError:
+        raise ValueError(
+            f"Unexpected Pyth response format for {asset.value}: missing 'parsed' key"
+        )
+
     if not parsed:
         raise ValueError(
             f"Pyth returned no data for {asset.value} (feed {feed_id[:16]}...)"
         )
 
-    price_msg = parsed[0]["price"]
-    price_raw = int(price_msg["price"])
-    exponent = int(price_msg["expo"])
-    publish_time = int(price_msg["publish_time"])
+    try:
+        price_msg = parsed[0]["price"]
+        price_raw = int(price_msg["price"])
+        exponent = int(price_msg["expo"])
+        publish_time = int(price_msg["publish_time"])
+    except (KeyError, ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Failed to parse Pyth price fields for {asset.value}: {exc}"
+        ) from exc
 
     if price_raw <= 0:
         raise ValueError(

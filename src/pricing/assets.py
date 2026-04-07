@@ -68,7 +68,13 @@ class AssetConfig:
                 f"{self.symbol} is on {self.chain.value}, not Solana. "
                 "Use Chainlink for Base assets."
             )
-        return _PYTH_FEED_IDS.get(self.symbol, "")
+        feed_id = _PYTH_FEED_IDS.get(self.symbol)
+        if feed_id is None:
+            raise ValueError(
+                f"No Pyth feed ID in _PYTH_FEED_IDS for {self.symbol}. "
+                "Add it to the dict in assets.py."
+            )
+        return feed_id
 
 
 # Pyth feed IDs for Solana assets (from CONTEXT.md devnet config)

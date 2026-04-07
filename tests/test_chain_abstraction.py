@@ -1,9 +1,13 @@
 """Tests for B1N-256: chain abstraction layer."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
+from fastapi.testclient import TestClient
 
 from src.chains import Chain
 from src.chains.address import detect_chain, is_valid_solana_address, ETH_ADDRESS_RE
+from src.main import app
 from src.pricing.assets import (
     Asset,
     get_asset_config,
@@ -11,6 +15,8 @@ from src.pricing.assets import (
     get_base_assets,
     get_solana_assets,
 )
+
+client = TestClient(app)
 
 
 # ── Chain enum ──
@@ -147,3 +153,136 @@ class TestConfig:
         assert (
             settings.solana_wsol_mint == "So11111111111111111111111111111111111111112"
         )
+
+
+# ── API endpoint tests ──
+
+
+@pytest.fixture()
+def mock_db():
+    with patch("src.api.routes.get_client") as mock_client:
+        yield mock_client.return_value
+
+
+class TestPositionsByAddress:
+    """GET /positions/{address} — chain detection from address format."""
+
+    def test_solana_address_returns_200(self, mock_db):
+        addr = "jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9"
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        resp = client.get(f"/positions/{addr}")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_invalid_address_returns_400(self):
+        resp = client.get("/positions/not-an-address")
+        assert resp.status_code == 400
+
+
+class TestPositionsByUserId:
+    """GET /positions?user_id= — cross-chain unified endpoint."""
+
+    def test_missing_addresses_returns_400(self):
+        resp = client.get("/positions?user_id=test-user")
+        assert resp.status_code == 400
+
+    def test_invalid_base_address_returns_400(self):
+        resp = client.get("/positions?user_id=test&base_address=invalid")
+        assert resp.status_code == 400
+
+    def test_invalid_solana_address_returns_400(self):
+        resp = client.get("/positions?user_id=test&solana_address=0x123")
+        assert resp.status_code == 400
+
+    def test_returns_positions_and_errors_structure(self, mock_db):
+        base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+            data=[{"user_address": base_addr.lower(), "is_settled": False}]
+        )
+        resp = client.get(f"/positions?user_id=test&base_address={base_addr}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "positions" in body
+        assert "errors" in body
+        assert isinstance(body["errors"], list)
+
+    def test_partial_failure_returns_errors(self, mock_db):
+        base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+        sol_addr = "jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9"
+
+        results = [
+            MagicMock(data=[{"user_address": base_addr.lower()}]),
+            Exception("Solana DB down"),
+        ]
+        call_idx = [0]
+
+        original_table = mock_db.table.return_value
+
+        def execute_side_effect():
+            i = call_idx[0]
+            call_idx[0] += 1
+            if i < len(results) and isinstance(results[i], Exception):
+                raise results[i]
+            return results[i] if i < len(results) else MagicMock(data=[])
+
+        (
+            original_table.select.return_value.eq.return_value.eq.return_value.order.return_value.execute
+        ).side_effect = execute_side_effect
+
+        resp = client.get(
+            f"/positions?user_id=test"
+            f"&base_address={base_addr}"
+            f"&solana_address={sol_addr}"
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["errors"]) == 1
+        assert body["errors"][0]["chain"] == "solana"
+
+    def test_all_chains_fail_returns_502(self, mock_db):
+        base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.side_effect = Exception(
+            "DB down"
+        )
+        resp = client.get(f"/positions?user_id=test&base_address={base_addr}")
+        assert resp.status_code == 502
+
+
+class TestBalancesEndpoint:
+    """GET /balances/{user_id} — cross-chain balance reads."""
+
+    def test_missing_addresses_returns_400(self):
+        resp = client.get("/balances/test-user")
+        assert resp.status_code == 400
+
+    def test_invalid_base_address_returns_400(self):
+        resp = client.get("/balances/test-user?base_address=invalid")
+        assert resp.status_code == 400
+
+    def test_invalid_solana_address_returns_400(self):
+        resp = client.get("/balances/test-user?solana_address=0x123")
+        assert resp.status_code == 400
+
+    def test_returns_balances_and_errors_structure(self):
+        base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+        with (
+            patch("src.chains.base.client.get_balance", return_value=1000000),
+            patch("src.chains.base.client.get_eth_balance", return_value=10**18),
+        ):
+            resp = client.get(f"/balances/test-user?base_address={base_addr}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "balances" in body
+        assert "errors" in body
+        assert "base" in body["balances"]
+
+    def test_rpc_failure_returns_error_field(self):
+        base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+        with patch(
+            "src.chains.base.client.get_balance",
+            side_effect=Exception("RPC down"),
+        ):
+            resp = client.get(f"/balances/test-user?base_address={base_addr}")
+        assert resp.status_code == 502

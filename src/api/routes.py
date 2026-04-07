@@ -473,9 +473,15 @@ async def get_prices(
     # Enrich with spot price if available (best effort)
     spot = 0.0
     try:
-        from src.pricing.chainlink import get_asset_price
+        chain = get_chain_for_asset(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
 
-        spot, _ = get_asset_price(asset)
+            spot, _ = get_spot_price(asset)
+        else:
+            from src.pricing.chainlink import get_asset_price
+
+            spot, _ = get_asset_price(asset)
         if circuit_breaker.check(spot, asset.value):
             raise HTTPException(
                 status_code=503,
@@ -635,6 +641,15 @@ def _compute_outcome(position: dict) -> str | None:
     return "Expired OTM — collateral returned"
 
 
+def _enrich_positions(positions: list[dict]) -> list[dict]:
+    """Add outcome and normalize premium field for a list of positions."""
+    for pos in positions:
+        pos["outcome"] = _compute_outcome(pos)
+        if pos.get("net_premium") is not None:
+            pos["premium"] = pos["net_premium"]
+    return positions
+
+
 @router.get(
     "/positions/{address}",
     tags=["Positions"],
@@ -674,14 +689,7 @@ async def get_positions(address: str, request: Request):
         logger.exception(f"Failed to fetch positions for {address}")
         raise HTTPException(status_code=502, detail="Could not fetch positions")
 
-    positions = result.data or []
-    for pos in positions:
-        pos["outcome"] = _compute_outcome(pos)
-        # Frontend sees net_premium as "premium". Fall back to premium
-        # for old rows that predate the fee columns.
-        if pos.get("net_premium") is not None:
-            pos["premium"] = pos["net_premium"]
-    return positions
+    return _enrich_positions(result.data or [])
 
 
 class GroupPositionsRequest(BaseModel):
@@ -712,6 +720,11 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         raise HTTPException(400, "group_id must be a valid UUID")
 
     if not ETH_ADDRESS_RE.match(body.user_address):
+        if is_valid_solana_address(body.user_address):
+            raise HTTPException(
+                400,
+                "Position grouping is not yet supported for Solana",
+            )
         raise HTTPException(400, "Invalid user_address")
 
     for tx in body.tx_hashes:
@@ -783,6 +796,7 @@ async def get_positions_by_user(
 
     client = get_client()
     positions: list[dict] = []
+    errors: list[dict] = []
 
     if base_address:
         if not ETH_ADDRESS_RE.match(base_address):
@@ -796,13 +810,10 @@ async def get_positions_by_user(
                 .order("indexed_at", desc=True)
                 .execute()
             )
-            for pos in result.data or []:
-                pos["outcome"] = _compute_outcome(pos)
-                if pos.get("net_premium") is not None:
-                    pos["premium"] = pos["net_premium"]
-                positions.append(pos)
+            positions.extend(_enrich_positions(result.data or []))
         except Exception:
             logger.exception("Failed to fetch Base positions for %s", user_id)
+            errors.append({"chain": "base", "message": "Could not load Base positions"})
 
     if solana_address:
         if not is_valid_solana_address(solana_address):
@@ -816,15 +827,20 @@ async def get_positions_by_user(
                 .order("indexed_at", desc=True)
                 .execute()
             )
-            for pos in result.data or []:
-                pos["outcome"] = _compute_outcome(pos)
-                if pos.get("net_premium") is not None:
-                    pos["premium"] = pos["net_premium"]
-                positions.append(pos)
+            positions.extend(_enrich_positions(result.data or []))
         except Exception:
             logger.exception("Failed to fetch Solana positions for %s", user_id)
+            errors.append(
+                {
+                    "chain": "solana",
+                    "message": "Could not load Solana positions",
+                }
+            )
 
-    return positions
+    if not positions and errors:
+        raise HTTPException(502, "Could not fetch positions from any chain")
+
+    return {"positions": positions, "errors": errors}
 
 
 @router.get(
@@ -852,7 +868,8 @@ async def get_balances(
             400, "At least one of base_address or solana_address is required"
         )
 
-    result: dict = {}
+    balances: dict = {}
+    errors: list[dict] = []
 
     if base_address:
         if not ETH_ADDRESS_RE.match(base_address):
@@ -860,14 +877,19 @@ async def get_balances(
         try:
             from src.chains.base.client import get_balance, get_eth_balance
 
-            result["base"] = {
+            balances["base"] = {
                 "usdc": str(get_balance(base_address, settings.usdc_address)),
                 "weth": str(get_balance(base_address, settings.weth_address)),
                 "eth": str(get_eth_balance(base_address)),
             }
         except Exception:
             logger.exception("Failed to read Base balances for %s", base_address)
-            result["base"] = None
+            errors.append(
+                {
+                    "chain": "base",
+                    "message": "Could not read Base balances",
+                }
+            )
 
     if solana_address:
         if not is_valid_solana_address(solana_address):
@@ -878,28 +900,36 @@ async def get_balances(
                 get_sol_balance,
             )
 
-            balances: dict[str, str] = {
+            sol_balances: dict[str, str] = {
                 "sol": str(get_sol_balance(solana_address)),
             }
             if settings.solana_usdc_mint:
-                balances["usdc"] = str(
+                sol_balances["usdc"] = str(
                     sol_get_balance(solana_address, settings.solana_usdc_mint)
                 )
             if settings.solana_wsol_mint:
-                balances["wsol"] = str(
+                sol_balances["wsol"] = str(
                     sol_get_balance(solana_address, settings.solana_wsol_mint)
                 )
             if settings.solana_jup_mint:
-                balances["jup"] = str(
+                sol_balances["jup"] = str(
                     sol_get_balance(solana_address, settings.solana_jup_mint)
                 )
             if settings.solana_xau_mint:
-                balances["xau"] = str(
+                sol_balances["xau"] = str(
                     sol_get_balance(solana_address, settings.solana_xau_mint)
                 )
-            result["solana"] = balances
+            balances["solana"] = sol_balances
         except Exception:
             logger.exception("Failed to read Solana balances for %s", solana_address)
-            result["solana"] = None
+            errors.append(
+                {
+                    "chain": "solana",
+                    "message": "Could not read Solana balances",
+                }
+            )
 
-    return result
+    if not balances and errors:
+        raise HTTPException(502, "Could not read balances from any chain")
+
+    return {"balances": balances, "errors": errors}

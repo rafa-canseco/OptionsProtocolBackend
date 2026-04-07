@@ -347,12 +347,12 @@ class TestGetCapacityErrors:
 
 
 def _position_count_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().eq().or_().gt().execute()"""
+    """Wire up: .select().eq().eq().or_().gt().execute()"""
     return mock_table.select.return_value.eq.return_value.eq.return_value.or_.return_value.gt.return_value.execute
 
 
 def _quotes_mock_chain(mock_table):
-    """Wire up the mm_quotes mock chain: .select().eq().eq().eq().gt().gt().execute()"""
+    """Wire up: .select().eq().eq().eq().gt().gt().execute()"""
     return mock_table.select.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
 
 
