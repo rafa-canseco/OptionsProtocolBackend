@@ -15,10 +15,11 @@ from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
-from src.pricing.assets import Asset
+from src.chains import Chain
+from src.chains.address import detect_chain, ETH_ADDRESS_RE, is_valid_solana_address
+from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.circuit_breaker import circuit_breaker
 
-ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -129,11 +130,13 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     cutoff = datetime.fromtimestamp(
         time.time() - _CAPACITY_STALE_SECONDS, tz=timezone.utc
     ).isoformat()
+    chain = get_chain_for_asset(asset).value
     client = get_client()
     result = (
         client.table("mm_capacity")
         .select("*")
         .eq("asset", asset.value)
+        .eq("chain", chain)
         .gte("reported_at", cutoff)
         .execute()
     )
@@ -243,12 +246,14 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
 
     now_ts = int(time.time())
     min_cutoff_ts = now_ts + settings.short_expiry_cutoff_hours * 3600
+    chain = get_chain_for_asset(asset).value
     client = get_client()
     result = (
         client.table("mm_quotes")
         .select("*")
         .eq("is_active", True)
         .eq("asset", asset.value)
+        .eq("chain", chain)
         .gt("deadline", now_ts + _MIN_QUOTE_TTL)
         .gt("expiry", min_cutoff_ts)
         .execute()
@@ -295,12 +300,14 @@ def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
     so callers can default position_count to 0 without surfacing the error.
     """
     now_ts = int(time.time())
+    chain = get_chain_for_asset(asset).value
     try:
         client = get_client()
         result = (
             client.table("order_events")
             .select("strike_price,is_put,expiry")
             .eq("asset", asset.value)
+            .eq("chain", chain)
             .or_("is_settled.eq.false,is_settled.is.null")
             .gt("expiry", now_ts)
             .execute()
@@ -393,11 +400,18 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 async def get_spot(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
-    """Return the live spot price from Chainlink for a given asset."""
-    from src.pricing.chainlink import get_asset_price
+    """Return the live spot price for a given asset (Chainlink or Pyth)."""
+    chain = get_chain_for_asset(asset)
 
     try:
-        price, updated_at = get_asset_price(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
+
+            price, updated_at = get_spot_price(asset)
+        else:
+            from src.pricing.chainlink import get_asset_price
+
+            price, updated_at = get_asset_price(asset)
     except Exception:
         logger.exception("Failed to fetch %s spot price", asset.value)
         raise HTTPException(502, f"Could not fetch {asset.value.upper()} spot")
@@ -627,22 +641,32 @@ def _compute_outcome(position: dict) -> str | None:
     summary="Get positions for a wallet",
 )
 async def get_positions(address: str, request: Request):
-    """Return all option positions for the given Ethereum address.
+    """Return all option positions for the given wallet address.
 
-    Data comes from on-chain `OrderExecuted` events indexed into Supabase.
+    Accepts both EVM (0x hex) and Solana (base58) addresses.
+    Data comes from on-chain events indexed into Supabase.
     Each position includes strike, expiry, premium paid, settlement status,
     and a human-readable `outcome` field for settled positions.
     """
     _check_read_rate_limit(_get_client_ip(request))
-    if not ETH_ADDRESS_RE.match(address):
-        raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
+    try:
+        chain = detect_chain(address)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid address. Expected 0x hex (Base) or base58 (Solana).",
+        )
+
+    addr_normalized = address.lower() if chain == Chain.BASE else address
 
     try:
         client = get_client()
         result = (
             client.table("order_events")
             .select("*")
-            .eq("user_address", address.lower())
+            .eq("user_address", addr_normalized)
+            .eq("chain", chain.value)
             .order("indexed_at", desc=True)
             .execute()
         )
@@ -726,3 +750,156 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         )
 
     return {"grouped": updated, "group_id": body.group_id}
+
+
+# ── Cross-chain endpoints ─────────────────────────────────────────
+
+
+@router.get(
+    "/positions",
+    tags=["Positions"],
+    summary="Get positions by Privy user ID (cross-chain)",
+)
+async def get_positions_by_user(
+    request: Request,
+    user_id: str = Query(..., description="Privy user ID"),
+    base_address: str | None = Query(None, description="User's Base wallet address"),
+    solana_address: str | None = Query(
+        None, description="User's Solana wallet address"
+    ),
+):
+    """Return positions across both chains for a Privy user.
+
+    The frontend passes the user's wallet addresses per chain
+    (from Privy). Returns a unified list with a `chain` field
+    on each position.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if not base_address and not solana_address:
+        raise HTTPException(
+            400, "At least one of base_address or solana_address is required"
+        )
+
+    client = get_client()
+    positions: list[dict] = []
+
+    if base_address:
+        if not ETH_ADDRESS_RE.match(base_address):
+            raise HTTPException(400, "Invalid base_address")
+        try:
+            result = (
+                client.table("order_events")
+                .select("*")
+                .eq("user_address", base_address.lower())
+                .eq("chain", "base")
+                .order("indexed_at", desc=True)
+                .execute()
+            )
+            for pos in result.data or []:
+                pos["outcome"] = _compute_outcome(pos)
+                if pos.get("net_premium") is not None:
+                    pos["premium"] = pos["net_premium"]
+                positions.append(pos)
+        except Exception:
+            logger.exception("Failed to fetch Base positions for %s", user_id)
+
+    if solana_address:
+        if not is_valid_solana_address(solana_address):
+            raise HTTPException(400, "Invalid solana_address")
+        try:
+            result = (
+                client.table("order_events")
+                .select("*")
+                .eq("user_address", solana_address)
+                .eq("chain", "solana")
+                .order("indexed_at", desc=True)
+                .execute()
+            )
+            for pos in result.data or []:
+                pos["outcome"] = _compute_outcome(pos)
+                if pos.get("net_premium") is not None:
+                    pos["premium"] = pos["net_premium"]
+                positions.append(pos)
+        except Exception:
+            logger.exception("Failed to fetch Solana positions for %s", user_id)
+
+    return positions
+
+
+@router.get(
+    "/balances/{user_id}",
+    tags=["Positions"],
+    summary="Get cross-chain token balances for a user",
+)
+async def get_balances(
+    user_id: str,
+    request: Request,
+    base_address: str | None = Query(None, description="User's Base wallet address"),
+    solana_address: str | None = Query(
+        None, description="User's Solana wallet address"
+    ),
+):
+    """Read token balances on both chains for a Privy user.
+
+    Returns balances in raw token units. The frontend converts
+    to human-readable amounts using known decimals.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if not base_address and not solana_address:
+        raise HTTPException(
+            400, "At least one of base_address or solana_address is required"
+        )
+
+    result: dict = {}
+
+    if base_address:
+        if not ETH_ADDRESS_RE.match(base_address):
+            raise HTTPException(400, "Invalid base_address")
+        try:
+            from src.chains.base.client import get_balance, get_eth_balance
+
+            result["base"] = {
+                "usdc": str(get_balance(base_address, settings.usdc_address)),
+                "weth": str(get_balance(base_address, settings.weth_address)),
+                "eth": str(get_eth_balance(base_address)),
+            }
+        except Exception:
+            logger.exception("Failed to read Base balances for %s", base_address)
+            result["base"] = None
+
+    if solana_address:
+        if not is_valid_solana_address(solana_address):
+            raise HTTPException(400, "Invalid solana_address")
+        try:
+            from src.chains.solana.client import (
+                get_balance as sol_get_balance,
+                get_sol_balance,
+            )
+
+            balances: dict[str, str] = {
+                "sol": str(get_sol_balance(solana_address)),
+            }
+            if settings.solana_usdc_mint:
+                balances["usdc"] = str(
+                    sol_get_balance(solana_address, settings.solana_usdc_mint)
+                )
+            if settings.solana_wsol_mint:
+                balances["wsol"] = str(
+                    sol_get_balance(solana_address, settings.solana_wsol_mint)
+                )
+            if settings.solana_jup_mint:
+                balances["jup"] = str(
+                    sol_get_balance(solana_address, settings.solana_jup_mint)
+                )
+            if settings.solana_xau_mint:
+                balances["xau"] = str(
+                    sol_get_balance(solana_address, settings.solana_xau_mint)
+                )
+            result["solana"] = balances
+        except Exception:
+            logger.exception("Failed to read Solana balances for %s", solana_address)
+            result["solana"] = None
+
+    return result
