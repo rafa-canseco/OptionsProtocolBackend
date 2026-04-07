@@ -108,6 +108,34 @@ class Settings(BaseSettings):
     # Solana chain ID (for display only)
     solana_cluster: str = "devnet"
 
+    # ── CCTP V2 (Cross-Chain Transfer Protocol) ──
+    # Attestation API — sandbox for testnet, production for mainnet
+    cctp_attestation_api_url: str = ""  # set by has_bridge_config default
+
+    # Base CCTP V2 contract addresses
+    cctp_base_message_transmitter: str = ""
+    cctp_base_token_messenger: str = ""
+    cctp_base_domain: int = 6
+
+    # Solana CCTP V2 program IDs (same mainnet/devnet)
+    cctp_solana_message_transmitter: str = (
+        "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC"
+    )
+    cctp_solana_token_messenger: str = "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe"
+    cctp_solana_domain: int = 5
+
+    # Solana USDC mint (mainnet)
+    cctp_solana_usdc_mint: str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    # Relayer wallets (separate from operator — only for gas)
+    relayer_base_private_key: str = ""
+    relayer_solana_keypair: str = ""
+
+    # Relayer tuning
+    cctp_attestation_poll_interval: int = 3
+    cctp_attestation_timeout: int = 300
+    cctp_trade_max_retries: int = 3
+
     # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
     allowed_origins: str = "*"
 
@@ -133,6 +161,24 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_cctp_attestation_url() -> str:
+    """Return the Circle attestation API URL, defaulting by beta_mode."""
+    if settings.cctp_attestation_api_url:
+        return settings.cctp_attestation_api_url
+    if settings.beta_mode:
+        return "https://iris-api-sandbox.circle.com"
+    return "https://iris-api.circle.com"
+
+
+def has_bridge_config() -> bool:
+    """True when CCTP relayer wallets + contracts are configured."""
+    return bool(
+        settings.cctp_base_message_transmitter
+        and settings.cctp_base_token_messenger
+        and (settings.relayer_base_private_key or settings.relayer_solana_keypair)
+    )
 
 
 def has_solana_config() -> bool:
