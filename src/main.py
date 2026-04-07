@@ -14,7 +14,8 @@ from src.api.activity import router as activity_router
 from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.yield_routes import router as yield_router
-from src.config import settings, has_solana_config
+from src.bridge.routes import router as bridge_router
+from src.config import settings, has_solana_config, has_bridge_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +95,17 @@ async def lifespan(app: FastAPI):
             "Solana bots not started: SOLANA_RPC_URL or program IDs not configured"
         )
 
+    # ── Bridge relayer ──
+    if has_bridge_config():
+        from src.bridge import relayer as bridge_relayer
+
+        tasks.append(asyncio.create_task(bridge_relayer.run()))
+        logger.info("Bridge relayer started")
+    else:
+        logger.info(
+            "Bridge relayer not started: CCTP addresses or relayer keys not configured"
+        )
+
     # Notification bot only needs Resend API key, not on-chain config
     if settings.resend_api_key:
         from src.bots import notification_bot
@@ -155,6 +167,10 @@ openapi_tags = [
         "description": "Email notification opt-in, verification, and unsubscribe.",
     },
     {
+        "name": "Bridge",
+        "description": "CCTP V2 cross-chain USDC bridging and trade execution. Orchestrates burn→attestation→mint→trade.",
+    },
+    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -196,6 +212,7 @@ app.include_router(activity_router)
 app.include_router(leaderboard_router)
 app.include_router(notifications_router)
 app.include_router(yield_router)
+app.include_router(bridge_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
