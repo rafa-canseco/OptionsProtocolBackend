@@ -79,8 +79,34 @@ class Settings(BaseSettings):
     # Whitelist (for whitelisting oTokens after creation)
     whitelist_address: str = ""
 
-    # Chain
+    # Base chain
     chain_id: int = 8453  # Base mainnet
+
+    # ── Solana ──
+    solana_rpc_url: str = ""
+    solana_wss_rpc_url: str = ""
+    solana_operator_keypair: str = ""  # base58 private key or path to JSON
+
+    # Solana program IDs
+    solana_batch_settler_program_id: str = ""
+    solana_controller_program_id: str = ""
+    solana_oracle_program_id: str = ""
+    solana_otoken_factory_program_id: str = ""
+    solana_margin_pool_program_id: str = ""
+    solana_whitelist_program_id: str = ""
+    solana_address_book_program_id: str = ""
+
+    # Solana token mints
+    solana_usdc_mint: str = ""
+    solana_wsol_mint: str = "So11111111111111111111111111111111111111112"
+    solana_jup_mint: str = ""
+    solana_xau_mint: str = ""
+
+    # Pyth oracle
+    solana_pyth_receiver_program: str = ""
+
+    # Solana chain ID (for display only)
+    solana_cluster: str = "devnet"
 
     # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
     allowed_origins: str = "*"
@@ -107,3 +133,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def has_solana_config() -> bool:
+    """True when Solana RPC + operator + core programs are configured."""
+    return bool(
+        settings.solana_rpc_url
+        and settings.solana_operator_keypair
+        and settings.solana_batch_settler_program_id
+        and settings.solana_otoken_factory_program_id
+    )

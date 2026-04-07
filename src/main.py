@@ -14,7 +14,7 @@ from src.api.activity import router as activity_router
 from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.yield_routes import router as yield_router
-from src.config import settings
+from src.config import settings, has_solana_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +80,19 @@ async def lifespan(app: FastAPI):
 
     tasks.append(asyncio.create_task(weekly_aggregator.run()))
     logger.info("Weekly aggregator started")
+
+    # ── Solana bots ──
+    # Startup hooks only — actual bot modules are in B1N-257/258.
+    if has_solana_config():
+        logger.info(
+            "Solana config detected (cluster=%s). "
+            "Solana bots will start when implemented (B1N-257/258).",
+            settings.solana_cluster,
+        )
+    else:
+        logger.info(
+            "Solana bots not started: SOLANA_RPC_URL or program IDs not configured"
+        )
 
     # Notification bot only needs Resend API key, not on-chain config
     if settings.resend_api_key:

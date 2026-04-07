@@ -125,8 +125,8 @@ class TestPostCapacity:
 
 
 def _capacity_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().gte().execute()"""
-    return mock_table.select.return_value.eq.return_value.gte.return_value.execute
+    """Wire up the mock chain: .select().eq().eq().gte().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute
 
 
 class TestGetCapacity:
@@ -347,17 +347,13 @@ class TestGetCapacityErrors:
 
 
 def _position_count_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().or_().gt().execute()"""
-    return (
-        mock_table.select.return_value.eq.return_value.or_.return_value.gt.return_value.execute
-    )
+    """Wire up: .select().eq().eq().or_().gt().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.or_.return_value.gt.return_value.execute
 
 
 def _quotes_mock_chain(mock_table):
-    """Wire up the mm_quotes mock chain: .select().eq().eq().gt().gt().execute()"""
-    return (
-        mock_table.select.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
-    )
+    """Wire up: .select().eq().eq().eq().gt().gt().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
 
 
 def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> dict:
@@ -413,7 +409,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -447,7 +445,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -465,7 +465,9 @@ class TestPositionCounts:
             if table_name == "mm_quotes":
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
-                _position_count_mock_chain(mock_table).side_effect = Exception("DB down")
+                _position_count_mock_chain(mock_table).side_effect = Exception(
+                    "DB down"
+                )
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -474,7 +476,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -505,7 +509,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -514,7 +520,9 @@ class TestPositionCounts:
 
         # Verify the order_events table was queried at all
         order_events_calls = [
-            call for call in mock_db.table.call_args_list if call[0][0] == "order_events"
+            call
+            for call in mock_db.table.call_args_list
+            if call[0][0] == "order_events"
         ]
         assert len(order_events_calls) >= 1
 
@@ -546,13 +554,14 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
         items = resp.json()
         assert items[0]["position_count"] == 2 * routes_mod.ACTIVITY_MULTIPLIER
-
 
     def test_orphan_positions_roll_into_nearest_visible_expiry(self, mock_db):
         """Positions from a non-visible expiry roll into nearest visible expiry."""
@@ -579,7 +588,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -609,7 +620,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
