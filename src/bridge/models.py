@@ -17,6 +17,7 @@ class BridgeJobState(str, Enum):
     MINTING = "minting"
     TRADING = "trading"
     COMPLETED = "completed"
+    MINT_COMPLETED = "mint_completed"
     FAILED = "failed"
     MINT_COMPLETED_TRADE_FAILED = "mint_completed_trade_failed"
 

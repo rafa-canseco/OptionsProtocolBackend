@@ -135,14 +135,20 @@ async def process_bridge_job(job_id: str) -> None:
         # ── Trading ──
         signed_trade_tx = job.get("signed_trade_tx")
         if not signed_trade_tx:
-            # Bridge-only job, no trade to execute
+            # No pre-signed trade tx (e.g. Solana→Base where Privy
+            # smart wallet can't pre-sign). Relayer's job is done
+            # after mint. Frontend polls for mint_completed, then
+            # executes the trade itself via sendBatchTx.
             await asyncio.to_thread(
                 _update_job,
                 job_id,
-                {"status": BridgeJobState.COMPLETED},
-                "bridge-only complete",
+                {"status": BridgeJobState.MINT_COMPLETED},
+                "mint-only complete",
             )
-            logger.info("Job %s: bridge-only completed", job_id)
+            logger.info(
+                "Job %s: mint completed (no trade tx), frontend will execute trade",
+                job_id,
+            )
             return
 
         trade_tx = await _submit_trade(job_id, dest_chain, signed_trade_tx)
@@ -309,6 +315,7 @@ async def recover_incomplete_jobs() -> None:
             "status",
             [
                 BridgeJobState.COMPLETED,
+                BridgeJobState.MINT_COMPLETED,
                 BridgeJobState.FAILED,
                 BridgeJobState.MINT_COMPLETED_TRADE_FAILED,
             ],

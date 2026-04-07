@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS bridge_jobs (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN (
       'pending', 'attesting', 'minting',
-      'trading', 'completed',
+      'trading', 'completed', 'mint_completed',
       'failed', 'mint_completed_trade_failed'
     )),
   burn_tx_hash TEXT NOT NULL,

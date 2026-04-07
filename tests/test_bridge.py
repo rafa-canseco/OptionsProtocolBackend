@@ -320,6 +320,7 @@ class TestJobStateMachine:
         assert BridgeJobState.MINTING == "minting"
         assert BridgeJobState.TRADING == "trading"
         assert BridgeJobState.COMPLETED == "completed"
+        assert BridgeJobState.MINT_COMPLETED == "mint_completed"
         assert BridgeJobState.FAILED == "failed"
         assert (
             BridgeJobState.MINT_COMPLETED_TRADE_FAILED == "mint_completed_trade_failed"
