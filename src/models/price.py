@@ -70,6 +70,10 @@ class PriceResponse(BaseModel):
         default=None,
         description="MM's makerNonce at time of signing",
     )
+    chain: str = Field(
+        default="base",
+        description="Chain this quote is on (base or solana)",
+    )
     position_count: int = Field(
         default=0,
         description=(
