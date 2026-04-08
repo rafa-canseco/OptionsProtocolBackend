@@ -29,13 +29,13 @@ def _get_positions_needing_reminder() -> list[dict]:
         client.table("order_events")
         .select(
             "user_address, vault_id, expiry, amount, strike_price, "
-            "is_put, asset, created_at"
+            "is_put, asset, indexed_at"
         )
         .is_("reminder_sent_at", "null")
         .or_("is_settled.eq.false,is_settled.is.null")
         .gte("expiry", min_expiry)
         .lte("expiry", max_expiry)
-        .lt("created_at", created_before)
+        .lt("indexed_at", created_before)
         .execute()
     )
     return result.data or []
