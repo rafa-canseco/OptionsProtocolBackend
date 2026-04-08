@@ -161,3 +161,72 @@ class TestSolanaInvalidateQuotes:
         # Verify filter chain: .eq("is_active", True) then .eq("chain", "solana")
         mock_table.update.return_value.eq.assert_called_with("is_active", True)
         active_eq.eq.assert_called_with("chain", "solana")
+
+
+class TestCheckOnce:
+    """Verify the main orchestration loop."""
+
+    @pytest.mark.asyncio
+    @patch("src.bots.solana_circuit_breaker_bot.invalidate_solana_quotes")
+    @patch("src.bots.solana_circuit_breaker_bot.circuit_breaker")
+    @patch("src.bots.solana_circuit_breaker_bot.get_pyth_price")
+    async def test_calls_invalidate_on_trip(self, mock_pyth, mock_cb, mock_invalidate):
+        mock_pyth.return_value = (150.0, 1700000000)
+        mock_cb.check.return_value = True
+        mock_cb.pause_reason_for.return_value = "SOL moved 3%"
+        mock_invalidate.return_value = None
+
+        from src.bots.solana_circuit_breaker_bot import check_once
+
+        await check_once()
+
+        mock_invalidate.assert_called_once_with("sol")
+        mock_cb.update_reference.assert_called_once_with(150.0, "sol")
+
+    @pytest.mark.asyncio
+    @patch("src.bots.solana_circuit_breaker_bot.invalidate_solana_quotes")
+    @patch("src.bots.solana_circuit_breaker_bot.circuit_breaker")
+    @patch("src.bots.solana_circuit_breaker_bot.get_pyth_price")
+    async def test_skips_when_no_trip(self, mock_pyth, mock_cb, mock_invalidate):
+        mock_pyth.return_value = (150.0, 1700000000)
+        mock_cb.check.return_value = False
+
+        from src.bots.solana_circuit_breaker_bot import check_once
+
+        await check_once()
+
+        mock_invalidate.assert_not_called()
+        mock_cb.update_reference.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("src.bots.solana_circuit_breaker_bot.invalidate_solana_quotes")
+    @patch("src.bots.solana_circuit_breaker_bot.circuit_breaker")
+    @patch("src.bots.solana_circuit_breaker_bot.get_pyth_price")
+    async def test_skips_on_pyth_failure(self, mock_pyth, mock_cb, mock_invalidate):
+        mock_pyth.side_effect = RuntimeError("Pyth down")
+
+        from src.bots.solana_circuit_breaker_bot import check_once
+
+        await check_once()
+
+        mock_cb.check.assert_not_called()
+        mock_invalidate.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("src.bots.solana_circuit_breaker_bot.invalidate_solana_quotes")
+    @patch("src.bots.solana_circuit_breaker_bot.circuit_breaker")
+    @patch("src.bots.solana_circuit_breaker_bot.get_pyth_price")
+    async def test_does_not_reset_when_invalidate_fails(
+        self, mock_pyth, mock_cb, mock_invalidate
+    ):
+        mock_pyth.return_value = (150.0, 1700000000)
+        mock_cb.check.return_value = True
+        mock_cb.pause_reason_for.return_value = "SOL moved 3%"
+        mock_invalidate.side_effect = RuntimeError("tx failed")
+
+        from src.bots.solana_circuit_breaker_bot import check_once
+
+        with pytest.raises(RuntimeError, match="tx failed"):
+            await check_once()
+
+        mock_cb.update_reference.assert_not_called()

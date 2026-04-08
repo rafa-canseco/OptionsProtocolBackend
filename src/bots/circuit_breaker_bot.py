@@ -46,26 +46,20 @@ async def invalidate_quotes(asset: str):
         )
         raise
 
-    try:
-        client = get_client()
-        result = (
-            client.table("mm_quotes")
-            .update({"is_active": False})
-            .eq("is_active", True)
-            .eq("chain", "base")
-            .execute()
-        )
-        deactivated = len(result.data) if result.data else 0
-        logger.warning(
-            "Circuit breaker (%s): deactivated %d DB quotes",
-            asset,
-            deactivated,
-        )
-    except Exception:
-        logger.exception(
-            "Circuit breaker (%s): failed to deactivate DB quotes",
-            asset,
-        )
+    client = get_client()
+    result = (
+        client.table("mm_quotes")
+        .update({"is_active": False})
+        .eq("is_active", True)
+        .eq("chain", "base")
+        .execute()
+    )
+    deactivated = len(result.data) if result.data else 0
+    logger.warning(
+        "Circuit breaker (%s): deactivated %d DB quotes",
+        asset,
+        deactivated,
+    )
 
 
 async def check_once():

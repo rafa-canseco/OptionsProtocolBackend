@@ -12,6 +12,7 @@ import logging
 
 from solana.rpc.commitment import Confirmed
 from solders.instruction import AccountMeta, Instruction  # type: ignore[import-untyped]
+from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.message import MessageV0  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.transaction import VersionedTransaction  # type: ignore[import-untyped]
@@ -61,17 +62,22 @@ def build_increment_nonce_ix(operator_pubkey: Pubkey) -> Instruction:
     )
 
 
+def _send_increment_nonce_tx(operator: Keypair, ix: Instruction) -> str:
+    """Build and send increment_maker_nonce tx (sync, runs in thread)."""
+    rpc = get_solana_client()
+    blockhash = rpc.get_latest_blockhash(commitment=Confirmed).value.blockhash
+    msg = MessageV0.try_compile(operator.pubkey(), [ix], [], blockhash)
+    tx = VersionedTransaction(msg, [operator])
+    return build_and_send_solana_tx(tx)
+
+
 async def invalidate_solana_quotes(asset: str) -> None:
     """Increment on-chain nonce + deactivate Solana quotes in DB."""
     operator = get_solana_operator()
     ix = build_increment_nonce_ix(operator.pubkey())
 
     try:
-        rpc = get_solana_client()
-        blockhash = rpc.get_latest_blockhash(commitment=Confirmed).value.blockhash
-        msg = MessageV0.try_compile(operator.pubkey(), [ix], [], blockhash)
-        tx = VersionedTransaction(msg, [operator])
-        sig = build_and_send_solana_tx(tx)
+        sig = await asyncio.to_thread(_send_increment_nonce_tx, operator, ix)
         logger.warning(
             "Solana circuit breaker (%s): incremented makerNonce, tx: %s",
             asset,
@@ -85,26 +91,20 @@ async def invalidate_solana_quotes(asset: str) -> None:
         )
         raise
 
-    try:
-        client = get_client()
-        result = (
-            client.table("mm_quotes")
-            .update({"is_active": False})
-            .eq("is_active", True)
-            .eq("chain", "solana")
-            .execute()
-        )
-        deactivated = len(result.data) if result.data else 0
-        logger.warning(
-            "Solana circuit breaker (%s): deactivated %d DB quotes",
-            asset,
-            deactivated,
-        )
-    except Exception:
-        logger.exception(
-            "Solana circuit breaker (%s): failed to deactivate DB quotes",
-            asset,
-        )
+    client = get_client()
+    result = (
+        client.table("mm_quotes")
+        .update({"is_active": False})
+        .eq("is_active", True)
+        .eq("chain", "solana")
+        .execute()
+    )
+    deactivated = len(result.data) if result.data else 0
+    logger.warning(
+        "Solana circuit breaker (%s): deactivated %d DB quotes",
+        asset,
+        deactivated,
+    )
 
 
 async def check_once() -> None:
