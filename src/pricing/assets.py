@@ -17,7 +17,6 @@ class Asset(str, Enum):
     BTC = "btc"
     # Solana
     SOL = "sol"
-    JUP = "jup"
     XAU = "xau"
 
 
@@ -55,10 +54,8 @@ class AssetConfig:
             return settings.wbtc_address
         if self.symbol == "SOL":
             return settings.solana_wsol_mint
-        if self.symbol == "JUP":
-            return settings.solana_jup_mint
         if self.symbol == "XAU":
-            return settings.solana_xau_mint
+            return settings.solana_paxg_mint
         raise ValueError(f"No underlying address for {self.symbol}")
 
     @property
@@ -80,7 +77,6 @@ class AssetConfig:
 # Pyth feed IDs for Solana assets (from CONTEXT.md devnet config)
 _PYTH_FEED_IDS: dict[str, str] = {
     "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-    "JUP": "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996",
     "XAU": "765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2",
 }
 
@@ -118,22 +114,12 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         short_expiry_strike_step=2.5,
         num_strikes=5,
     ),
-    Asset.JUP: AssetConfig(
-        symbol="JUP",
-        chain=Chain.SOLANA,
-        decimals=6,
-        deribit_index="",
-        deribit_currency="",
-        strike_step=0.1,
-        short_expiry_strike_step=0.05,
-        num_strikes=5,
-    ),
     Asset.XAU: AssetConfig(
         symbol="XAU",
         chain=Chain.SOLANA,
         decimals=8,
-        deribit_index="",
-        deribit_currency="",
+        deribit_index="paxg_usd",
+        deribit_currency="PAXG",
         strike_step=50.0,
         short_expiry_strike_step=25.0,
         num_strikes=5,

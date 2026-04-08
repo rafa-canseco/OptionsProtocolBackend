@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # Solana token mints
     solana_usdc_mint: str = ""
     solana_wsol_mint: str = "So11111111111111111111111111111111111111112"
-    solana_jup_mint: str = ""
+    solana_paxg_mint: str = ""
     solana_xau_mint: str = ""
 
     # Pyth oracle
