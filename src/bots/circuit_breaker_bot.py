@@ -7,6 +7,7 @@ BatchSettler.incrementMakerNonce() to invalidate on-chain quotes
 signed by the operator, and deactivates ALL DB quotes (all MMs)
 as a server-side safety net.
 """
+
 import asyncio
 import logging
 
@@ -51,6 +52,7 @@ async def invalidate_quotes(asset: str):
             client.table("mm_quotes")
             .update({"is_active": False})
             .eq("is_active", True)
+            .eq("chain", "base")
             .execute()
         )
         deactivated = len(result.data) if result.data else 0
