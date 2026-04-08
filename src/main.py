@@ -83,16 +83,20 @@ async def lifespan(app: FastAPI):
     logger.info("Weekly aggregator started")
 
     # ── Solana bots ──
-    # Startup hooks only — actual bot modules are in B1N-257/258.
     if has_solana_config():
+        from src.bots import solana_circuit_breaker_bot
+
+        tasks.append(
+            asyncio.create_task(solana_circuit_breaker_bot.run())
+        )
         logger.info(
-            "Solana config detected (cluster=%s). "
-            "Solana bots will start when implemented (B1N-257/258).",
+            "Solana circuit breaker started (cluster=%s)",
             settings.solana_cluster,
         )
     else:
         logger.info(
-            "Solana bots not started: SOLANA_RPC_URL or program IDs not configured"
+            "Solana bots not started: SOLANA_RPC_URL or program IDs "
+            "not configured"
         )
 
     # ── Bridge relayer ──
