@@ -1,14 +1,18 @@
 import re
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-VALID_ASSETS = {"eth", "btc"}
+VALID_ASSETS = {"eth", "btc", "sol", "xau"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
+VALID_CHAINS = {"base", "solana"}
+BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# ed25519 signatures are 64 bytes; base58-encoded they reach up to 88 chars
+BASE58_SIG_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{80,88}$")
 
 
 class QuoteSubmission(BaseModel):
-    """A single EIP-712 signed quote from a market maker."""
+    """A signed quote from a market maker (EIP-712 for Base, ed25519 for Solana)."""
 
     otoken_address: str = Field(description="oToken contract address")
     bid_price: int = Field(
@@ -25,6 +29,14 @@ class QuoteSubmission(BaseModel):
         ge=0, description="MM's current makerNonce from BatchSettler"
     )
     signature: str = Field(description="EIP-712 signature (hex, 0x-prefixed, 65 bytes)")
+    chain: str = Field(
+        default="base",
+        description="Chain this quote is for (base, solana)",
+    )
+    maker: str | None = Field(
+        default=None,
+        description="Solana maker pubkey (base58). Required when chain=solana.",
+    )
     # Optional metadata for display (not part of EIP-712 struct)
     asset: str = Field(default="eth", description="Underlying asset (eth, btc)")
     strike_price: float | None = Field(
@@ -43,21 +55,41 @@ class QuoteSubmission(BaseModel):
             raise ValueError(f"asset must be one of {VALID_ASSETS}")
         return v
 
-    @field_validator("otoken_address")
+    @field_validator("chain")
     @classmethod
-    def validate_eth_address(cls, v: str) -> str:
-        if not ETH_ADDRESS_RE.match(v):
-            raise ValueError("Must be a 0x-prefixed, 40-hex-char Ethereum address")
-        return v.lower()
-
-    @field_validator("signature")
-    @classmethod
-    def validate_signature(cls, v: str) -> str:
-        if not v.startswith("0x"):
-            v = f"0x{v}"
-        if not HEX_SIGNATURE_RE.match(v):
-            raise ValueError("Must be a 0x-prefixed hex string of 65 bytes (132 chars)")
+    def validate_chain(cls, v: str) -> str:
+        v = v.lower()
+        if v not in VALID_CHAINS:
+            raise ValueError(f"chain must be one of {VALID_CHAINS}")
         return v
+
+    @model_validator(mode="after")
+    def validate_chain_specific_fields(self) -> "QuoteSubmission":
+        if self.chain == "solana":
+            if not self.maker:
+                raise ValueError("maker (Solana pubkey) is required when chain=solana")
+            if not BASE58_RE.match(self.maker):
+                raise ValueError("maker must be a valid base58 Solana address")
+            if not BASE58_RE.match(self.otoken_address):
+                raise ValueError("otoken_address must be base58 when chain=solana")
+            if not BASE58_SIG_RE.match(self.signature):
+                raise ValueError(
+                    "signature must be a base58-encoded ed25519 signature "
+                    "when chain=solana"
+                )
+        else:
+            self.otoken_address = self.otoken_address.lower()
+            if not ETH_ADDRESS_RE.match(self.otoken_address):
+                raise ValueError(
+                    "otoken_address must be 0x-prefixed ETH address when chain=base"
+                )
+            if not self.signature.startswith("0x"):
+                self.signature = f"0x{self.signature}"
+            if not HEX_SIGNATURE_RE.match(self.signature):
+                raise ValueError(
+                    "signature must be 0x-prefixed hex (65 bytes) when chain=base"
+                )
+        return self
 
 
 class QuoteBatchRequest(BaseModel):

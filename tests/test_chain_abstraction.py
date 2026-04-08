@@ -37,7 +37,6 @@ class TestAssetChainMapping:
 
     def test_solana_assets(self):
         assert get_chain_for_asset(Asset.SOL) == Chain.SOLANA
-        assert get_chain_for_asset(Asset.JUP) == Chain.SOLANA
         assert get_chain_for_asset(Asset.XAU) == Chain.SOLANA
 
     def test_get_base_assets(self):
@@ -49,7 +48,6 @@ class TestAssetChainMapping:
     def test_get_solana_assets(self):
         sol = get_solana_assets()
         assert Asset.SOL in sol
-        assert Asset.JUP in sol
         assert Asset.XAU in sol
         assert Asset.ETH not in sol
 
@@ -83,9 +81,6 @@ class TestAssetConfig:
 
     def test_sol_decimals(self):
         assert get_asset_config(Asset.SOL).decimals == 9
-
-    def test_jup_decimals(self):
-        assert get_asset_config(Asset.JUP).decimals == 6
 
     def test_xau_decimals(self):
         assert get_asset_config(Asset.XAU).decimals == 8

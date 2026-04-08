@@ -341,16 +341,16 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         strike = q.get("strike_price")
         expiry = q.get("expiry")
         is_put = q.get("is_put")
+        chain = q.get("chain", "base")
 
-        # Compute human-readable fields
-        premium_usd = bid_price_raw / (10**USDC_DECIMALS)
-        # Apply protocol fee (same as before: user sees net premium)
+        # Price scale depends on chain: 1e8 for Solana, 1e6 for Base
+        price_decimals = 8 if chain == "solana" else USDC_DECIMALS
+        premium_usd = bid_price_raw / (10**price_decimals)
         fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
         net_premium = premium_usd * fee_mult
 
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
 
-        # Compute expiry_days (cosmetic) and expiry_date (stable)
         now_ts = int(time.time())
         expiry_days = max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
         expiry_date = (
@@ -359,7 +359,6 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             else None
         )
 
-        # TTL = seconds until deadline
         ttl = max(0, deadline - now_ts)
 
         from src.pricing.black_scholes import OptionType
@@ -372,9 +371,9 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             expiry_days=expiry_days,
             expiry_date=expiry_date,
             premium=net_premium,
-            delta=0,  # Not available from MM quotes
-            iv=0,  # Not available from MM quotes
-            spot=0,  # Will be enriched below if possible
+            delta=0,
+            iv=0,
+            spot=0,
             ttl=ttl,
             expires_at=float(deadline),
             available_amount=available_eth,
@@ -386,9 +385,14 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             quote_id=q["quote_id"],
             max_amount_raw=max_amount_raw,
             maker_nonce=q["maker_nonce"],
+            chain=chain,
         )
     except Exception:
-        logger.exception("Failed to convert quote to PriceResponse: %s", q.get("id"))
+        logger.exception(
+            "Failed to convert quote to PriceResponse: id=%s chain=%s",
+            q.get("id"),
+            q.get("chain", "unknown"),
+        )
         return None
 
 

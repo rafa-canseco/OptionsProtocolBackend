@@ -5,7 +5,6 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query
 
-from src.config import settings
 from src.db.database import get_client
 from src.models.simulate import (
     EarningsSnapshot,
@@ -41,8 +40,14 @@ _weekly_cache_ts: float = 0.0
     summary="Simulate a cash-secured put",
 )
 async def simulate(
-    strike: float = Query(gt=0, description="Strike price in USD (rounded to nearest $50)"),
-    side: str = Query(default="buy", pattern="^buy$", description="Side — currently only 'buy' (reserved for future expansion)"),
+    strike: float = Query(
+        gt=0, description="Strike price in USD (rounded to nearest $50)"
+    ),
+    side: str = Query(
+        default="buy",
+        pattern="^buy$",
+        description="Side — currently only 'buy' (reserved for future expansion)",
+    ),
 ):
     """Back-test selling a 7-day cash-secured put at the given strike using
     real ETH price history from CoinGecko and current Deribit IV.
@@ -247,7 +252,9 @@ async def get_earnings_history(address: str):
         client = get_client()
         result = (
             client.table("user_weekly_results")
-            .select("week_start,week_end,total_simulated_premium,assignments,simulated_pnl,cumulative_pnl")
+            .select(
+                "week_start,week_end,total_simulated_premium,assignments,simulated_pnl,cumulative_pnl"
+            )
             .eq("user_address", address.lower())
             .order("week_start", desc=False)
             .execute()
