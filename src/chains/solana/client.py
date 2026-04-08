@@ -154,8 +154,15 @@ def get_solana_maker_nonce(maker_pubkey: str) -> int:
     if resp.value is None:
         return 0
 
-    data: bytes = resp.value.data
-    nonce: int = struct.unpack_from("<Q", data, _MAKER_NONCE_OFFSET)[0]
+    data = resp.value.data
+    min_length = _MAKER_NONCE_OFFSET + 8
+    if len(data) < min_length:
+        raise RuntimeError(
+            f"MakerState account data too short for {maker_pubkey[:8]}... "
+            f"(got {len(data)} bytes, need {min_length}). "
+            f"Check solana_batch_settler_program_id is correct."
+        )
+    nonce = struct.unpack_from("<Q", data, _MAKER_NONCE_OFFSET)[0]
     return nonce
 
 

@@ -1,9 +1,12 @@
 """Ed25519 signature verification for Solana quote messages."""
 
+import logging
 import struct
 
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.signature import Signature  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 
 def build_solana_quote_message(
@@ -60,4 +63,8 @@ def verify_solana_quote(pubkey: Pubkey, message: bytes, signature: bytes) -> boo
     try:
         return Signature.from_bytes(signature).verify(pubkey, message)
     except Exception:  # noqa: BLE001
+        logger.warning(
+            "Unexpected error during ed25519 verification",
+            exc_info=True,
+        )
         return False

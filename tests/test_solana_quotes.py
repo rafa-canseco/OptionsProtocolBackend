@@ -5,11 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from solders.keypair import Keypair  # type: ignore[import-untyped]
+from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
 
 from src.api.deps import require_mm_api_key
 from src.crypto.ed25519 import build_solana_quote_message
 from src.main import app
+from src.models.mm import QuoteSubmission
 
 client = TestClient(app)
 
@@ -28,6 +31,7 @@ BASE_SIGNATURE = "0x" + "c" * 130
 
 def _sign_solana_quote(
     otoken_mint: str,
+    *,
     bid_price: int,
     deadline: int,
     quote_id: int,
@@ -35,9 +39,7 @@ def _sign_solana_quote(
     maker_nonce: int,
 ) -> str:
     """Build a 72-byte Solana quote message, sign it, and return base58 signature."""
-    from solders.pubkey import Pubkey  # type: ignore[import-untyped]
-
-    otoken_bytes = bytes(Pubkey.from_string(otoken_mint))
+    otoken_bytes = bytes(SolPubkey.from_string(otoken_mint))
     msg = build_solana_quote_message(
         otoken_bytes,
         bid_price=bid_price,
@@ -54,8 +56,12 @@ def _sign_solana_quote(
 def mock_deps():
     """Patch Solana dependencies and auth for Solana quote tests."""
     mock_client = MagicMock()
-    mock_client.table.return_value.update.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value = MagicMock(data=[])  # noqa: E501
-    mock_client.table.return_value.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+    mock_client.table.return_value.update.return_value.eq.return_value.eq.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=[]
+    )  # noqa: E501
+    mock_client.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+        data=[{}]
+    )
 
     with (
         patch("src.api.mm_routes.get_client", return_value=mock_client),
@@ -116,7 +122,7 @@ class TestSolanaQuoteSubmission:
     def test_rejects_invalid_ed25519_signature(self, mock_deps):
         other_kp = Keypair()
         deadline = int(time.time()) + 300
-        otoken_bytes = bytes(__import__("solders.pubkey", fromlist=["Pubkey"]).Pubkey.from_string(SOL_OTOKEN))
+        otoken_bytes = bytes(SolPubkey.from_string(SOL_OTOKEN))
         msg = build_solana_quote_message(
             otoken_bytes,
             bid_price=1_000_000,
@@ -200,3 +206,145 @@ class TestSolanaQuoteSubmission:
         data = resp.json()
         assert data["accepted"] == 1
         assert data["rejected"] == 0
+
+
+class TestQuoteSubmissionValidation:
+    """Model validation for chain-specific fields."""
+
+    def test_solana_requires_maker(self):
+        with pytest.raises(ValidationError, match="maker.*required"):
+            QuoteSubmission(
+                otoken_address="jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9",
+                bid_price=100,
+                deadline=int(time.time()) + 300,
+                quote_id=1,
+                max_amount=100,
+                maker_nonce=0,
+                signature="4crHyTwxwddFMhteX2UDZHchfjxcHqEXvnYPuGKciqJqJzMVEu3FFxPEBnFiZjkHbqJSTrQ7JRdkiRbmyG3kDVuf",
+                chain="solana",
+            )
+
+    def test_solana_rejects_eth_otoken(self):
+        with pytest.raises(ValidationError, match="base58"):
+            QuoteSubmission(
+                otoken_address="0x" + "ab" * 20,
+                bid_price=100,
+                deadline=int(time.time()) + 300,
+                quote_id=1,
+                max_amount=100,
+                maker_nonce=0,
+                signature="4crHyTwxwddFMhteX2UDZHchfjxcHqEXvnYPuGKciqJqJzMVEu3FFxPEBnFiZjkHbqJSTrQ7JRdkiRbmyG3kDVuf",
+                chain="solana",
+                maker="jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9",
+            )
+
+    def test_base_rejects_base58_otoken(self):
+        with pytest.raises(ValidationError, match="0x-prefixed"):
+            QuoteSubmission(
+                otoken_address="jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9",
+                bid_price=100,
+                deadline=int(time.time()) + 300,
+                quote_id=1,
+                max_amount=100,
+                maker_nonce=0,
+                signature="0x" + "ee" * 65,
+                chain="base",
+            )
+
+    def test_base_auto_prefixes_signature(self):
+        q = QuoteSubmission(
+            otoken_address="0x" + "ab" * 20,
+            bid_price=100,
+            deadline=int(time.time()) + 300,
+            quote_id=1,
+            max_amount=100,
+            maker_nonce=0,
+            signature="ee" * 65,
+            chain="base",
+        )
+        assert q.signature.startswith("0x")
+
+    def test_invalid_chain_rejected(self):
+        with pytest.raises(ValidationError, match="chain"):
+            QuoteSubmission(
+                otoken_address="0x" + "ab" * 20,
+                bid_price=100,
+                deadline=int(time.time()) + 300,
+                quote_id=1,
+                max_amount=100,
+                maker_nonce=0,
+                signature="0x" + "ee" * 65,
+                chain="ethereum",
+            )
+
+
+class TestPriceScaleConversion:
+    """Verify chain-aware price scale in _quote_to_price_response."""
+
+    def test_solana_uses_1e8_scale(self):
+        from src.api.routes import _quote_to_price_response
+
+        q = {
+            "id": "test-1",
+            "bid_price": "1_00000000",  # 1.0 in 1e8
+            "max_amount": "1_00000000",
+            "deadline": int(time.time()) + 300,
+            "strike_price": 150.0,
+            "expiry": int(time.time()) + 86400,
+            "is_put": True,
+            "chain": "solana",
+            "otoken_address": "jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9",
+            "signature": "fakesig",
+            "mm_address": "maker123",
+            "quote_id": "1",
+            "maker_nonce": 0,
+        }
+        pr = _quote_to_price_response(q)
+        assert pr is not None
+        assert pr.chain == "solana"
+        # 1e8 / 1e8 = 1.0 USD, minus 4% fee = 0.96
+        assert 0.95 < pr.premium < 0.97
+
+    def test_base_uses_1e6_scale(self):
+        from src.api.routes import _quote_to_price_response
+
+        q = {
+            "id": "test-2",
+            "bid_price": "1_000000",  # 1.0 in 1e6
+            "max_amount": "1_00000000",
+            "deadline": int(time.time()) + 300,
+            "strike_price": 2500.0,
+            "expiry": int(time.time()) + 86400,
+            "is_put": False,
+            "chain": "base",
+            "otoken_address": "0x" + "ab" * 20,
+            "signature": "0x" + "ee" * 65,
+            "mm_address": "0x" + "cd" * 20,
+            "quote_id": "2",
+            "maker_nonce": 0,
+        }
+        pr = _quote_to_price_response(q)
+        assert pr is not None
+        assert pr.chain == "base"
+        assert 0.95 < pr.premium < 0.97
+
+    def test_missing_chain_defaults_to_base(self):
+        from src.api.routes import _quote_to_price_response
+
+        q = {
+            "id": "test-3",
+            "bid_price": "1_000000",
+            "max_amount": "1_00000000",
+            "deadline": int(time.time()) + 300,
+            "strike_price": 2500.0,
+            "expiry": int(time.time()) + 86400,
+            "is_put": False,
+            "otoken_address": "0x" + "ab" * 20,
+            "signature": "0x" + "ee" * 65,
+            "mm_address": "0x" + "cd" * 20,
+            "quote_id": "3",
+            "maker_nonce": 0,
+        }
+        pr = _quote_to_price_response(q)
+        assert pr is not None
+        assert pr.chain == "base"

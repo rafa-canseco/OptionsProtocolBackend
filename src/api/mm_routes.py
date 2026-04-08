@@ -43,6 +43,7 @@ from src.models.mm import (
     QuoteBatchRequest,
     QuoteBatchResponse,
     QuoteResponse,
+    QuoteSubmission,
 )
 from src.pricing.assets import Asset
 from src.pricing.chainlink import get_asset_price
@@ -60,6 +61,36 @@ def _normalize_mm_address(addr: str) -> str:
     if addr.startswith("0x"):
         return addr.lower()
     return addr
+
+
+def _resolve_nonce(
+    chain: str, body: QuoteBatchRequest, mm_address: str
+) -> tuple[str, int]:
+    """Return (mm_id, on_chain_nonce) for the chain.
+
+    For Solana: mm_id is the maker pubkey, nonce from MakerState PDA.
+    For Base: mm_id is the lowercased EVM address, nonce from BatchSettler.
+    """
+    if chain == "solana":
+        maker = body.quotes[0].maker
+        if not maker:
+            raise HTTPException(400, "maker required for Solana quotes")
+        try:
+            nonce = get_solana_maker_nonce(maker)
+        except Exception:
+            logger.exception("Failed to read Solana makerNonce for %s", maker)
+            raise HTTPException(502, "Could not read Solana makerNonce")
+        return maker, nonce
+    else:
+        try:
+            settler = get_batch_settler()
+            nonce = settler.functions.makerNonce(
+                Web3.to_checksum_address(mm_address)
+            ).call()
+        except Exception:
+            logger.exception("Failed to read makerNonce for %s", mm_address)
+            raise HTTPException(502, "Could not read on-chain makerNonce")
+        return mm_address.lower(), nonce
 
 
 @router.post(
@@ -81,34 +112,15 @@ async def submit_quotes(
     accepted = 0
     errors: list[str] = []
 
-    chain = body.quotes[0].chain
+    chains_in_batch = {q.chain for q in body.quotes}
+    if len(chains_in_batch) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"All quotes in a batch must target the same chain, got: {chains_in_batch}",
+        )
+    chain = chains_in_batch.pop()
 
-    if chain == "solana":
-        maker = body.quotes[0].maker
-        if not maker:
-            raise HTTPException(
-                status_code=400, detail="maker required for Solana quotes"
-            )
-        mm_id = maker
-        try:
-            on_chain_nonce = get_solana_maker_nonce(maker)
-        except Exception:
-            logger.exception("Failed to read Solana makerNonce for %s", maker)
-            raise HTTPException(
-                status_code=502, detail="Could not read on-chain makerNonce"
-            )
-    else:
-        mm_id = mm_address.lower()
-        try:
-            settler = get_batch_settler()
-            on_chain_nonce = settler.functions.makerNonce(
-                Web3.to_checksum_address(mm_address)
-            ).call()
-        except Exception:
-            logger.exception("Failed to read makerNonce for %s", mm_address)
-            raise HTTPException(
-                status_code=502, detail="Could not read on-chain makerNonce"
-            )
+    mm_id, on_chain_nonce = _resolve_nonce(chain, body, mm_address)
 
     rows_to_upsert = []
 
@@ -178,7 +190,7 @@ async def submit_quotes(
     )
 
 
-def _verify_solana_sig(q, label: str, errors: list[str]) -> bool:
+def _verify_solana_sig(q: QuoteSubmission, label: str, errors: list[str]) -> bool:
     """Verify an ed25519 Solana quote signature. Returns True if valid."""
     try:
         pubkey = SolPubkey.from_string(q.maker)
@@ -202,7 +214,9 @@ def _verify_solana_sig(q, label: str, errors: list[str]) -> bool:
     return True
 
 
-def _verify_base_sig(q, label: str, mm_address: str, errors: list[str]) -> bool:
+def _verify_base_sig(
+    q: QuoteSubmission, label: str, mm_address: str, errors: list[str]
+) -> bool:
     """Verify an EIP-712 Base quote signature. Returns True if valid."""
     try:
         recovered = recover_quote_signer(

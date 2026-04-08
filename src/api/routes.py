@@ -388,7 +388,11 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             chain=chain,
         )
     except Exception:
-        logger.exception("Failed to convert quote to PriceResponse: %s", q.get("id"))
+        logger.exception(
+            "Failed to convert quote to PriceResponse: id=%s chain=%s",
+            q.get("id"),
+            q.get("chain", "unknown"),
+        )
         return None
 
 
