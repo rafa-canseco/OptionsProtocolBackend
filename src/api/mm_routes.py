@@ -79,7 +79,9 @@ async def submit_quotes(
     if chain == "solana":
         maker = body.quotes[0].maker
         if not maker:
-            raise HTTPException(status_code=400, detail="maker required for Solana quotes")
+            raise HTTPException(
+                status_code=400, detail="maker required for Solana quotes"
+            )
         mm_id = maker
         try:
             on_chain_nonce = get_solana_maker_nonce(maker)

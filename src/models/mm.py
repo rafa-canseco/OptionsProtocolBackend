@@ -67,15 +67,11 @@ class QuoteSubmission(BaseModel):
     def validate_chain_specific_fields(self) -> "QuoteSubmission":
         if self.chain == "solana":
             if not self.maker:
-                raise ValueError(
-                    "maker (Solana pubkey) is required when chain=solana"
-                )
+                raise ValueError("maker (Solana pubkey) is required when chain=solana")
             if not BASE58_RE.match(self.maker):
                 raise ValueError("maker must be a valid base58 Solana address")
             if not BASE58_RE.match(self.otoken_address):
-                raise ValueError(
-                    "otoken_address must be base58 when chain=solana"
-                )
+                raise ValueError("otoken_address must be base58 when chain=solana")
             if not BASE58_SIG_RE.match(self.signature):
                 raise ValueError(
                     "signature must be a base58-encoded ed25519 signature "
@@ -84,15 +80,13 @@ class QuoteSubmission(BaseModel):
         else:
             if not ETH_ADDRESS_RE.match(self.otoken_address):
                 raise ValueError(
-                    "otoken_address must be 0x-prefixed ETH address "
-                    "when chain=base"
+                    "otoken_address must be 0x-prefixed ETH address when chain=base"
                 )
             if not self.signature.startswith("0x"):
                 self.signature = f"0x{self.signature}"
             if not HEX_SIGNATURE_RE.match(self.signature):
                 raise ValueError(
-                    "signature must be 0x-prefixed hex (65 bytes) "
-                    "when chain=base"
+                    "signature must be 0x-prefixed hex (65 bytes) when chain=base"
                 )
         return self
 

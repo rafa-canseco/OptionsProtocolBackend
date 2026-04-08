@@ -352,13 +352,9 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
 
         now_ts = int(time.time())
-        expiry_days = (
-            max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
-        )
+        expiry_days = max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
         expiry_date = (
-            datetime.fromtimestamp(expiry, tz=timezone.utc).strftime(
-                "%Y-%m-%d"
-            )
+            datetime.fromtimestamp(expiry, tz=timezone.utc).strftime("%Y-%m-%d")
             if expiry
             else None
         )
@@ -392,9 +388,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             chain=chain,
         )
     except Exception:
-        logger.exception(
-            "Failed to convert quote to PriceResponse: %s", q.get("id")
-        )
+        logger.exception("Failed to convert quote to PriceResponse: %s", q.get("id"))
         return None
 
 
