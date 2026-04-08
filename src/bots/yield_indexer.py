@@ -307,17 +307,24 @@ async def run() -> None:
     logger.info("Yield indexer catchup: blocks %d → %d", start, current_block)
 
     while start <= current_block:
-        end = min(start + BLOCK_RANGE - 1, current_block)
-        count = _fetch_and_process_logs(start, end)
-        if count > 0:
-            logger.info(
-                "Yield indexer processed %d logs in blocks %d–%d",
-                count,
+        try:
+            end = min(start + BLOCK_RANGE - 1, current_block)
+            count = _fetch_and_process_logs(start, end)
+            if count > 0:
+                logger.info(
+                    "Yield indexer processed %d logs in blocks %d–%d",
+                    count,
+                    start,
+                    end,
+                )
+            _set_last_indexed_block(end)
+            start = end + 1
+        except Exception:
+            logger.exception(
+                "Yield indexer catchup failed at block %d, retrying in 30s",
                 start,
-                end,
             )
-        _set_last_indexed_block(end)
-        start = end + 1
+            await asyncio.sleep(30)
 
     if settings.wss_rpc_url:
         await _subscribe_wss()
