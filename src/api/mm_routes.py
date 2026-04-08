@@ -22,9 +22,14 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from web3 import Web3
 
+from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
+from solders.signature import Signature as SolSignature  # type: ignore[import-untyped]
+
 from src.api.deps import require_mm_api_key
+from src.chains.solana.client import get_solana_maker_nonce
 from src.config import settings
 from src.contracts.web3_client import get_batch_settler, get_w3
+from src.crypto.ed25519 import build_solana_quote_message, verify_solana_quote
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
 from src.models.mm import (
@@ -59,39 +64,52 @@ async def submit_quotes(
     body: QuoteBatchRequest,
     mm_address: str = Depends(require_mm_api_key),
 ):
-    """Submit a batch of EIP-712 signed quotes.
+    """Submit a batch of signed quotes (EIP-712 for Base, ed25519 for Solana).
 
-    Each quote's signature is verified: the recovered signer must match
-    the MM address associated with the API key. Quotes with invalid
-    signatures, expired deadlines, or wrong makerNonce are rejected.
+    The chain is determined from the first quote — MMs send per-chain batches.
+    Signatures, nonces, and addresses are validated per-chain. Quotes with
+    invalid signatures, expired deadlines, or wrong makerNonce are rejected.
     """
     now_ts = int(time.time())
     accepted = 0
     errors: list[str] = []
 
-    # Read the on-chain makerNonce for this MM
-    try:
-        settler = get_batch_settler()
-        on_chain_nonce = settler.functions.makerNonce(
-            Web3.to_checksum_address(mm_address)
-        ).call()
-    except Exception:
-        logger.exception("Failed to read makerNonce for %s", mm_address)
-        raise HTTPException(
-            status_code=502, detail="Could not read on-chain makerNonce"
-        )
+    chain = body.quotes[0].chain
+
+    if chain == "solana":
+        maker = body.quotes[0].maker
+        if not maker:
+            raise HTTPException(status_code=400, detail="maker required for Solana quotes")
+        mm_id = maker
+        try:
+            on_chain_nonce = get_solana_maker_nonce(maker)
+        except Exception:
+            logger.exception("Failed to read Solana makerNonce for %s", maker)
+            raise HTTPException(
+                status_code=502, detail="Could not read on-chain makerNonce"
+            )
+    else:
+        mm_id = mm_address.lower()
+        try:
+            settler = get_batch_settler()
+            on_chain_nonce = settler.functions.makerNonce(
+                Web3.to_checksum_address(mm_address)
+            ).call()
+        except Exception:
+            logger.exception("Failed to read makerNonce for %s", mm_address)
+            raise HTTPException(
+                status_code=502, detail="Could not read on-chain makerNonce"
+            )
 
     rows_to_upsert = []
 
     for i, q in enumerate(body.quotes):
         label = f"quote[{i}]"
 
-        # Check deadline
         if q.deadline <= now_ts:
             errors.append(f"{label}: deadline {q.deadline} already passed")
             continue
 
-        # Check makerNonce matches on-chain
         if q.maker_nonce != on_chain_nonce:
             errors.append(
                 f"{label}: makerNonce mismatch (got {q.maker_nonce}, "
@@ -99,42 +117,28 @@ async def submit_quotes(
             )
             continue
 
-        # Verify EIP-712 signature
-        try:
-            recovered = recover_quote_signer(
-                otoken=q.otoken_address,
-                bid_price=q.bid_price,
-                deadline=q.deadline,
-                quote_id=q.quote_id,
-                max_amount=q.max_amount,
-                maker_nonce=q.maker_nonce,
-                signature=q.signature,
-            )
-        except Exception:
-            logger.exception("%s: signature recovery failed", label)
-            errors.append(f"{label}: invalid signature")
-            continue
-
-        if recovered.lower() != mm_address.lower():
-            logger.warning(
-                "%s: signer mismatch (recovered %s, expected %s)",
-                label,
-                recovered,
-                mm_address,
-            )
-            errors.append(f"{label}: signature does not match authenticated MM address")
-            continue
+        if chain == "solana":
+            valid = _verify_solana_sig(q, label, errors)
+            if not valid:
+                continue
+            otoken_addr = q.otoken_address
+        else:
+            valid = _verify_base_sig(q, label, mm_address, errors)
+            if not valid:
+                continue
+            otoken_addr = q.otoken_address.lower()
 
         rows_to_upsert.append(
             {
-                "mm_address": mm_address.lower(),
-                "otoken_address": q.otoken_address.lower(),
+                "mm_address": mm_id,
+                "otoken_address": otoken_addr,
                 "bid_price": str(q.bid_price),
                 "deadline": q.deadline,
                 "quote_id": str(q.quote_id),
                 "max_amount": str(q.max_amount),
                 "maker_nonce": q.maker_nonce,
                 "signature": q.signature,
+                "chain": chain,
                 "asset": q.asset,
                 "strike_price": q.strike_price,
                 "expiry": q.expiry,
@@ -145,23 +149,12 @@ async def submit_quotes(
 
     if rows_to_upsert:
         try:
-            client = get_client()
-            # Deactivate old quotes for otokens being refreshed so
-            # stale signatures are no longer served via /prices.
-            otoken_addrs = list(
-                {r["otoken_address"] for r in rows_to_upsert}
-            )
-            client.table("mm_quotes").update(
-                {"is_active": False}
-            ).eq(
-                "mm_address", mm_address.lower()
-            ).eq(
-                "is_active", True
-            ).in_(
-                "otoken_address", otoken_addrs
-            ).execute()
-            # Upsert new quotes (re-sets is_active=True)
-            client.table("mm_quotes").upsert(
+            db = get_client()
+            otoken_addrs = list({r["otoken_address"] for r in rows_to_upsert})
+            db.table("mm_quotes").update({"is_active": False}).eq(
+                "mm_address", mm_id
+            ).eq("is_active", True).in_("otoken_address", otoken_addrs).execute()
+            db.table("mm_quotes").upsert(
                 rows_to_upsert, on_conflict="mm_address,quote_id"
             ).execute()
             accepted = len(rows_to_upsert)
@@ -174,6 +167,59 @@ async def submit_quotes(
         rejected=len(body.quotes) - accepted,
         errors=errors,
     )
+
+
+def _verify_solana_sig(q, label: str, errors: list[str]) -> bool:
+    """Verify an ed25519 Solana quote signature. Returns True if valid."""
+    try:
+        pubkey = SolPubkey.from_string(q.maker)
+        otoken_bytes = bytes(SolPubkey.from_string(q.otoken_address))
+        msg = build_solana_quote_message(
+            otoken_bytes,
+            bid_price=q.bid_price,
+            deadline=q.deadline,
+            quote_id=q.quote_id,
+            max_amount=q.max_amount,
+            maker_nonce=q.maker_nonce,
+        )
+        sig_bytes = bytes(SolSignature.from_string(q.signature))
+        if not verify_solana_quote(pubkey, msg, sig_bytes):
+            errors.append(f"{label}: signature does not match maker pubkey")
+            return False
+    except Exception:
+        logger.exception("%s: Solana signature verification failed", label)
+        errors.append(f"{label}: invalid signature")
+        return False
+    return True
+
+
+def _verify_base_sig(q, label: str, mm_address: str, errors: list[str]) -> bool:
+    """Verify an EIP-712 Base quote signature. Returns True if valid."""
+    try:
+        recovered = recover_quote_signer(
+            otoken=q.otoken_address,
+            bid_price=q.bid_price,
+            deadline=q.deadline,
+            quote_id=q.quote_id,
+            max_amount=q.max_amount,
+            maker_nonce=q.maker_nonce,
+            signature=q.signature,
+        )
+    except Exception:
+        logger.exception("%s: EIP-712 signature recovery failed", label)
+        errors.append(f"{label}: invalid signature")
+        return False
+
+    if recovered.lower() != mm_address.lower():
+        logger.warning(
+            "%s: signer mismatch (recovered %s, expected %s)",
+            label,
+            recovered,
+            mm_address,
+        )
+        errors.append(f"{label}: signature does not match authenticated MM address")
+        return False
+    return True
 
 
 @router.get(

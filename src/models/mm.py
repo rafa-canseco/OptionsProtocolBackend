@@ -7,6 +7,8 @@ VALID_ASSETS = {"eth", "btc", "sol", "xau"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 VALID_CHAINS = {"base", "solana"}
 BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+# ed25519 signatures are 64 bytes; base58-encoded they reach up to 88 chars
+BASE58_SIG_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{80,88}$")
 
 
 class QuoteSubmission(BaseModel):
@@ -74,9 +76,10 @@ class QuoteSubmission(BaseModel):
                 raise ValueError(
                     "otoken_address must be base58 when chain=solana"
                 )
-            if not BASE58_RE.match(self.signature):
+            if not BASE58_SIG_RE.match(self.signature):
                 raise ValueError(
-                    "signature must be base58-encoded when chain=solana"
+                    "signature must be a base58-encoded ed25519 signature "
+                    "when chain=solana"
                 )
         else:
             if not ETH_ADDRESS_RE.match(self.otoken_address):
