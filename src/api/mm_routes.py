@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mm", tags=["Market Making"])
 
 
+def _normalize_mm_address(addr: str) -> str:
+    """Normalize MM address: lowercase for EVM (0x), as-is for Solana (base58)."""
+    if addr.startswith("0x"):
+        return addr.lower()
+    return addr
+
+
 @router.post(
     "/quotes",
     response_model=QuoteBatchResponse,
@@ -237,7 +244,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("mm_quotes")
             .select("*")
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
             .gt("deadline", now_ts)
             .order("created_at", desc=True)
@@ -283,7 +290,7 @@ async def cancel_quotes(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("mm_quotes")
             .update({"is_active": False})
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
             .execute()
         )
@@ -313,7 +320,7 @@ async def get_fills(
         q = (
             client.table("order_events")
             .select("*")
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
         )
         if since is not None:
             q = q.gte("indexed_at", _ts_to_iso(since))
@@ -359,7 +366,7 @@ async def get_positions(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("order_events")
             .select("*")
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
             .gt("expiry", now_ts)
             .order("expiry")
             .execute()
@@ -416,7 +423,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
         quotes_result = (
             client.table("mm_quotes")
             .select("max_amount")
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
             .gt("deadline", now_ts)
             .execute()
@@ -429,7 +436,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
         fills_result = (
             client.table("order_events")
             .select("expiry,amount,gross_premium,premium,is_settled")
-            .eq("mm_address", mm_address.lower())
+            .eq("mm_address", _normalize_mm_address(mm_address))
             .execute()
         )
         fills = fills_result.data or []
@@ -561,7 +568,7 @@ async def report_capacity(
     Upserts into mm_capacity keyed by mm_address.
     """
     row = {
-        "mm_address": mm_address.lower(),
+        "mm_address": _normalize_mm_address(mm_address),
         "asset": body.asset.lower(),
         "capacity_eth": body.capacity_eth,
         "capacity_usd": body.capacity_usd,

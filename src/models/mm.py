@@ -12,7 +12,7 @@ BASE58_SIG_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{80,88}$")
 
 
 class QuoteSubmission(BaseModel):
-    """A single EIP-712 signed quote from a market maker."""
+    """A signed quote from a market maker (EIP-712 for Base, ed25519 for Solana)."""
 
     otoken_address: str = Field(description="oToken contract address")
     bid_price: int = Field(
@@ -78,6 +78,7 @@ class QuoteSubmission(BaseModel):
                     "when chain=solana"
                 )
         else:
+            self.otoken_address = self.otoken_address.lower()
             if not ETH_ADDRESS_RE.match(self.otoken_address):
                 raise ValueError(
                     "otoken_address must be 0x-prefixed ETH address when chain=base"
