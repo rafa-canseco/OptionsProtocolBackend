@@ -2,6 +2,7 @@
 
 import json
 import logging
+import struct
 from pathlib import Path
 
 from solana.rpc.api import Client as SolanaClient
@@ -119,6 +120,43 @@ def get_sol_balance(owner: str) -> int:
         raise RuntimeError(f"Failed to read SOL balance for {owner[:8]}...") from exc
     _check_rpc_error(resp, f"get_balance({owner[:8]}...)")
     return resp.value
+
+
+_MAKER_NONCE_OFFSET = 8 + 32  # discriminator + maker pubkey = 40
+
+
+def get_solana_maker_nonce(maker_pubkey: str) -> int:
+    """Read the nonce from a MakerState PDA for the given maker.
+
+    Derives the PDA with seeds [b"maker", bytes(maker_pk)] under the
+    batch settler program, then unpacks the nonce field at byte offset 40
+    (8-byte Anchor discriminator + 32-byte maker pubkey).
+
+    Returns 0 if the account has not been created yet.
+    Raises RuntimeError on RPC failure.
+    """
+    maker_pk = Pubkey.from_string(maker_pubkey)
+    program_pk = Pubkey.from_string(settings.solana_batch_settler_program_id)
+
+    pda, _ = Pubkey.find_program_address(
+        [b"maker", bytes(maker_pk)],
+        program_pk,
+    )
+
+    client = get_solana_client()
+    try:
+        resp = client.get_account_info(pda)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Solana RPC error reading MakerState for {maker_pubkey[:8]}..."
+        ) from exc
+
+    if resp.value is None:
+        return 0
+
+    data: bytes = resp.value.data
+    nonce: int = struct.unpack_from("<Q", data, _MAKER_NONCE_OFFSET)[0]
+    return nonce
 
 
 def build_and_send_solana_tx(tx: VersionedTransaction) -> str:
