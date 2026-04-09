@@ -528,10 +528,18 @@ async def get_market(
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    from src.pricing.assets import get_asset_config
+    from src.pricing.assets import get_asset_config, get_chain_for_asset
+    from src.chains import Chain
 
     cfg = get_asset_config(asset)
-    underlying_addr = cfg.underlying_address.lower()
+    # Base: hex addresses are case-insensitive → lowercase
+    # Solana: base58 addresses are case-sensitive → keep as-is
+    chain = get_chain_for_asset(asset)
+    underlying_addr = (
+        cfg.underlying_address
+        if chain == Chain.SOLANA
+        else cfg.underlying_address.lower()
+    )
 
     otokens: list[OTokenInfo] = []
     active_expiries = _parse_custom_expiries() or get_expiries()

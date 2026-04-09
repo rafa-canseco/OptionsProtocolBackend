@@ -84,11 +84,12 @@ async def lifespan(app: FastAPI):
 
     # ── Solana bots ──
     if has_solana_config():
-        from src.bots import solana_circuit_breaker_bot
+        from src.bots import solana_circuit_breaker_bot, solana_otoken_manager
 
         tasks.append(asyncio.create_task(solana_circuit_breaker_bot.run()))
+        tasks.append(asyncio.create_task(solana_otoken_manager.run()))
         logger.info(
-            "Solana circuit breaker started (cluster=%s)",
+            "Solana bots started (cluster=%s): circuit breaker, otoken manager",
             settings.solana_cluster,
         )
     else:
