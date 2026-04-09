@@ -221,6 +221,13 @@ if settings.beta_mode:
 
     app.include_router(demo_router)
     app.include_router(faucet_router)
+
+    if has_solana_config() and settings.solana_usdc_mint:
+        from src.api.solana_faucet import router as solana_faucet_router
+
+        app.include_router(solana_faucet_router)
+        logger.info("Solana faucet enabled at /faucet/solana")
+
     app.openapi_tags = (app.openapi_tags or []) + [  # type: ignore[operator]
         {
             "name": "Faucet",
