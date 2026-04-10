@@ -167,7 +167,7 @@ class OTokenInfo(BaseModel):
 class MarketDataResponse(BaseModel):
     """Market data for MM's pricing engine."""
 
-    asset: str = Field(description="Asset symbol (eth, btc)")
+    asset: str = Field(description="Asset symbol (eth, btc, sol)")
     spot: float = Field(description="Spot price in USD")
     iv: float = Field(description="Implied volatility (annualized decimal)")
     protocol_fee_bps: int
@@ -197,8 +197,8 @@ class QuoteResponse(BaseModel):
 class CapacityUpdateRequest(BaseModel):
     """Capacity report from a market maker."""
 
-    asset: str = Field(default="eth", description="Asset symbol (eth, btc)")
-    capacity_eth: float = Field(ge=0, description="Available capacity in ETH")
+    asset: str = Field(default="eth", description="Asset symbol (eth, btc, sol)")
+    capacity_eth: float = Field(ge=0, description="Available capacity in native units")
     capacity_usd: float = Field(ge=0, description="Available capacity in USD")
     status: str = Field(description="active, degraded, or full")
     # Optional internal fields (sent by internal MMs)
@@ -229,7 +229,7 @@ class CapacityUpdateRequest(BaseModel):
 class CapacityResponse(BaseModel):
     """Public capacity info exposed to the frontend."""
 
-    asset: str = Field(description="Asset symbol (eth, btc)")
+    asset: str = Field(description="Asset symbol (eth, btc, sol)")
     capacity: float = Field(description="Total available capacity in native units")
     capacity_usd: float = Field(description="Total available capacity in USD")
     market_open: bool = Field(description="Whether any MM is accepting positions")

@@ -45,7 +45,7 @@ from src.models.mm import (
     QuoteResponse,
     QuoteSubmission,
 )
-from src.pricing.assets import Asset
+from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
 from src.pricing.utils import get_expiries
@@ -597,9 +597,12 @@ async def report_capacity(
     The mm_address is taken from the authenticated API key, not the body.
     Upserts into mm_capacity keyed by mm_address.
     """
+    asset_val = body.asset.lower()
+    chain_val = get_chain_for_asset(Asset(asset_val)).value
     row = {
         "mm_address": _normalize_mm_address(mm_address),
-        "asset": body.asset.lower(),
+        "asset": asset_val,
+        "chain": chain_val,
         "capacity_eth": body.capacity_eth,
         "capacity_usd": body.capacity_usd,
         "status": body.status,

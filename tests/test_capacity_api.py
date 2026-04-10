@@ -61,6 +61,26 @@ class TestPostCapacity:
         assert row["mm_address"] == MM_ADDRESS.lower()
         assert row["capacity_eth"] == 10.5
         assert row["status"] == "active"
+        assert row["chain"] == "base"
+
+    def test_sol_capacity_derives_solana_chain(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.return_value = (
+            MagicMock(data=[{"mm_address": MM_ADDRESS}])
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "sol",
+                "capacity_eth": 100.0,
+                "capacity_usd": 8500.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        row = mock_db.table.return_value.upsert.call_args[0][0]
+        assert row["asset"] == "sol"
+        assert row["chain"] == "solana"
 
     def test_accepts_internal_mm_fields(self, auth_headers, mock_db):
         mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
