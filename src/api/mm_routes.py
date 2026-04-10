@@ -506,8 +506,18 @@ async def get_market(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
     """Return market data for MM's pricing engine for a given asset."""
+    from src.pricing.assets import get_asset_config, get_chain_for_asset
+    from src.chains import Chain
+
+    chain = get_chain_for_asset(asset)
+
     try:
-        spot, _ = get_asset_price(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
+
+            spot, _ = get_spot_price(asset)
+        else:
+            spot, _ = get_asset_price(asset)
     except Exception:
         logger.exception("Failed to fetch %s spot price", asset.value)
         raise HTTPException(
@@ -520,21 +530,19 @@ async def get_market(
         logger.exception("Failed to fetch %s IV from Deribit", asset.value)
         raise HTTPException(status_code=502, detail="Could not fetch IV")
 
-    try:
-        w3 = get_w3()
-        gas_price_wei = w3.eth.gas_price
-        gas_price_gwei = gas_price_wei / 1e9
-    except Exception:
-        logger.exception("Failed to fetch gas price")
-        gas_price_gwei = 0.0
-
-    from src.pricing.assets import get_asset_config, get_chain_for_asset
-    from src.chains import Chain
+    # Gas price only relevant for Base
+    gas_price_gwei = 0.0
+    if chain == Chain.BASE:
+        try:
+            w3 = get_w3()
+            gas_price_wei = w3.eth.gas_price
+            gas_price_gwei = gas_price_wei / 1e9
+        except Exception:
+            logger.exception("Failed to fetch gas price")
 
     cfg = get_asset_config(asset)
     # Base: hex addresses are case-insensitive → lowercase
     # Solana: base58 addresses are case-sensitive → keep as-is
-    chain = get_chain_for_asset(asset)
     underlying_addr = (
         cfg.underlying_address
         if chain == Chain.SOLANA
