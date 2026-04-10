@@ -31,6 +31,13 @@ async def get_iv(asset: Asset) -> float:
     book_data = book_resp.json()
     options = book_data["result"]
 
+    # When currency is shared (e.g. USDC hosts ETH_USDC, SOL_USDC, BTC_USDC),
+    # filter instruments by the asset's index prefix (e.g. "SOL_USDC-").
+    # For dedicated currencies (ETH, BTC), all instruments already match.
+    instrument_prefix = (
+        f"{cfg.deribit_index.upper()}-" if cfg.deribit_currency == "USDC" else ""
+    )
+
     best = None
     best_distance = float("inf")
 
@@ -38,7 +45,10 @@ async def get_iv(asset: Asset) -> float:
         iv = opt.get("mark_iv")
         if not iv or iv <= 0:
             continue
-        parts = opt["instrument_name"].split("-")
+        name = opt["instrument_name"]
+        if instrument_prefix and not name.startswith(instrument_prefix):
+            continue
+        parts = name.split("-")
         if parts[-1] != "C":
             continue
         try:

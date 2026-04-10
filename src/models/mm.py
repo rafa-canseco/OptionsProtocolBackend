@@ -3,7 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-VALID_ASSETS = {"eth", "btc", "sol", "xau"}
+VALID_ASSETS = {"eth", "btc", "sol"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 VALID_CHAINS = {"base", "solana"}
 BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
