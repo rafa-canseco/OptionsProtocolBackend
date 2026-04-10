@@ -106,8 +106,8 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         decimals=9,
         deribit_index="sol_usdc",
         deribit_currency="USDC",
-        strike_step=5.0,
-        short_expiry_strike_step=2.5,
+        strike_step=1.0,
+        short_expiry_strike_step=1.0,
         num_strikes=5,
     ),
 }
