@@ -64,8 +64,8 @@ class TestPostCapacity:
         assert row["chain"] == "base"
 
     def test_sol_capacity_derives_solana_chain(self, auth_headers, mock_db):
-        mock_db.table.return_value.upsert.return_value.execute.return_value = (
-            MagicMock(data=[{"mm_address": MM_ADDRESS}])
+        mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"mm_address": MM_ADDRESS}]
         )
         resp = client.post(
             "/mm/capacity",
@@ -376,6 +376,14 @@ def _quotes_mock_chain(mock_table):
     return mock_table.select.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
 
 
+def _available_otokens_mock_chain(mock_table):
+    """Wire up: .select().eq().execute()"""
+    return mock_table.select.return_value.eq.return_value.execute
+
+
+FAKE_OTOKEN_ADDR = "0x" + "a" * 40
+
+
 def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> dict:
     """Build a minimal valid mm_quotes row for testing."""
     import time
@@ -387,7 +395,7 @@ def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> di
         "strike_price": strike_usd,
         "expiry": expiry,
         "is_put": is_put,
-        "otoken_address": "0x" + "a" * 40,
+        "otoken_address": FAKE_OTOKEN_ADDR,
         "signature": "0x" + "b" * 130,
         "mm_address": "0x" + "c" * 40,
         "quote_id": "1",
@@ -395,6 +403,9 @@ def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> di
         "asset": "eth",
         "is_active": True,
     }
+
+
+_VALID_OTOKENS_RESULT = MagicMock(data=[{"otoken_address": FAKE_OTOKEN_ADDR}])
 
 
 class TestPositionCounts:
@@ -421,6 +432,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -457,6 +472,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -488,6 +507,10 @@ class TestPositionCounts:
                 _position_count_mock_chain(mock_table).side_effect = Exception(
                     "DB down"
                 )
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -521,6 +544,10 @@ class TestPositionCounts:
                 # Verify the query chain includes is_settled=False filter
                 chain = _position_count_mock_chain(mock_table)
                 chain.return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -566,6 +593,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -600,6 +631,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -632,6 +667,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect

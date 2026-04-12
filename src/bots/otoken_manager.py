@@ -219,6 +219,7 @@ def _prune_near_expiry_otokens() -> None:
     result = (
         client.table("available_otokens")
         .select("id, expiry")
+        .eq("chain", "base")
         .lt("expiry", max_cutoff_ts)
         .execute()
     )
@@ -276,6 +277,7 @@ def _upsert_available_otokens(
                 "expiry": spec.expiry_ts,
                 "is_put": is_put,
                 "collateral_asset": collateral,
+                "chain": "base",
             }
         )
 

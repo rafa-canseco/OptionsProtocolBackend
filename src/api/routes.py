@@ -235,6 +235,27 @@ async def get_capacity(
     return _aggregate_capacity(rows, asset)
 
 
+def _fetch_valid_otoken_addresses(asset: Asset) -> set[str] | None:
+    """Return set of otoken_addresses in available_otokens, or None on error."""
+    try:
+        chain = get_chain_for_asset(asset).value
+        client = get_client()
+        result = (
+            client.table("available_otokens")
+            .select("otoken_address")
+            .eq("chain", chain)
+            .execute()
+        )
+        return {r["otoken_address"] for r in (result.data or [])}
+    except Exception:
+        logger.warning(
+            "Could not fetch available_otokens for %s, skipping filter",
+            asset.value,
+            exc_info=True,
+        )
+        return None
+
+
 def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
     """Read active, non-expired quotes from mm_quotes for a given asset.
 
@@ -496,6 +517,21 @@ async def get_prices(
     if not all_quotes:
         logger.info("No active quotes in mm_quotes for %s", cache_key)
         return []
+
+    # Filter quotes to only those with oTokens in available_otokens
+    valid_addrs = _fetch_valid_otoken_addresses(asset)
+    if valid_addrs is not None:
+        before = len(all_quotes)
+        all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+        pruned = before - len(all_quotes)
+        if pruned:
+            logger.info(
+                "Filtered %d stale quotes (oToken not in available_otokens) for %s",
+                pruned,
+                cache_key,
+            )
+        if not all_quotes:
+            return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
 

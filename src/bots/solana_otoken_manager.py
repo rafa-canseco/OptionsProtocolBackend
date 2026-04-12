@@ -317,6 +317,7 @@ def _upsert_solana_otokens(
                 "expiry": spec.expiry_ts,
                 "is_put": is_put,
                 "collateral_asset": collateral,
+                "chain": "solana",
             }
         )
 
