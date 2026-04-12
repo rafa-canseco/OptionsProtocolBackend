@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 _CREATE_OTOKEN_DISC = bytes([157, 44, 166, 193, 252, 254, 194, 35])
 _WHITELIST_OTOKEN_DISC = bytes([198, 7, 154, 88, 102, 191, 174, 179])
 _CREATE_OTOKEN_INFO_DISC = bytes([63, 20, 21, 23, 167, 15, 1, 125])
+_CLOSE_OTOKEN_INFO_DISC = bytes([110, 129, 226, 76, 224, 3, 121, 255])
 
 SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
 USDC_DECIMALS = 6
@@ -262,36 +263,71 @@ def _send_ix(ix: Instruction, label: str) -> str:
     return str(sig)
 
 
+def _build_close_otoken_info_ix(
+    controller_program: Pubkey,
+    controller_config: Pubkey,
+    otoken_info_pda: Pubkey,
+    admin: Pubkey,
+) -> Instruction:
+    """Build controller.close_otoken_info instruction."""
+    accounts = [
+        AccountMeta(controller_config, is_signer=False, is_writable=False),
+        AccountMeta(otoken_info_pda, is_signer=False, is_writable=True),
+        AccountMeta(admin, is_signer=True, is_writable=True),
+    ]
+    return Instruction(controller_program, _CLOSE_OTOKEN_INFO_DISC, accounts)
+
+
+def _read_on_chain_expiry(otoken_info_pda: Pubkey) -> int | None:
+    """Read expiry from on-chain otoken_info account. None if not found."""
+    rpc = get_solana_client()
+    resp = rpc.get_account_info(otoken_info_pda)
+    if resp.value is None:
+        return None
+    data = resp.value.data
+    # Layout: disc(8) + otoken_mint(32) + underlying(32) + strike_asset(32)
+    #         + collateral_mint(32) + strike_price(u64,8) + expiry(i64,8)
+    expiry_offset = 8 + 32 + 32 + 32 + 32 + 8
+    return struct.unpack_from("<q", data, expiry_offset)[0]
+
+
 def _verify_otoken_info_expiry(
     otoken_info_pda: Pubkey, expected_expiry: int, label: str
 ) -> bool:
     """Verify on-chain otoken_info has the correct expiry.
 
-    Returns False if the account has a mismatched expiry (permanently
-    broken oToken registered by an old script with wrong timestamps).
-    OTokenInfo layout after 8-byte discriminator:
-      otoken_mint(32) + underlying(32) + strike_asset(32) +
-      collateral_mint(32) + strike_price(u64,8) + expiry(i64,8)
+    If mismatched (corrupted by old script), closes the account so it
+    can be recreated with correct data on the next check.
     """
-    rpc = get_solana_client()
-    resp = rpc.get_account_info(otoken_info_pda)
-    if resp.value is None:
-        logger.warning("otoken_info not found for verification: %s", label)
+    on_chain_expiry = _read_on_chain_expiry(otoken_info_pda)
+    if on_chain_expiry is None:
         return False
-    data = resp.value.data
-    # Offset: 8 (disc) + 32*4 (pubkeys) + 8 (strike) = 144
-    expiry_offset = 8 + 32 + 32 + 32 + 32 + 8
-    on_chain_expiry = struct.unpack_from("<q", data, expiry_offset)[0]
-    if on_chain_expiry != expected_expiry:
-        logger.warning(
-            "otoken_info expiry mismatch for %s: on-chain=%d expected=%d. "
-            "Skipping (permanently broken oToken).",
-            label,
-            on_chain_expiry,
-            expected_expiry,
-        )
+    if on_chain_expiry == expected_expiry:
+        return True
+
+    # Mismatch — close the corrupted account
+    logger.warning(
+        "otoken_info expiry mismatch for %s: on-chain=%d expected=%d. "
+        "Closing corrupted account for re-creation.",
+        label,
+        on_chain_expiry,
+        expected_expiry,
+    )
+    controller_prog = Pubkey.from_string(settings.solana_controller_program_id)
+    controller_config = _derive_controller_config(controller_prog)
+    operator = get_solana_operator()
+    ix = _build_close_otoken_info_ix(
+        controller_prog,
+        controller_config,
+        otoken_info_pda,
+        operator.pubkey(),
+    )
+    try:
+        _send_ix(ix, f"close_otoken_info {label}")
+    except Exception:
+        logger.exception("Failed to close corrupted otoken_info for %s", label)
         return False
-    return True
+    return False  # Closed — will be recreated on next iteration
 
 
 def _account_exists(pubkey: Pubkey) -> bool:
@@ -384,38 +420,41 @@ def _find_or_create_otoken(
     else:
         logger.debug("oToken already whitelisted: %s", label)
 
-    # Step 3: create otoken_info on controller
-    otoken_info_pda = _derive_otoken_info(
-        Pubkey.from_string(settings.solana_controller_program_id),
-        otoken_mint,
-    )
-    if not _account_exists(otoken_info_pda):
-        logger.info("Creating otoken_info: %s", label)
-        operator = get_solana_operator()
-        controller_prog = Pubkey.from_string(settings.solana_controller_program_id)
-        ix = _build_create_otoken_info_ix(
-            controller_prog,
-            controller_config,
-            otoken_info_pda,
-            otoken_mint,
-            wl_otoken_pda,
-            whitelist_program,
-            operator.pubkey(),
-            underlying,
-            strike_asset,
-            collateral,
-            strike_price,
-            expiry,
-            is_put,
-            collateral_decimals,
-        )
-        _send_ix(ix, f"create_otoken_info {label}")
-    else:
-        logger.debug("otoken_info exists: %s", label)
+    # Step 3: create or fix otoken_info on controller
+    controller_prog = Pubkey.from_string(settings.solana_controller_program_id)
+    otoken_info_pda = _derive_otoken_info(controller_prog, otoken_mint)
 
-    # Verify on-chain expiry matches expected (catches script-registered
-    # oTokens with wrong expiry — those are permanently broken).
-    if not _verify_otoken_info_expiry(otoken_info_pda, expiry, label):
+    if _account_exists(otoken_info_pda):
+        # Verify expiry matches — if not, close and recreate
+        if not _verify_otoken_info_expiry(otoken_info_pda, expiry, label):
+            # _verify closes the corrupted account. Now recreate below.
+            pass
+        else:
+            return str(otoken_mint)
+
+    # Create otoken_info (either fresh or after closing corrupted one)
+    logger.info("Creating otoken_info: %s", label)
+    operator = get_solana_operator()
+    ix = _build_create_otoken_info_ix(
+        controller_prog,
+        controller_config,
+        otoken_info_pda,
+        otoken_mint,
+        wl_otoken_pda,
+        whitelist_program,
+        operator.pubkey(),
+        underlying,
+        strike_asset,
+        collateral,
+        strike_price,
+        expiry,
+        is_put,
+        collateral_decimals,
+    )
+    try:
+        _send_ix(ix, f"create_otoken_info {label}")
+    except Exception:
+        logger.exception("Failed to create otoken_info for %s", label)
         return None
 
     return str(otoken_mint)
