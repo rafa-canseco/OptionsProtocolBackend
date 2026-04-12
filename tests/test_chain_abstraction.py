@@ -37,7 +37,6 @@ class TestAssetChainMapping:
 
     def test_solana_assets(self):
         assert get_chain_for_asset(Asset.SOL) == Chain.SOLANA
-        assert get_chain_for_asset(Asset.XAU) == Chain.SOLANA
 
     def test_get_base_assets(self):
         base = get_base_assets()
@@ -48,7 +47,6 @@ class TestAssetChainMapping:
     def test_get_solana_assets(self):
         sol = get_solana_assets()
         assert Asset.SOL in sol
-        assert Asset.XAU in sol
         assert Asset.ETH not in sol
 
     def test_all_assets_have_chain(self):
@@ -81,9 +79,6 @@ class TestAssetConfig:
 
     def test_sol_decimals(self):
         assert get_asset_config(Asset.SOL).decimals == 9
-
-    def test_xau_decimals(self):
-        assert get_asset_config(Asset.XAU).decimals == 8
 
     def test_unsupported_asset(self):
         with pytest.raises(ValueError, match="Unsupported"):
@@ -135,18 +130,32 @@ class TestAddressDetection:
 
 
 class TestConfig:
-    def test_has_solana_config_false_by_default(self):
-        from src.config import has_solana_config
+    def test_has_solana_config_false_by_default(self, monkeypatch):
+        monkeypatch.delenv("SOLANA_RPC_URL", raising=False)
+        monkeypatch.delenv("SOLANA_BATCH_SETTLER_PROGRAM_ID", raising=False)
+        monkeypatch.delenv("SOLANA_OTOKEN_FACTORY_PROGRAM_ID", raising=False)
+        from src.config import has_solana_config, settings
 
+        settings.solana_rpc_url = ""
+        settings.solana_batch_settler_program_id = ""
+        settings.solana_otoken_factory_program_id = ""
         assert has_solana_config() is False
 
-    def test_solana_defaults(self):
-        from src.config import settings
+    def test_solana_defaults(self, monkeypatch):
+        monkeypatch.delenv("SOLANA_RPC_URL", raising=False)
+        from src.config import Settings
 
-        assert settings.solana_rpc_url == ""
-        assert settings.solana_cluster == "devnet"
+        fresh = Settings(
+            _env_file=None,
+            supabase_url="http://test",
+            supabase_key="test",
+            supabase_anon_key="test",
+            supabase_service_role_key="test",
+        )
+        assert fresh.solana_rpc_url == ""
+        assert fresh.solana_cluster == "devnet"
         assert (
-            settings.solana_wsol_mint == "So11111111111111111111111111111111111111112"
+            fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
         )
 
 

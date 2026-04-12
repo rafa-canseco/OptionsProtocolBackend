@@ -446,11 +446,36 @@ async def get_prices(
     Returns **503** only if the circuit breaker has paused pricing (>2 % move).
     Capacity status is served separately via ``GET /capacity``.
     """
+    # Fetch spot early so we can self-heal a paused circuit breaker.
+    spot = 0.0
+    spot_ok = False
+    try:
+        chain = get_chain_for_asset(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
+
+            spot, _ = get_spot_price(asset)
+        else:
+            from src.pricing.chainlink import get_asset_price
+
+            spot, _ = get_asset_price(asset)
+        spot_ok = True
+    except Exception:
+        logger.warning("Could not fetch spot price for enrichment", exc_info=True)
+
     if circuit_breaker.is_paused_for(asset.value):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
-        )
+        if spot_ok:
+            circuit_breaker.resume(spot, asset.value)
+            logger.info(
+                "Circuit breaker auto-resumed for %s at $%.2f",
+                asset.value,
+                spot,
+            )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
+            )
 
     cache_key = asset.value
     now = time.monotonic()
@@ -474,28 +499,14 @@ async def get_prices(
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
 
-    # Enrich with spot price if available (best effort)
-    spot = 0.0
-    try:
-        chain = get_chain_for_asset(asset)
-        if chain == Chain.SOLANA:
-            from src.chains.solana.oracle import get_spot_price
-
-            spot, _ = get_spot_price(asset)
-        else:
-            from src.pricing.chainlink import get_asset_price
-
-            spot, _ = get_asset_price(asset)
+    # Check circuit breaker with fresh spot
+    if spot_ok:
         if circuit_breaker.check(spot, asset.value):
             raise HTTPException(
                 status_code=503,
                 detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
         circuit_breaker.update_reference(spot, asset.value)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("Could not fetch spot price for enrichment", exc_info=True)
 
     # Fetch position counts for social proof (best effort)
     position_counts: dict[tuple, int] = {}
