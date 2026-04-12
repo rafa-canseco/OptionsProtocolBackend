@@ -262,6 +262,38 @@ def _send_ix(ix: Instruction, label: str) -> str:
     return str(sig)
 
 
+def _verify_otoken_info_expiry(
+    otoken_info_pda: Pubkey, expected_expiry: int, label: str
+) -> bool:
+    """Verify on-chain otoken_info has the correct expiry.
+
+    Returns False if the account has a mismatched expiry (permanently
+    broken oToken registered by an old script with wrong timestamps).
+    OTokenInfo layout after 8-byte discriminator:
+      otoken_mint(32) + underlying(32) + strike_asset(32) +
+      collateral_mint(32) + strike_price(u64,8) + expiry(i64,8)
+    """
+    rpc = get_solana_client()
+    resp = rpc.get_account_info(otoken_info_pda)
+    if resp.value is None:
+        logger.warning("otoken_info not found for verification: %s", label)
+        return False
+    data = resp.value.data
+    # Offset: 8 (disc) + 32*4 (pubkeys) + 8 (strike) = 144
+    expiry_offset = 8 + 32 + 32 + 32 + 32 + 8
+    on_chain_expiry = struct.unpack_from("<q", data, expiry_offset)[0]
+    if on_chain_expiry != expected_expiry:
+        logger.warning(
+            "otoken_info expiry mismatch for %s: on-chain=%d expected=%d. "
+            "Skipping (permanently broken oToken).",
+            label,
+            on_chain_expiry,
+            expected_expiry,
+        )
+        return False
+    return True
+
+
 def _account_exists(pubkey: Pubkey) -> bool:
     """Check if an account exists on-chain."""
     rpc = get_solana_client()
@@ -380,6 +412,11 @@ def _find_or_create_otoken(
         _send_ix(ix, f"create_otoken_info {label}")
     else:
         logger.debug("otoken_info exists: %s", label)
+
+    # Verify on-chain expiry matches expected (catches script-registered
+    # oTokens with wrong expiry — those are permanently broken).
+    if not _verify_otoken_info_expiry(otoken_info_pda, expiry, label):
+        return None
 
     return str(otoken_mint)
 
