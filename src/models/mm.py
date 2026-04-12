@@ -110,6 +110,8 @@ class FillResponse(BaseModel):
     """A single fill (OrderExecuted) for the MM."""
 
     tx_hash: str
+    chain: str = "base"
+    tx_url: str | None = None
     block_number: int
     otoken_address: str
     amount: str

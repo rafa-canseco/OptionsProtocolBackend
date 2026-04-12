@@ -26,6 +26,7 @@ from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
 from solders.signature import Signature as SolSignature  # type: ignore[import-untyped]
 
 from src.api.deps import require_mm_api_key
+from src.chains.explorer import tx_explorer_url
 from src.chains.solana.client import get_solana_maker_nonce
 from src.config import settings
 from src.contracts.web3_client import get_batch_settler, get_w3
@@ -348,6 +349,8 @@ async def get_fills(
     return [
         FillResponse(
             tx_hash=r["tx_hash"],
+            chain=r.get("chain", "base"),
+            tx_url=tx_explorer_url(r.get("tx_hash"), r.get("chain", "base")),
             block_number=r["block_number"],
             otoken_address=r["otoken_address"],
             amount=str(r["amount"]),
