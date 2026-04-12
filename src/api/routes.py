@@ -17,6 +17,7 @@ from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
 from src.chains import Chain
 from src.chains.address import detect_chain, ETH_ADDRESS_RE, is_valid_solana_address
+from src.chains.explorer import tx_explorer_url
 from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.circuit_breaker import circuit_breaker
 
@@ -693,11 +694,22 @@ def _compute_outcome(position: dict) -> str | None:
 
 
 def _enrich_positions(positions: list[dict]) -> list[dict]:
-    """Add outcome and normalize premium field for a list of positions."""
+    """Add display fields and normalize premium field for positions."""
     for pos in positions:
         pos["outcome"] = _compute_outcome(pos)
         if pos.get("net_premium") is not None:
             pos["premium"] = pos["net_premium"]
+        url = tx_explorer_url(pos.get("tx_hash"), pos.get("chain", "base"))
+        pos["tx_url"] = url
+        pos["explorer_url"] = url
+        pos["settlement_tx_url"] = tx_explorer_url(
+            pos.get("settlement_tx_hash"),
+            pos.get("chain", "base"),
+        )
+        pos["delivery_tx_url"] = tx_explorer_url(
+            pos.get("delivery_tx_hash"),
+            pos.get("chain", "base"),
+        )
     return positions
 
 
