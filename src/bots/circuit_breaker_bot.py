@@ -13,7 +13,7 @@ import logging
 
 from src.config import settings
 from src.db.database import get_client
-from src.pricing.assets import Asset
+from src.pricing.assets import get_base_assets
 from src.pricing.chainlink import get_asset_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.contracts.web3_client import (
@@ -64,7 +64,7 @@ async def invalidate_quotes(asset: str):
 
 async def check_once():
     """Check all assets. If any trips, invalidate quotes."""
-    for asset in Asset:
+    for asset in get_base_assets():
         try:
             price, _ = get_asset_price(asset)
         except Exception:
