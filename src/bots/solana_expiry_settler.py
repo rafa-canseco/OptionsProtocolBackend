@@ -113,6 +113,25 @@ def _read_account_data(pubkey: Pubkey) -> bytes | None:
     return bytes(resp.value.data)
 
 
+def _find_pool_token_account(pool_vault_authority: Pubkey, mint: Pubkey) -> Pubkey:
+    """Find the token account owned by pool_vault_authority for a mint.
+
+    The pool may use a manually-created token account, not an ATA.
+    Falls back to ATA derivation if no accounts found via RPC.
+    """
+    from solana.rpc.types import TokenAccountOpts
+
+    rpc = get_solana_client()
+    resp = rpc.get_token_accounts_by_owner(
+        pool_vault_authority,
+        TokenAccountOpts(mint=mint),
+    )
+    if resp.value:
+        return resp.value[0].pubkey
+    # Fallback to ATA
+    return _derive_ata(pool_vault_authority, mint)
+
+
 def _normalize_pyth_price_to_8dec(asset: Asset) -> int:
     """Get Pyth price normalized to 8 decimal places (u64)."""
     price_float, _ = get_pyth_price(asset)
@@ -399,7 +418,9 @@ def _build_settle_vault_ix(
     pool_vault_authority = _derive_pda(
         [b"pool_vault_auth", bytes(collateral_mint)], controller_prog
     )
-    pool_token_account = _derive_ata(pool_vault_authority, collateral_mint)
+    pool_token_account = _find_pool_token_account(pool_vault_authority, collateral_mint)
+    if pool_token_account is None:
+        raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
     beneficiary_token_account = _derive_ata(beneficiary, collateral_mint)
 
     return Instruction(
@@ -560,7 +581,9 @@ def _build_redeem_for_mm_ix(
     pool_vault_authority = _derive_pda(
         [b"pool_vault_auth", bytes(collateral_mint)], controller_prog
     )
-    pool_token_account = _derive_ata(pool_vault_authority, collateral_mint)
+    pool_token_account = _find_pool_token_account(pool_vault_authority, collateral_mint)
+    if pool_token_account is None:
+        raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
     settler_otoken_account = _derive_ata(settler_config, otoken_mint)
     settler_collateral_account = _derive_ata(settler_config, collateral_mint)
     mm_collateral_account = _derive_ata(mm_address, collateral_mint)

@@ -174,9 +174,12 @@ class TestBuildSetExpiryPriceIx:
 class TestBuildSettleVaultIx:
     """Verify settle_vault instruction structure."""
 
+    @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}.get_solana_operator")
     @patch(f"{_MODULE}.settings")
-    def test_instruction_targets_settler_program(self, mock_settings, mock_operator):
+    def test_instruction_targets_settler_program(
+        self, mock_settings, mock_operator, mock_pool
+    ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
         mock_settings.solana_batch_settler_program_id = str(settler_id)
@@ -203,9 +206,12 @@ class TestBuildSettleVaultIx:
 class TestBuildRedeemForMmIx:
     """Verify redeem_for_mm instruction structure."""
 
+    @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}.get_solana_operator")
     @patch(f"{_MODULE}.settings")
-    def test_instruction_data_contains_amount(self, mock_settings, mock_operator):
+    def test_instruction_data_contains_amount(
+        self, mock_settings, mock_operator, mock_pool
+    ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
         mock_settings.solana_batch_settler_program_id = str(settler_id)
