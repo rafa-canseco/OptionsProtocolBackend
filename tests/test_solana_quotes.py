@@ -279,14 +279,14 @@ class TestQuoteSubmissionValidation:
 
 
 class TestPriceScaleConversion:
-    """Verify chain-aware price scale in _quote_to_price_response."""
+    """Verify bid_price_raw is displayed as USDC smallest units."""
 
-    def test_solana_uses_1e8_scale(self):
+    def test_solana_uses_1e6_usdc_scale(self):
         from src.api.routes import _quote_to_price_response
 
         q = {
             "id": "test-1",
-            "bid_price": "1_00000000",  # 1.0 in 1e8
+            "bid_price": "1_000000",  # 1.0 USDC in 1e6
             "max_amount": "1_00000000",
             "deadline": int(time.time()) + 300,
             "strike_price": 150.0,
@@ -302,7 +302,7 @@ class TestPriceScaleConversion:
         pr = _quote_to_price_response(q)
         assert pr is not None
         assert pr.chain == "solana"
-        # 1e8 / 1e8 = 1.0 USD, minus 4% fee = 0.96
+        # 1e6 / 1e6 = 1.0 USD, minus 4% fee = 0.96
         assert 0.95 < pr.premium < 0.97
 
     def test_base_uses_1e6_scale(self):

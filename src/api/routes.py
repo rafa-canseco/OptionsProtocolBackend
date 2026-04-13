@@ -365,9 +365,8 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         is_put = q.get("is_put")
         chain = q.get("chain", "base")
 
-        # Price scale depends on chain: 1e8 for Solana, 1e6 for Base
-        price_decimals = 8 if chain == "solana" else USDC_DECIMALS
-        premium_usd = bid_price_raw / (10**price_decimals)
+        # BatchSettler treats bid_price as USDC smallest units on every chain.
+        premium_usd = bid_price_raw / (10**USDC_DECIMALS)
         fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
         net_premium = premium_usd * fee_mult
 

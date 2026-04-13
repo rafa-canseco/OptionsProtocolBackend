@@ -1,5 +1,7 @@
 # B1N-257: Accept and Serve Solana Option Quotes — Implementation Plan
 
+> **Correction:** Later Solana BatchSettler integration showed `bid_price` is USDC raw units (1e6), not a 1e8 price scale. Any 1e8-scale references below are historical context and should not be copied into live code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enable the backend to accept ed25519-signed Solana quotes from the Market Maker and serve them via the `/prices` API for SOL and XAU markets.
@@ -22,7 +24,7 @@
 | Modify | `src/models/mm.py` | Add `chain`/`maker` fields, expand valid assets, chain-aware validation |
 | Modify | `src/api/mm_routes.py` | Dual-chain quote submission (EIP-712 for Base, ed25519 for Solana) |
 | Modify | `src/chains/solana/client.py` | Add `get_solana_maker_nonce()` helper |
-| Modify | `src/api/routes.py` | Fix `_quote_to_price_response` for 1e8 price scale, add `chain` to `PriceResponse` |
+| Modify | `src/api/routes.py` | Fix `_quote_to_price_response` for USDC raw bid prices, add `chain` to `PriceResponse` |
 | Modify | `src/models/price.py` | Add `chain` field to `PriceResponse` |
 | Modify | `tests/test_chain_abstraction.py` | Update tests: remove JUP references, update XAU config assertions |
 | Create | `tests/test_ed25519.py` | Unit tests for message building and signature verification |
@@ -1096,9 +1098,9 @@ In `src/models/price.py`, add after `maker_nonce` field (line 72):
     )
 ```
 
-- [ ] **Step 2: Fix `_quote_to_price_response` for chain-aware price scale**
+- [ ] **Step 2: Fix `_quote_to_price_response` for USDC raw bid prices**
 
-In `src/api/routes.py`, the current code uses hardcoded `USDC_DECIMALS = 6` for premium calculation (line 346). Solana quotes use 1e8. Update `_quote_to_price_response`:
+In `src/api/routes.py`, keep premium calculation on `USDC_DECIMALS = 6`. Solana and Base quotes both use USDC raw units:
 
 ```python
 def _quote_to_price_response(q: dict) -> PriceResponse | None:
@@ -1112,9 +1114,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         is_put = q.get("is_put")
         chain = q.get("chain", "base")
 
-        # Price scale depends on chain
-        price_decimals = 8 if chain == "solana" else USDC_DECIMALS
-        premium_usd = bid_price_raw / (10**price_decimals)
+        premium_usd = bid_price_raw / (10**USDC_DECIMALS)
         fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
         net_premium = premium_usd * fee_mult
 
@@ -1179,10 +1179,10 @@ Expected: No lint errors.
 
 ```bash
 git add src/models/price.py src/api/routes.py
-git commit -m "feat: chain-aware price scale in /prices response
+git commit -m "fix: use USDC raw bid prices in /prices response
 
-Solana quotes use 1e8 price scale (vs 1e6 for Base). PriceResponse
-now includes chain field so frontend knows the signing scheme.
+Solana and Base quotes use USDC raw bid prices. PriceResponse now
+includes chain field so frontend knows the signing scheme.
 
 B1N-257"
 ```
@@ -1215,7 +1215,7 @@ Manually verify each criterion from the spec:
 2. IV sourced from Deribit for both assets → XAU config points to PAXG index. SOL already worked.
 3. Quotes signed with ed25519 → `POST /mm/quotes` accepts and verifies ed25519 signatures when `chain="solana"`.
 4. Quotes inserted into mm_quotes with chain='solana' → The insert row includes `chain` from the quote.
-5. /prices endpoint returns SOL, XAU alongside ETH, cbBTC → `_fetch_active_quotes` already queries by asset+chain. `_quote_to_price_response` handles 1e8 scale.
+5. /prices endpoint returns SOL, XAU alongside ETH, cbBTC → `_fetch_active_quotes` already queries by asset+chain. `_quote_to_price_response` handles USDC raw bid prices.
 6. Runs alongside Base price publisher without interference → Dual-chain branch in `submit_quotes`. Base flow untouched.
 
 - [ ] **Step 4: Commit any cleanup**

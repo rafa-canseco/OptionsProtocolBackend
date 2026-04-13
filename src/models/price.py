@@ -52,7 +52,7 @@ class PriceResponse(BaseModel):
     )
     bid_price_raw: int | None = Field(
         default=None,
-        description="Bid price in on-chain units (6 decimals Base, 8 decimals Solana)",
+        description="Bid price in USDC smallest units (6 decimals)",
     )
     deadline: int | None = Field(
         default=None,

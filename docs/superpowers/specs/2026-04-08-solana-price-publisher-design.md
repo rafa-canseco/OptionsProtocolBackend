@@ -104,7 +104,7 @@ Already mostly wired by B1N-256:
 - Circuit breaker works per-asset
 
 Verify:
-- `_quote_to_price_response` handles 1e8 price scale (Solana) vs 1e6 (Base)
+- `_quote_to_price_response` handles bid prices as USDC raw units (1e6) on all chains
 - Response includes `chain` field so frontend knows the signing scheme
 
 ## Key decisions
@@ -112,7 +112,7 @@ Verify:
 1. **`chain` is explicit** — sent by the MM in each quote, not inferred from asset. An asset could exist on multiple chains in the future.
 2. **No price publisher bot** — the MM (B1N-275) already generates, prices, and signs Solana quotes. The backend only validates and serves.
 3. **Verification only** — `src/crypto/ed25519.py` has no signing functions. The backend never holds signing authority for Solana quotes.
-4. **Price scale**: Solana quotes use 1e8, Base quotes use 1e6. The scale is determined by the chain the quote was submitted for.
+4. **Price scale**: Solana and Base quotes both use USDC raw units (1e6). The Solana BatchSettler multiplies oToken amount raw units by `bid_price` and divides by 1e8, so `bid_price` must already be USDC raw per contract.
 
 ## Testing
 
