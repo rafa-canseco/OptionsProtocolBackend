@@ -339,9 +339,16 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
 # ── Phase 1: settle vaults ───────────────────────────────────────
 
 
-def _is_vault_settled_on_chain(owner: Pubkey, vault_id: int) -> bool:
+def _get_vault_owner() -> Pubkey:
+    """Vault owner is the settler_config PDA (BatchSettler opens vaults)."""
+    settler_prog, _ = _get_program_ids()
+    return _derive_pda([b"settler_config"], settler_prog)
+
+
+def _is_vault_settled_on_chain(vault_id: int) -> bool:
     """Read vault PDA and check settled flag."""
     _, controller = _get_program_ids()
+    owner = _get_vault_owner()
     vault_pda = _derive_pda(
         [b"vault", bytes(owner), struct.pack("<Q", vault_id)],
         controller,
@@ -352,9 +359,10 @@ def _is_vault_settled_on_chain(owner: Pubkey, vault_id: int) -> bool:
     return bool(data[_VAULT_SETTLED_OFFSET])
 
 
-def _read_vault_data(owner: Pubkey, vault_id: int) -> dict | None:
+def _read_vault_data(vault_id: int) -> dict | None:
     """Read vault PDA and extract key fields."""
     _, controller = _get_program_ids()
+    owner = _get_vault_owner()
     vault_pda = _derive_pda(
         [b"vault", bytes(owner), struct.pack("<Q", vault_id)],
         controller,
@@ -427,10 +435,8 @@ def _settle_vaults(
         vault_id = int(pos["vault_id"])
         otoken_addr = pos["otoken_address"]
 
-        owner = Pubkey.from_string(user_addr)
-
         # Check if already settled on-chain
-        if _is_vault_settled_on_chain(owner, vault_id):
+        if _is_vault_settled_on_chain(vault_id):
             logger.info(
                 "Phase 1: vault %s/%d already settled on-chain, reconciling DB",
                 user_addr[:12],
@@ -441,7 +447,7 @@ def _settle_vaults(
             continue
 
         # Read vault data for instruction accounts
-        vault_data = _read_vault_data(owner, vault_id)
+        vault_data = _read_vault_data(vault_id)
         if vault_data is None:
             logger.error(
                 "Phase 1: vault PDA not found for %s/%d, skipping",
