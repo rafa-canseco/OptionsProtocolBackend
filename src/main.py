@@ -87,14 +87,16 @@ async def lifespan(app: FastAPI):
         from src.bots import (
             solana_circuit_breaker_bot,
             solana_event_indexer,
+            solana_expiry_settler,
             solana_otoken_manager,
         )
 
         tasks.append(asyncio.create_task(solana_circuit_breaker_bot.run()))
         tasks.append(asyncio.create_task(solana_event_indexer.run()))
+        tasks.append(asyncio.create_task(solana_expiry_settler.run()))
         tasks.append(asyncio.create_task(solana_otoken_manager.run()))
         logger.info(
-            "Solana bots started (cluster=%s): circuit breaker, event indexer, otoken manager",
+            "Solana bots started (cluster=%s): circuit breaker, event indexer, expiry settler, otoken manager",
             settings.solana_cluster,
         )
     else:
