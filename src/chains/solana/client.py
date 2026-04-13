@@ -3,6 +3,7 @@
 import json
 import logging
 import struct
+import time
 from pathlib import Path
 
 from solana.rpc.api import Client as SolanaClient
@@ -166,10 +167,11 @@ def get_solana_maker_nonce(maker_pubkey: str) -> int:
     return nonce
 
 
-def build_and_send_solana_tx(tx: VersionedTransaction) -> str:
+def build_and_send_solana_tx(tx: VersionedTransaction, timeout: int = 60) -> str:
     """Send a signed transaction and wait for confirmation.
 
     Returns the transaction signature as a string.
+    Raises RuntimeError if the tx fails to confirm within timeout seconds.
     """
     client = get_solana_client()
     try:
@@ -178,11 +180,23 @@ def build_and_send_solana_tx(tx: VersionedTransaction) -> str:
         raise RuntimeError("Failed to send Solana transaction") from exc
 
     sig = str(resp.value)
-    try:
-        client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
-    except Exception as exc:
-        logger.error("Tx sent but confirmation failed: %s", sig)
-        raise RuntimeError(f"Transaction {sig} sent but confirmation failed") from exc
 
-    logger.info("Solana tx confirmed: %s", sig)
-    return sig
+    # Poll for confirmation with a bounded timeout
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            status = client.get_signature_statuses([resp.value])
+            if status.value and status.value[0] is not None:
+                if status.value[0].err:
+                    raise RuntimeError(
+                        f"Transaction {sig} failed on-chain: {status.value[0].err}"
+                    )
+                logger.info("Solana tx confirmed: %s", sig)
+                return sig
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # transient RPC error, retry
+        time.sleep(0.5)
+
+    raise RuntimeError(f"Transaction {sig} sent but not confirmed within {timeout}s")
