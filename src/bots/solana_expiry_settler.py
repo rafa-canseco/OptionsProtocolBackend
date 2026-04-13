@@ -4,7 +4,7 @@ Solana Expiry Settler Bot
 Independent settlement bot for Solana options. Does NOT share any
 state or code paths with the Base expiry settler.
 
-Two-phase settlement at 08:00 UTC daily:
+Three-phase settlement at 08:00 UTC daily:
   Phase 0: set_expiry_price on Controller OTokenInfo PDAs
   Phase 1: settle_vault per vault via BatchSettler CPI
   Phase 2: redeem_for_mm for ITM positions (MM gets payout)
@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import logging
 import struct
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from solana.rpc.commitment import Confirmed
 from solders.instruction import (  # type: ignore[import-untyped]
@@ -116,7 +116,13 @@ def _read_account_data(pubkey: Pubkey) -> bytes | None:
 def _normalize_pyth_price_to_8dec(asset: Asset) -> int:
     """Get Pyth price normalized to 8 decimal places (u64)."""
     price_float, _ = get_pyth_price(asset)
-    return int(price_float * 1e8)
+    price_8dec = int(price_float * 1e8)
+    if price_8dec <= 0:
+        raise ValueError(
+            f"Pyth price for {asset.value} normalized to "
+            f"{price_8dec} (non-positive). Raw: {price_float}"
+        )
+    return price_8dec
 
 
 # ── DB queries ───────────────────────────────────────────────────
@@ -143,31 +149,64 @@ def get_expired_unsettled_solana() -> list[dict]:
     return result.data or []
 
 
+def _db_update(
+    user_address: str,
+    vault_id: int,
+    fields: dict,
+    context: str,
+) -> None:
+    """Update order_events for a Solana position. Logs if no rows matched."""
+    client = get_client()
+    result = (
+        client.table("order_events")
+        .update(fields)
+        .eq("user_address", user_address)
+        .eq("vault_id", vault_id)
+        .eq("chain", "solana")
+        .execute()
+    )
+    if not result.data:
+        logger.error(
+            "ALERT: %s: DB update matched no rows user=%s vault=%d",
+            context,
+            user_address[:12],
+            vault_id,
+        )
+
+
 def _mark_settled(
     user_address: str,
     vault_id: int,
     tx_hash: str,
 ) -> None:
     """Mark a position as cash-settled in DB."""
-    client = get_client()
     now_iso = datetime.now(timezone.utc).isoformat()
-    client.table("order_events").update(
+    _db_update(
+        user_address,
+        vault_id,
         {
             "is_settled": True,
             "settled_at": now_iso,
             "settlement_tx_hash": tx_hash,
             "settlement_type": "cash",
-        }
-    ).eq("user_address", user_address).eq("vault_id", vault_id).execute()
+        },
+        "mark_settled",
+    )
 
 
 def _mark_reconciled(user_address: str, vault_id: int) -> None:
     """Mark already-settled-on-chain position in DB."""
-    client = get_client()
     now_iso = datetime.now(timezone.utc).isoformat()
-    client.table("order_events").update({"is_settled": True, "settled_at": now_iso}).eq(
-        "user_address", user_address
-    ).eq("vault_id", vault_id).execute()
+    _db_update(
+        user_address,
+        vault_id,
+        {
+            "is_settled": True,
+            "settled_at": now_iso,
+            "settlement_type": "cash",
+        },
+        "mark_reconciled",
+    )
 
 
 def _mark_itm_redeemed(
@@ -177,35 +216,41 @@ def _mark_itm_redeemed(
     expiry_price: int,
 ) -> None:
     """Mark ITM position after MM redeem."""
-    client = get_client()
-    client.table("order_events").update(
+    _db_update(
+        user_address,
+        vault_id,
         {
             "settlement_type": "physical",
             "is_itm": True,
             "expiry_price": str(expiry_price),
             "delivery_tx_hash": tx_hash,
-        }
-    ).eq("user_address", user_address).eq("vault_id", vault_id).execute()
+        },
+        "mark_itm_redeemed",
+    )
 
 
 def _mark_itm_failed(user_address: str, vault_id: int, expiry_price: int) -> None:
     """Mark ITM position whose redeem failed."""
-    client = get_client()
-    client.table("order_events").update(
+    _db_update(
+        user_address,
+        vault_id,
         {
             "settlement_type": "physical_failed",
             "is_itm": True,
             "expiry_price": str(expiry_price),
-        }
-    ).eq("user_address", user_address).eq("vault_id", vault_id).execute()
+        },
+        "mark_itm_failed",
+    )
 
 
 def _mark_otm(user_address: str, vault_id: int, expiry_price: int) -> None:
     """Mark OTM position with expiry data."""
-    client = get_client()
-    client.table("order_events").update(
-        {"is_itm": False, "expiry_price": str(expiry_price)}
-    ).eq("user_address", user_address).eq("vault_id", vault_id).execute()
+    _db_update(
+        user_address,
+        vault_id,
+        {"is_itm": False, "expiry_price": str(expiry_price)},
+        "mark_otm",
+    )
 
 
 # ── Phase 0: set expiry prices ──────────────────────────────────
@@ -418,11 +463,23 @@ def _settle_vaults(
                 ix,
                 f"settle_vault({user_addr[:12]}/{vault_id})",
             )
-            _mark_settled(user_addr, vault_id, sig)
-            settled.append(pos)
         except Exception:
             logger.exception(
-                "Phase 1: settle_vault failed for %s/%d",
+                "Phase 1: settle_vault tx failed for %s/%d",
+                user_addr[:12],
+                vault_id,
+            )
+            continue
+
+        # On-chain succeeded — vault IS settled regardless of DB
+        settled.append(pos)
+        try:
+            _mark_settled(user_addr, vault_id, sig)
+        except Exception:
+            logger.exception(
+                "ALERT: Phase 1 DB mark failed after on-chain "
+                "settlement (tx=%s) for %s/%d",
+                sig,
                 user_addr[:12],
                 vault_id,
             )
@@ -633,7 +690,11 @@ async def _post_settle_sweep() -> None:
     """Sweep for remaining unsettled positions after main settlement."""
     for cycle in range(settings.settlement_sweep_max_cycles):
         await asyncio.sleep(settings.settlement_sweep_interval_seconds)
-        remaining = await asyncio.to_thread(get_expired_unsettled_solana)
+        try:
+            remaining = await asyncio.to_thread(get_expired_unsettled_solana)
+        except Exception:
+            logger.exception("Sweep %d: DB query failed", cycle + 1)
+            continue
         if not remaining:
             logger.info(
                 "Solana settler sweep %d/%d: all clear",
@@ -647,7 +708,10 @@ async def _post_settle_sweep() -> None:
             settings.settlement_sweep_max_cycles,
             len(remaining),
         )
-        await settle_once()
+        try:
+            await settle_once()
+        except Exception:
+            logger.exception("Sweep cycle %d failed", cycle + 1)
 
 
 async def run() -> None:
@@ -661,9 +725,12 @@ async def run() -> None:
     # Catch-up: settle any already-expired positions on startup
     try:
         await settle_once()
-        await _post_settle_sweep()
     except Exception:
         logger.exception("Solana settler startup catch-up failed")
+    try:
+        await _post_settle_sweep()
+    except Exception:
+        logger.exception("Solana settler startup sweep failed")
 
     target_hour = settings.expiry_settle_hour_utc
     while True:
@@ -671,7 +738,7 @@ async def run() -> None:
         # Next target time
         target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
         if now >= target:
-            target = target.replace(day=target.day + 1)
+            target += timedelta(days=1)
         wait_secs = (target - now).total_seconds()
         logger.info(
             "Solana settler: next run at %s UTC (%.0fs away)",
@@ -683,6 +750,9 @@ async def run() -> None:
         try:
             count = await settle_once()
             logger.info("Solana settler: settled %d positions", count)
-            await _post_settle_sweep()
         except Exception:
             logger.exception("Solana settler daily run failed")
+        try:
+            await _post_settle_sweep()
+        except Exception:
+            logger.exception("Solana settler post-settle sweep failed")
