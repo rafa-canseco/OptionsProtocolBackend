@@ -3,9 +3,9 @@ import re
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-VALID_ASSETS = {"eth", "btc", "sol"}
+VALID_ASSETS = {"eth", "btc", "sol", "okb"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
-VALID_CHAINS = {"base", "solana"}
+VALID_CHAINS = {"base", "solana", "xlayer"}
 BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 # ed25519 signatures are 64 bytes; base58-encoded they reach up to 88 chars
 BASE58_SIG_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{80,88}$")
