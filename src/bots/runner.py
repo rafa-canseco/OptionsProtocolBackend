@@ -27,6 +27,11 @@ BOTS = {
     "yield_indexer": "src.bots.yield_indexer",
     "yield_airdrop": "src.bots.yield_airdrop",
     "price_updater": "src.bots.price_updater",
+    # XLayer
+    "xlayer_otoken_manager": "src.bots.xlayer_otoken_manager",
+    "xlayer_event_indexer": "src.bots.xlayer_event_indexer",
+    "xlayer_expiry_settler": "src.bots.xlayer_expiry_settler",
+    "xlayer_circuit_breaker": "src.bots.xlayer_circuit_breaker_bot",
 }
 
 

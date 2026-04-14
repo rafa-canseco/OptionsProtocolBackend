@@ -221,6 +221,14 @@ def get_xlayer_whitelist() -> Contract:
     )
 
 
+def get_xlayer_otoken(address: str) -> Contract:
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(address),
+        abi=OTOKEN_ABI,
+    )
+
+
 def get_uniswap_quoter() -> Contract:
     if not settings.uniswap_v3_quoter_address:
         raise ValueError(
