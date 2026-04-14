@@ -324,6 +324,22 @@ def build_and_send_eth_transfer(
     return _sign_send_and_confirm(w3, tx_dict, account, "ETH transfer", tx_timeout)
 
 
+def build_and_send_xlayer_native_transfer(
+    to: str, value: int, account, tx_timeout: int = 120
+) -> str:
+    """Send a plain native token transfer on XLayer. Returns tx hash hex."""
+    w3 = get_xlayer_w3()
+    tx_dict = {
+        "to": Web3.to_checksum_address(to),
+        "value": value,
+        "gas": 21_000,
+        "chainId": settings.xlayer_chain_id,
+    }
+    return _sign_send_and_confirm(
+        w3, tx_dict, account, "XLayer gas transfer", tx_timeout
+    )
+
+
 FALLBACK_GAS_LIMIT = 3_000_000
 
 

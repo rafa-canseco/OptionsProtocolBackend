@@ -136,23 +136,23 @@ class Settings(BaseSettings):
     cctp_attestation_timeout: int = 300
     cctp_trade_max_retries: int = 3
 
-    # ── XLayer ──
+    # ── XLayer testnet ──
     xlayer_rpc_url: str = ""
     xlayer_wss_rpc_url: str = ""
     xlayer_chain_id: int = 1952
 
     # XLayer oracle (MockChainlinkFeed)
     chainlink_okb_usd_address: str = "0x0A56056Af2e1157B0787E50B4214d21fB9e7fd5a"
-    wokb_address: str = ""  # Wrapped OKB on XLayer
+    wokb_address: str = "0x1B5D20CcA8D0B8F5FB25aA06735a57E1B104A1A8"
 
-    # XLayer contract addresses
-    xlayer_usdc_address: str = ""
-    xlayer_batch_settler_address: str = ""
-    xlayer_controller_address: str = ""
-    xlayer_otoken_factory_address: str = ""
-    xlayer_margin_pool_address: str = ""
-    xlayer_oracle_address: str = ""
-    xlayer_whitelist_address: str = ""
+    # XLayer contract addresses (defaults from deployments-xlayer.json)
+    xlayer_usdc_address: str = "0x4A881f3f745B99f0C5575577D80958a5a16b7347"
+    xlayer_batch_settler_address: str = "0x6aea5B95d64962E7F001218159cB5fb11712E8B1"
+    xlayer_controller_address: str = "0x75701c1A79Ea45F8BDE9A885A84a7581672d4820"
+    xlayer_otoken_factory_address: str = "0x7C9418a13462174b2b29bc0B99807A13B9731690"
+    xlayer_margin_pool_address: str = "0x3b14faD41CcbD471296e11Ea348dC303aA3A4156"
+    xlayer_oracle_address: str = "0xE3E0bcD6ea5b952F98afcb89D848962100127db1"
+    xlayer_whitelist_address: str = "0x16e505DBeE21fD1EFDb8402444e70840af6D6FBa"
 
     # CoinGecko price updater interval
     coingecko_price_update_interval_seconds: int = 60

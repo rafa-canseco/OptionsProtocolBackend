@@ -15,7 +15,7 @@ from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
-from src.config import settings, has_solana_config, has_bridge_config
+from src.config import settings, has_solana_config, has_xlayer_config, has_bridge_config
 
 logging.basicConfig(
     level=logging.INFO,
@@ -235,6 +235,12 @@ if settings.beta_mode:
 
         app.include_router(solana_faucet_router)
         logger.info("Solana faucet enabled at /faucet/solana")
+
+    if has_xlayer_config() and settings.wokb_address:
+        from src.api.xlayer_faucet import router as xlayer_faucet_router
+
+        app.include_router(xlayer_faucet_router)
+        logger.info("XLayer faucet enabled at /faucet/xlayer")
 
     app.openapi_tags = (app.openapi_tags or []) + [  # type: ignore[operator]
         {
