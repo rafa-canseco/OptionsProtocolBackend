@@ -13,3 +13,4 @@ from enum import Enum
 class Chain(str, Enum):
     BASE = "base"
     SOLANA = "solana"
+    XLAYER = "xlayer"

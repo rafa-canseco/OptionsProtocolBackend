@@ -52,7 +52,7 @@ class TestAssetChainMapping:
     def test_all_assets_have_chain(self):
         for asset in Asset:
             cfg = get_asset_config(asset)
-            assert cfg.chain in (Chain.BASE, Chain.SOLANA)
+            assert cfg.chain in (Chain.BASE, Chain.SOLANA, Chain.XLAYER)
 
 
 # ── AssetConfig properties ──
@@ -65,7 +65,7 @@ class TestAssetConfig:
 
     def test_solana_asset_raises_on_chainlink(self):
         cfg = get_asset_config(Asset.SOL)
-        with pytest.raises(ValueError, match="not Base"):
+        with pytest.raises(ValueError, match="Solana"):
             _ = cfg.chainlink_feed_address
 
     def test_solana_asset_has_pyth_feed(self):
@@ -154,9 +154,7 @@ class TestConfig:
         )
         assert fresh.solana_rpc_url == ""
         assert fresh.solana_cluster == "devnet"
-        assert (
-            fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
-        )
+        assert fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
 
 
 # ── API endpoint tests ──

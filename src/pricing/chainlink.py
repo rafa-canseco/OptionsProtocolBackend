@@ -2,7 +2,8 @@ import logging
 
 from web3 import Web3
 
-from src.contracts.web3_client import get_w3
+from src.chains import Chain
+from src.contracts.web3_client import get_w3, get_xlayer_w3
 from src.pricing.assets import Asset, get_asset_config
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,10 @@ _feed_cache: dict[str, object] = {}
 
 
 def _get_feed(asset: Asset):
-    feed_address = get_asset_config(asset).chainlink_feed_address
+    cfg = get_asset_config(asset)
+    feed_address = cfg.chainlink_feed_address
     if feed_address not in _feed_cache:
-        w3 = get_w3()
+        w3 = get_xlayer_w3() if cfg.chain == Chain.XLAYER else get_w3()
         _feed_cache[feed_address] = w3.eth.contract(
             address=Web3.to_checksum_address(feed_address),
             abi=AGGREGATOR_V3_ABI,

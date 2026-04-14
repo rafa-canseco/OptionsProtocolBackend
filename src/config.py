@@ -136,6 +136,27 @@ class Settings(BaseSettings):
     cctp_attestation_timeout: int = 300
     cctp_trade_max_retries: int = 3
 
+    # ── XLayer ──
+    xlayer_rpc_url: str = ""
+    xlayer_wss_rpc_url: str = ""
+    xlayer_chain_id: int = 1952
+
+    # XLayer oracle (MockChainlinkFeed)
+    chainlink_okb_usd_address: str = "0x0A56056Af2e1157B0787E50B4214d21fB9e7fd5a"
+    wokb_address: str = ""  # Wrapped OKB on XLayer
+
+    # XLayer contract addresses
+    xlayer_usdc_address: str = ""
+    xlayer_batch_settler_address: str = ""
+    xlayer_controller_address: str = ""
+    xlayer_otoken_factory_address: str = ""
+    xlayer_margin_pool_address: str = ""
+    xlayer_oracle_address: str = ""
+    xlayer_whitelist_address: str = ""
+
+    # CoinGecko price updater interval
+    coingecko_price_update_interval_seconds: int = 60
+
     # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
     allowed_origins: str = "*"
 
@@ -188,4 +209,13 @@ def has_solana_config() -> bool:
         and settings.solana_operator_keypair
         and settings.solana_batch_settler_program_id
         and settings.solana_otoken_factory_program_id
+    )
+
+
+def has_xlayer_config() -> bool:
+    """True when XLayer RPC + operator + core contracts are configured."""
+    return bool(
+        settings.xlayer_rpc_url
+        and settings.operator_private_key
+        and settings.xlayer_otoken_factory_address
     )

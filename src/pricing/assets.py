@@ -17,6 +17,8 @@ class Asset(str, Enum):
     BTC = "btc"
     # Solana
     SOL = "sol"
+    # XLayer
+    OKB = "okb"
 
 
 @dataclass(frozen=True)
@@ -24,24 +26,27 @@ class AssetConfig:
     symbol: str
     chain: Chain
     decimals: int
-    deribit_index: str
-    deribit_currency: str
     strike_step: float
     short_expiry_strike_step: float
     num_strikes: int
+    deribit_index: str = ""
+    deribit_currency: str = ""
     min_otm_per_side: int = 4
 
     @property
+    def has_deribit(self) -> bool:
+        return bool(self.deribit_index)
+
+    @property
     def chainlink_feed_address(self) -> str:
-        if self.chain != Chain.BASE:
-            raise ValueError(
-                f"{self.symbol} is on {self.chain.value}, not Base. "
-                "Use Pyth for Solana assets."
-            )
+        if self.chain == Chain.SOLANA:
+            raise ValueError(f"{self.symbol} is on Solana. Use Pyth.")
         if self.symbol == "ETH":
             return settings.chainlink_eth_usd_address
         if self.symbol == "BTC":
             return settings.chainlink_btc_usd_address
+        if self.symbol == "OKB":
+            return settings.chainlink_okb_usd_address
         raise ValueError(f"No Chainlink feed for {self.symbol}")
 
     @property
@@ -53,6 +58,8 @@ class AssetConfig:
             return settings.wbtc_address
         if self.symbol == "SOL":
             return settings.solana_wsol_mint
+        if self.symbol == "OKB":
+            return settings.wokb_address
         raise ValueError(f"No underlying address for {self.symbol}")
 
     @property
@@ -83,30 +90,39 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         symbol="ETH",
         chain=Chain.BASE,
         decimals=18,
-        deribit_index="eth_usd",
-        deribit_currency="ETH",
         strike_step=50.0,
         short_expiry_strike_step=25.0,
         num_strikes=5,
+        deribit_index="eth_usd",
+        deribit_currency="ETH",
     ),
     Asset.BTC: AssetConfig(
         symbol="BTC",
         chain=Chain.BASE,
         decimals=8,
-        deribit_index="btc_usd",
-        deribit_currency="BTC",
         strike_step=1000.0,
         short_expiry_strike_step=500.0,
         num_strikes=5,
+        deribit_index="btc_usd",
+        deribit_currency="BTC",
     ),
     # ── Solana ──
     Asset.SOL: AssetConfig(
         symbol="SOL",
         chain=Chain.SOLANA,
         decimals=9,
+        strike_step=1.0,
+        short_expiry_strike_step=1.0,
+        num_strikes=5,
         deribit_index="sol_usdc",
         deribit_currency="USDC",
-        strike_step=1.0,
+    ),
+    # ── XLayer ──
+    Asset.OKB: AssetConfig(
+        symbol="OKB",
+        chain=Chain.XLAYER,
+        decimals=18,
+        strike_step=2.0,
         short_expiry_strike_step=1.0,
         num_strikes=5,
     ),
@@ -133,3 +149,7 @@ def get_base_assets() -> list[Asset]:
 
 def get_solana_assets() -> list[Asset]:
     return [a for a, c in ASSET_CONFIGS.items() if c.chain == Chain.SOLANA]
+
+
+def get_xlayer_assets() -> list[Asset]:
+    return [a for a, c in ASSET_CONFIGS.items() if c.chain == Chain.XLAYER]

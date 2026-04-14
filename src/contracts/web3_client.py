@@ -22,6 +22,7 @@ from src.contracts.abis import (
 logger = logging.getLogger(__name__)
 
 _w3: Web3 | None = None
+_xlayer_w3: Web3 | None = None
 _nonce_lock = threading.Lock()
 _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
 
@@ -36,6 +37,18 @@ def get_w3() -> Web3:
             )
         _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     return _w3
+
+
+def get_xlayer_w3() -> Web3:
+    global _xlayer_w3
+    if _xlayer_w3 is None:
+        if not settings.xlayer_rpc_url:
+            raise ValueError(
+                "xlayer_rpc_url is not configured. "
+                "Set XLAYER_RPC_URL to an XLayer testnet endpoint."
+            )
+        _xlayer_w3 = Web3(Web3.HTTPProvider(settings.xlayer_rpc_url))
+    return _xlayer_w3
 
 
 def get_operator_account() -> Account:
@@ -138,6 +151,73 @@ def get_erc20(address: str) -> Contract:
     return w3.eth.contract(
         address=Web3.to_checksum_address(address),
         abi=ERC20_TRANSFER_ABI,
+    )
+
+
+# ── XLayer contract getters ──
+
+
+def get_xlayer_batch_settler() -> Contract:
+    if not settings.xlayer_batch_settler_address:
+        raise ValueError(
+            "xlayer_batch_settler_address not configured. "
+            "Set XLAYER_BATCH_SETTLER_ADDRESS env var."
+        )
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.xlayer_batch_settler_address),
+        abi=BATCH_SETTLER_ABI,
+    )
+
+
+def get_xlayer_otoken_factory() -> Contract:
+    if not settings.xlayer_otoken_factory_address:
+        raise ValueError(
+            "xlayer_otoken_factory_address not configured. "
+            "Set XLAYER_OTOKEN_FACTORY_ADDRESS env var."
+        )
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.xlayer_otoken_factory_address),
+        abi=OTOKEN_FACTORY_ABI,
+    )
+
+
+def get_xlayer_controller() -> Contract:
+    if not settings.xlayer_controller_address:
+        raise ValueError(
+            "xlayer_controller_address not configured. "
+            "Set XLAYER_CONTROLLER_ADDRESS env var."
+        )
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.xlayer_controller_address),
+        abi=CONTROLLER_ABI,
+    )
+
+
+def get_xlayer_oracle() -> Contract:
+    if not settings.xlayer_oracle_address:
+        raise ValueError(
+            "xlayer_oracle_address not configured. Set XLAYER_ORACLE_ADDRESS env var."
+        )
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.xlayer_oracle_address),
+        abi=ORACLE_ABI,
+    )
+
+
+def get_xlayer_whitelist() -> Contract:
+    if not settings.xlayer_whitelist_address:
+        raise ValueError(
+            "xlayer_whitelist_address not configured. "
+            "Set XLAYER_WHITELIST_ADDRESS env var."
+        )
+    w3 = get_xlayer_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.xlayer_whitelist_address),
+        abi=WHITELIST_ABI,
     )
 
 
@@ -293,3 +373,27 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
         "Transaction (gas retry)",
         tx_timeout,
     )
+
+
+def build_and_send_xlayer_tx(contract_fn, account, tx_timeout: int = 120) -> str:
+    """Build and send a transaction on XLayer. Returns tx hash hex."""
+    try:
+        gas_estimate = contract_fn.estimate_gas({"from": account.address})
+    except Exception as e:
+        logger.error(
+            "XLayer gas estimation failed from %s: %s",
+            account.address,
+            e,
+        )
+        raise
+    gas_limit = int(gas_estimate * 2)
+
+    w3 = get_xlayer_w3()
+    tx_dict = contract_fn.build_transaction(
+        {
+            "from": account.address,
+            "gas": gas_limit,
+            "chainId": settings.xlayer_chain_id,
+        }
+    )
+    return _sign_send_and_confirm(w3, tx_dict, account, "XLayer tx", tx_timeout)

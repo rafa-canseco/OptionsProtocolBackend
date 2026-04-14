@@ -26,6 +26,7 @@ BOTS = {
     "weekly_aggregator": "src.bots.weekly_aggregator",
     "yield_indexer": "src.bots.yield_indexer",
     "yield_airdrop": "src.bots.yield_airdrop",
+    "price_updater": "src.bots.price_updater",
 }
 
 
