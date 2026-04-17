@@ -147,6 +147,45 @@ class TestPostCapacity:
         )
         assert resp.status_code == 422
 
+    def test_rejects_invalid_status_for_tslax(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "tslax",
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "bogus",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_negative_capacity_for_tslax(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "tslax",
+                "capacity_eth": -0.5,
+                "capacity_usd": 500.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_unknown_asset(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "doge",
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
     def test_db_failure_returns_502(self, auth_headers, mock_db):
         mock_db.table.return_value.upsert.return_value.execute.side_effect = Exception(
             "DB down"

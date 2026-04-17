@@ -1,6 +1,7 @@
 import httpx
 
 from src.pricing.assets import Asset, get_asset_config
+from src.pricing.iv_proxy import get_proxy_iv
 
 DERIBIT_BASE_URL = "https://www.deribit.com/api/v2"
 
@@ -15,8 +16,6 @@ async def get_iv(asset: Asset) -> float:
     """
     cfg = get_asset_config(asset)
     if not cfg.has_deribit:
-        from src.pricing.iv_proxy import get_proxy_iv
-
         return await get_proxy_iv(asset)
 
     index_resp = await _client.get(
@@ -73,6 +72,11 @@ async def get_iv(asset: Asset) -> float:
 async def get_index_price(asset: Asset) -> float:
     """Get USD index price from Deribit for any supported asset."""
     cfg = get_asset_config(asset)
+    if not cfg.has_deribit:
+        raise ValueError(
+            f"{asset.value} has no Deribit index. "
+            "Use the chain-native oracle (Chainlink/Pyth) for spot."
+        )
     resp = await _client.get(
         f"{DERIBIT_BASE_URL}/public/get_index_price",
         params={"index_name": cfg.deribit_index},

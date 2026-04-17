@@ -2,18 +2,26 @@
 
 import logging
 
-from src.pricing.assets import Asset
+from src.pricing.assets import Asset, get_asset_config
 
 logger = logging.getLogger(__name__)
 
-FALLBACK_IV = 0.80  # 80% annualized
-
 
 async def get_proxy_iv(asset: Asset) -> float:
-    """Return fallback IV for assets without Deribit options."""
+    """Return the per-asset proxy IV configured in AssetConfig.
+
+    Raises if the asset has no proxy_iv — the registry's import-time
+    invariant should prevent that, so reaching this branch means the
+    registry is inconsistent.
+    """
+    cfg = get_asset_config(asset)
+    if cfg.proxy_iv is None:
+        raise RuntimeError(
+            f"No proxy_iv for {asset.value}. Add one to ASSET_CONFIGS in assets.py."
+        )
     logger.warning(
-        "No Deribit options for %s, using fallback IV %.2f",
+        "No Deribit options for %s, using proxy IV %.2f",
         asset.value,
-        FALLBACK_IV,
+        cfg.proxy_iv,
     )
-    return FALLBACK_IV
+    return cfg.proxy_iv
