@@ -172,6 +172,10 @@ class MarketDataResponse(BaseModel):
     asset: str = Field(description="Asset symbol")
     spot: float = Field(description="Spot price in USD")
     iv: float = Field(description="Implied volatility (annualized decimal)")
+    iv_source: str = Field(
+        default="deribit",
+        description="Where iv came from: 'deribit' (live) or 'proxy' (AssetConfig fallback)",
+    )
     protocol_fee_bps: int
     gas_price_gwei: float
     available_otokens: list[OTokenInfo]

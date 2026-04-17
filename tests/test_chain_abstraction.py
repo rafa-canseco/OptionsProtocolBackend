@@ -138,9 +138,10 @@ class TestAssetConfig:
             raise AssertionError("Deribit HTTP must not be called for TSLAX")
 
         monkeypatch.setattr(deribit._client, "get", _fake_get)
-        iv = await deribit.get_iv(Asset.TSLAX)
+        result = await deribit.get_iv(Asset.TSLAX)
         assert called["count"] == 0
-        assert iv == get_asset_config(Asset.TSLAX).proxy_iv
+        assert result.value == get_asset_config(Asset.TSLAX).proxy_iv
+        assert result.source == "proxy"
 
     @pytest.mark.asyncio
     async def test_get_index_price_raises_for_tslax(self):
