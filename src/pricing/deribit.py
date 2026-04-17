@@ -14,6 +14,10 @@ async def get_iv(asset: Asset) -> float:
     Returns annualized IV as a decimal (e.g. 0.80 for 80%).
     """
     cfg = get_asset_config(asset)
+    if not cfg.has_deribit:
+        from src.pricing.iv_proxy import get_proxy_iv
+
+        return await get_proxy_iv(asset)
 
     index_resp = await _client.get(
         f"{DERIBIT_BASE_URL}/public/get_index_price",

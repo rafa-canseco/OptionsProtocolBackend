@@ -37,6 +37,7 @@ class TestAssetChainMapping:
 
     def test_solana_assets(self):
         assert get_chain_for_asset(Asset.SOL) == Chain.SOLANA
+        assert get_chain_for_asset(Asset.TSLAX) == Chain.SOLANA
 
     def test_get_base_assets(self):
         base = get_base_assets()
@@ -47,6 +48,7 @@ class TestAssetChainMapping:
     def test_get_solana_assets(self):
         sol = get_solana_assets()
         assert Asset.SOL in sol
+        assert Asset.TSLAX in sol
         assert Asset.ETH not in sol
 
     def test_all_assets_have_chain(self):
@@ -72,6 +74,14 @@ class TestAssetConfig:
         cfg = get_asset_config(Asset.SOL)
         assert len(cfg.pyth_feed_id) == 64  # hex string
 
+    def test_tslax_asset_config(self):
+        cfg = get_asset_config(Asset.TSLAX)
+        assert cfg.chain == Chain.SOLANA
+        assert cfg.decimals == 8
+        assert cfg.underlying_address == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
+        assert len(cfg.pyth_feed_id) == 64
+        assert cfg.has_deribit is False
+
     def test_base_asset_raises_on_pyth(self):
         cfg = get_asset_config(Asset.ETH)
         with pytest.raises(ValueError, match="not Solana"):
@@ -83,6 +93,12 @@ class TestAssetConfig:
     def test_unsupported_asset(self):
         with pytest.raises(ValueError, match="Unsupported"):
             get_asset_config("fake")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_tslax_uses_iv_fallback(self):
+        from src.pricing.iv_proxy import FALLBACK_IV, get_proxy_iv
+
+        assert await get_proxy_iv(Asset.TSLAX) == FALLBACK_IV
 
 
 # ── Address detection ──
@@ -157,6 +173,7 @@ class TestConfig:
         assert (
             fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
         )
+        assert fresh.solana_tslax_mint == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
 
 
 # ── API endpoint tests ──

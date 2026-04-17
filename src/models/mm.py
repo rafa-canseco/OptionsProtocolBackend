@@ -3,7 +3,7 @@ import re
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-VALID_ASSETS = {"eth", "btc", "sol"}
+VALID_ASSETS = {"eth", "btc", "sol", "tslax"}
 HEX_SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]{130}$")
 VALID_CHAINS = {"base", "solana"}
 BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
@@ -38,7 +38,7 @@ class QuoteSubmission(BaseModel):
         description="Solana maker pubkey (base58). Required when chain=solana.",
     )
     # Optional metadata for display (not part of EIP-712 struct)
-    asset: str = Field(default="eth", description="Underlying asset (eth, btc)")
+    asset: str = Field(default="eth", description="Underlying asset")
     strike_price: float | None = Field(
         default=None, ge=0, description="Strike price in USD"
     )
@@ -169,7 +169,7 @@ class OTokenInfo(BaseModel):
 class MarketDataResponse(BaseModel):
     """Market data for MM's pricing engine."""
 
-    asset: str = Field(description="Asset symbol (eth, btc, sol)")
+    asset: str = Field(description="Asset symbol")
     spot: float = Field(description="Spot price in USD")
     iv: float = Field(description="Implied volatility (annualized decimal)")
     protocol_fee_bps: int
@@ -199,7 +199,7 @@ class QuoteResponse(BaseModel):
 class CapacityUpdateRequest(BaseModel):
     """Capacity report from a market maker."""
 
-    asset: str = Field(default="eth", description="Asset symbol (eth, btc, sol)")
+    asset: str = Field(default="eth", description="Asset symbol")
     capacity_eth: float = Field(ge=0, description="Available capacity in native units")
     capacity_usd: float = Field(ge=0, description="Available capacity in USD")
     status: str = Field(description="active, degraded, or full")
@@ -231,7 +231,7 @@ class CapacityUpdateRequest(BaseModel):
 class CapacityResponse(BaseModel):
     """Public capacity info exposed to the frontend."""
 
-    asset: str = Field(description="Asset symbol (eth, btc, sol)")
+    asset: str = Field(description="Asset symbol")
     capacity: float = Field(description="Total available capacity in native units")
     capacity_usd: float = Field(description="Total available capacity in USD")
     market_open: bool = Field(description="Whether any MM is accepting positions")

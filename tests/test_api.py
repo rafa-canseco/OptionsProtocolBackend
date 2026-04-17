@@ -35,6 +35,26 @@ def test_get_prices():
         assert isinstance(data, list)
 
 
+def test_get_tslax_spot_uses_solana_oracle():
+    with pytest.MonkeyPatch.context() as mp:
+        from src.chains.solana import oracle
+
+        mp.setattr(oracle, "get_spot_price", lambda asset: (180.25, 1_700_000_000))
+        response = client.get("/spot?asset=tslax")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "asset": "tslax",
+        "spot": 180.25,
+        "updated_at": 1_700_000_000,
+    }
+
+
+def test_get_spot_invalid_asset_clean_error():
+    response = client.get("/spot?asset=notreal")
+    assert response.status_code == 422
+
+
 def test_get_positions_valid_address():
     response = client.get(f"/positions/{VALID_ADDRESS}")
     assert response.status_code == 200

@@ -67,6 +67,7 @@ _VAULT_BENEFICIARY_OFFSET = 129  # after settled bool
 # Map asset string to Asset enum for Pyth lookups
 _ASSET_MAP: dict[str, Asset] = {
     "sol": Asset.SOL,
+    "tslax": Asset.TSLAX,
 }
 
 

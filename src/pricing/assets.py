@@ -17,6 +17,7 @@ class Asset(str, Enum):
     BTC = "btc"
     # Solana
     SOL = "sol"
+    TSLAX = "tslax"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,10 @@ class AssetConfig:
     short_expiry_strike_step: float
     num_strikes: int
     min_otm_per_side: int = 4
+
+    @property
+    def has_deribit(self) -> bool:
+        return bool(self.deribit_index)
 
     @property
     def chainlink_feed_address(self) -> str:
@@ -53,6 +58,8 @@ class AssetConfig:
             return settings.wbtc_address
         if self.symbol == "SOL":
             return settings.solana_wsol_mint
+        if self.symbol == "TSLAX":
+            return settings.solana_tslax_mint
         raise ValueError(f"No underlying address for {self.symbol}")
 
     @property
@@ -74,6 +81,7 @@ class AssetConfig:
 # Pyth feed IDs for Solana assets (from CONTEXT.md devnet config)
 _PYTH_FEED_IDS: dict[str, str] = {
     "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "TSLAX": "47a156470288850a440df3a6ce85a55917b813a19bb5b31128a33a986566a362",
 }
 
 
@@ -108,6 +116,16 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         deribit_currency="USDC",
         strike_step=1.0,
         short_expiry_strike_step=1.0,
+        num_strikes=5,
+    ),
+    Asset.TSLAX: AssetConfig(
+        symbol="TSLAX",
+        chain=Chain.SOLANA,
+        decimals=8,
+        deribit_index="",
+        deribit_currency="",
+        strike_step=5.0,
+        short_expiry_strike_step=2.5,
         num_strikes=5,
     ),
 }
