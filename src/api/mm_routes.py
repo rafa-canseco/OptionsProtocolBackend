@@ -528,7 +528,7 @@ async def get_market(
         )
 
     try:
-        iv = await get_iv(asset)
+        iv_result = await get_iv(asset)
     except Exception:
         logger.exception("Failed to fetch %s IV from Deribit", asset.value)
         raise HTTPException(status_code=502, detail="Could not fetch IV")
@@ -579,7 +579,8 @@ async def get_market(
     return MarketDataResponse(
         asset=asset.value,
         spot=spot,
-        iv=iv,
+        iv=iv_result.value,
+        iv_source=iv_result.source,
         protocol_fee_bps=settings.protocol_fee_bps,
         gas_price_gwei=round(gas_price_gwei, 4),
         available_otokens=otokens,

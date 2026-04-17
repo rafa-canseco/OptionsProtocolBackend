@@ -37,6 +37,7 @@ class TestAssetChainMapping:
 
     def test_solana_assets(self):
         assert get_chain_for_asset(Asset.SOL) == Chain.SOLANA
+        assert get_chain_for_asset(Asset.TSLAX) == Chain.SOLANA
 
     def test_get_base_assets(self):
         base = get_base_assets()
@@ -47,6 +48,7 @@ class TestAssetChainMapping:
     def test_get_solana_assets(self):
         sol = get_solana_assets()
         assert Asset.SOL in sol
+        assert Asset.TSLAX in sol
         assert Asset.ETH not in sol
 
     def test_all_assets_have_chain(self):
@@ -72,6 +74,14 @@ class TestAssetConfig:
         cfg = get_asset_config(Asset.SOL)
         assert len(cfg.pyth_feed_id) == 64  # hex string
 
+    def test_tslax_asset_config(self):
+        cfg = get_asset_config(Asset.TSLAX)
+        assert cfg.chain == Chain.SOLANA
+        assert cfg.decimals == 8
+        assert cfg.underlying_address == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
+        assert len(cfg.pyth_feed_id) == 64
+        assert cfg.has_deribit is False
+
     def test_base_asset_raises_on_pyth(self):
         cfg = get_asset_config(Asset.ETH)
         with pytest.raises(ValueError, match="not Solana"):
@@ -83,6 +93,62 @@ class TestAssetConfig:
     def test_unsupported_asset(self):
         with pytest.raises(ValueError, match="Unsupported"):
             get_asset_config("fake")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_tslax_uses_iv_fallback(self, caplog):
+        import logging
+
+        from src.pricing.iv_proxy import get_proxy_iv
+
+        cfg = get_asset_config(Asset.TSLAX)
+        assert cfg.proxy_iv is not None
+
+        with caplog.at_level(logging.WARNING, logger="src.pricing.iv_proxy"):
+            iv = await get_proxy_iv(Asset.TSLAX)
+
+        assert iv == cfg.proxy_iv
+        assert 0.1 <= iv <= 2.0, "proxy IV must be a sane annualized value"
+        assert any("No Deribit" in r.message for r in caplog.records)
+
+    def test_tslax_raises_on_chainlink(self):
+        cfg = get_asset_config(Asset.TSLAX)
+        with pytest.raises(ValueError, match="not Base"):
+            _ = cfg.chainlink_feed_address
+
+    def test_unknown_pyth_lookup_raises(self):
+        """If _PYTH_FEED_IDS is missing an entry, the property raises clearly."""
+        from dataclasses import replace
+
+        from src.pricing.assets import _PYTH_FEED_IDS
+
+        cfg = replace(get_asset_config(Asset.SOL), symbol="UNKNOWN")
+        assert "UNKNOWN" not in _PYTH_FEED_IDS
+        with pytest.raises(ValueError, match="No Pyth feed ID"):
+            _ = cfg.pyth_feed_id
+
+    @pytest.mark.asyncio
+    async def test_get_iv_skips_deribit_for_tslax(self, monkeypatch):
+        """get_iv(TSLAX) must not hit Deribit HTTP — it routes to the proxy."""
+        from src.pricing import deribit
+
+        called = {"count": 0}
+
+        async def _fake_get(*_args, **_kwargs):
+            called["count"] += 1
+            raise AssertionError("Deribit HTTP must not be called for TSLAX")
+
+        monkeypatch.setattr(deribit._client, "get", _fake_get)
+        result = await deribit.get_iv(Asset.TSLAX)
+        assert called["count"] == 0
+        assert result.value == get_asset_config(Asset.TSLAX).proxy_iv
+        assert result.source == "proxy"
+
+    @pytest.mark.asyncio
+    async def test_get_index_price_raises_for_tslax(self):
+        from src.pricing import deribit
+
+        with pytest.raises(ValueError, match="no Deribit index"):
+            await deribit.get_index_price(Asset.TSLAX)
 
 
 # ── Address detection ──
@@ -154,9 +220,8 @@ class TestConfig:
         )
         assert fresh.solana_rpc_url == ""
         assert fresh.solana_cluster == "devnet"
-        assert (
-            fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
-        )
+        assert fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
+        assert fresh.solana_tslax_mint == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
 
 
 # ── API endpoint tests ──

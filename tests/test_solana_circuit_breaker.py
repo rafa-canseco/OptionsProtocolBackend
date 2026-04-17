@@ -171,17 +171,22 @@ class TestCheckOnce:
     @patch("src.bots.solana_circuit_breaker_bot.circuit_breaker")
     @patch("src.bots.solana_circuit_breaker_bot.get_pyth_price")
     async def test_calls_invalidate_on_trip(self, mock_pyth, mock_cb, mock_invalidate):
+        from src.pricing.assets import get_solana_assets
+
         mock_pyth.return_value = (150.0, 1700000000)
         mock_cb.check.return_value = True
-        mock_cb.pause_reason_for.return_value = "SOL moved 3%"
+        mock_cb.pause_reason_for.return_value = "moved 3%"
         mock_invalidate.return_value = None
 
         from src.bots.solana_circuit_breaker_bot import check_once
 
         await check_once()
 
-        mock_invalidate.assert_called_once_with("sol")
-        mock_cb.update_reference.assert_called_once_with(150.0, "sol")
+        expected = [a.value for a in get_solana_assets()]
+        assert mock_invalidate.await_count == len(expected)
+        called_with = [c.args[0] for c in mock_invalidate.await_args_list]
+        assert called_with == expected
+        assert mock_cb.update_reference.call_count == len(expected)
 
     @pytest.mark.asyncio
     @patch("src.bots.solana_circuit_breaker_bot.invalidate_solana_quotes")

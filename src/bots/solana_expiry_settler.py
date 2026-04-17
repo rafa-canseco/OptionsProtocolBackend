@@ -18,6 +18,8 @@ import logging
 import struct
 from datetime import datetime, timedelta, timezone
 
+import httpx
+from solana.exceptions import SolanaRpcException
 from solana.rpc.commitment import Confirmed
 from solders.instruction import (  # type: ignore[import-untyped]
     AccountMeta,
@@ -67,6 +69,7 @@ _VAULT_BENEFICIARY_OFFSET = 129  # after settled bool
 # Map asset string to Asset enum for Pyth lookups
 _ASSET_MAP: dict[str, Asset] = {
     "sol": Asset.SOL,
+    "tslax": Asset.TSLAX,
 }
 
 
@@ -329,7 +332,14 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
             )
             continue
 
-        asset_str = pos.get("asset", "sol")
+        asset_str = pos.get("asset")
+        if not asset_str:
+            logger.error(
+                "Phase 0: missing asset field for otoken %s, skipping to avoid "
+                "cross-asset mispricing",
+                otoken_addr[:12],
+            )
+            continue
         asset_enum = _ASSET_MAP.get(asset_str)
         if asset_enum is None:
             logger.error(
@@ -341,14 +351,14 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
 
         try:
             price_8dec = _normalize_pyth_price_to_8dec(asset_enum)
-        except Exception:
+        except (ValueError, RuntimeError, httpx.HTTPError):
             logger.exception("Phase 0: failed to get Pyth price for %s", asset_str)
             continue
 
         ix = _build_set_expiry_price_ix(otoken_mint, price_8dec)
         try:
             _send_ix(ix, f"set_expiry_price({otoken_addr[:12]})")
-        except Exception:
+        except (SolanaRpcException, httpx.HTTPError, OSError):
             logger.exception(
                 "Phase 0: set_expiry_price tx failed for %s",
                 otoken_addr[:12],

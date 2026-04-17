@@ -80,6 +80,7 @@ class TestSolanaQuoteSubmission:
         signature: str | None = None,
         maker_nonce: int = 0,
         maker: str | None = None,
+        asset: str = "sol",
     ) -> dict:
         deadline = int(time.time()) + 300
         otoken = SOL_OTOKEN
@@ -103,7 +104,7 @@ class TestSolanaQuoteSubmission:
                     "signature": sig,
                     "chain": "solana",
                     "maker": maker or SOL_MAKER,
-                    "asset": "eth",
+                    "asset": asset,
                 }
             ]
         }
@@ -118,6 +119,21 @@ class TestSolanaQuoteSubmission:
         data = resp.json()
         assert data["accepted"] == 1
         assert data["rejected"] == 0
+
+    def test_accepts_valid_tslax_solana_quote(self, mock_deps):
+        resp = client.post(
+            "/mm/quotes",
+            json=self._quote_payload(asset="tslax"),
+            headers={"X-API-Key": "fake"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["accepted"] == 1
+        assert data["rejected"] == 0
+
+        rows = mock_deps.table.return_value.upsert.call_args[0][0]
+        assert rows[0]["chain"] == "solana"
+        assert rows[0]["asset"] == "tslax"
 
     def test_rejects_invalid_ed25519_signature(self, mock_deps):
         other_kp = Keypair()

@@ -433,3 +433,30 @@ class TestNormalizePythPrice:
 
         result = _normalize_pyth_price_to_8dec(Asset.SOL)
         assert result == 15050000000
+
+    @patch(f"{_MODULE}.get_pyth_price")
+    def test_normalizes_tslax_price(self, mock_pyth):
+        """TSLAx routes through the same normalizer as SOL."""
+        mock_pyth.return_value = (185.75, 1700000000)
+
+        from src.bots.solana_expiry_settler import (
+            _ASSET_MAP,
+            _normalize_pyth_price_to_8dec,
+        )
+        from src.pricing.assets import Asset
+
+        assert _ASSET_MAP["tslax"] == Asset.TSLAX
+        result = _normalize_pyth_price_to_8dec(Asset.TSLAX)
+        assert result == 18575000000
+
+    @patch(f"{_MODULE}.get_pyth_price")
+    def test_rejects_non_positive_tslax_price(self, mock_pyth):
+        mock_pyth.return_value = (0.0, 1700000000)
+
+        from src.bots.solana_expiry_settler import (
+            _normalize_pyth_price_to_8dec,
+        )
+        from src.pricing.assets import Asset
+
+        with pytest.raises(ValueError, match="non-positive"):
+            _normalize_pyth_price_to_8dec(Asset.TSLAX)

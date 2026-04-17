@@ -1,9 +1,10 @@
 """
 Solana Circuit Breaker Bot
 
-Monitors Pyth spot price for SOL. When the circuit breaker trips
-(>2% move), calls increment_maker_nonce on the Solana BatchSettler
-to invalidate on-chain quotes, and deactivates Solana quotes in DB.
+Monitors Pyth spot price for every Solana asset. When the circuit
+breaker trips (>2% move) for any of them, calls increment_maker_nonce
+on the Solana BatchSettler to invalidate on-chain quotes, and
+deactivates Solana quotes in DB.
 """
 
 import asyncio
@@ -25,7 +26,7 @@ from src.chains.solana.client import (
 from src.chains.solana.oracle import get_pyth_price
 from src.config import settings
 from src.db.database import get_client
-from src.pricing.assets import Asset
+from src.pricing.assets import get_solana_assets
 from src.pricing.circuit_breaker import circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -108,30 +109,32 @@ async def invalidate_solana_quotes(asset: str) -> None:
 
 
 async def check_once() -> None:
-    """Check SOL price. If tripped, invalidate quotes."""
-    asset = Asset.SOL
-    try:
-        price, _ = get_pyth_price(asset)
-    except Exception:
-        logger.exception(
-            "Solana circuit breaker: failed to read %s price from Pyth. "
-            "Safety check skipped.",
-            asset.value,
-        )
-        return
+    """Check every Solana asset's price. If any tripped, invalidate quotes."""
+    for asset in get_solana_assets():
+        try:
+            price, _ = get_pyth_price(asset)
+        except Exception:
+            logger.exception(
+                "Solana circuit breaker: failed to read %s price from Pyth. "
+                "Safety check skipped for this asset.",
+                asset.value,
+            )
+            continue
 
-    if circuit_breaker.check(price, asset.value):
-        reason = circuit_breaker.pause_reason_for(asset.value)
-        logger.warning("Solana circuit breaker tripped: %s", reason)
-        await invalidate_solana_quotes(asset.value)
-        circuit_breaker.update_reference(price, asset.value)
+        if circuit_breaker.check(price, asset.value):
+            reason = circuit_breaker.pause_reason_for(asset.value)
+            logger.warning("Solana circuit breaker tripped: %s", reason)
+            await invalidate_solana_quotes(asset.value)
+            circuit_breaker.update_reference(price, asset.value)
 
 
 async def run() -> None:
-    """Main loop: check SOL price every N seconds."""
+    """Main loop: poll every Solana asset every N seconds."""
+    assets = [a.value for a in get_solana_assets()]
     logger.info(
-        "Solana circuit breaker bot starting (interval=%ds, asset=SOL)",
+        "Solana circuit breaker bot starting (interval=%ds, assets=%s)",
         settings.circuit_breaker_poll_seconds,
+        ",".join(assets),
     )
     while True:
         try:
