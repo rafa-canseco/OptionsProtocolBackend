@@ -10,6 +10,7 @@ as a server-side safety net.
 
 import asyncio
 import logging
+import time
 
 from src.config import settings
 from src.db.database import get_client
@@ -25,14 +26,84 @@ from src.contracts.web3_client import (
 logger = logging.getLogger(__name__)
 
 
-async def invalidate_quotes(asset: str):
-    """Invalidate all quotes: increment on-chain nonce + deactivate DB quotes."""
-    account = get_operator_account()
+def _has_active_non_expired_quotes() -> bool:
+    """Return True if any active, non-expired quote exists in the DB.
 
+    Raises on DB failure so callers can distinguish "no active quotes"
+    (safe to skip) from "could not inspect DB" (must fall back to
+    unconditional on-chain invalidation). Does NOT memoize any result —
+    we re-check on every trip so a reorg, process restart, or external
+    nonce change cannot cause a silent skip of the on-chain tx.
+    """
+    now_ts = int(time.time())
+    client = get_client()
+    result = (
+        client.table("mm_quotes")
+        .select("id")
+        .eq("is_active", True)
+        .gt("deadline", now_ts)
+        .limit(1)
+        .execute()
+    )
+    if result.data is None:
+        raise RuntimeError("mm_quotes query returned data=None")
+    return bool(result.data)
+
+
+def _deactivate_active_quotes() -> int:
+    """Deactivate Base-chain active quotes. Solana quotes are handled
+    by a separate circuit breaker and must not be touched here.
+    """
+    client = get_client()
+    result = (
+        client.table("mm_quotes")
+        .update({"is_active": False})
+        .eq("is_active", True)
+        .eq("chain", "base")
+        .execute()
+    )
+    return len(result.data) if result.data else 0
+
+
+async def invalidate_quotes(asset: str = "all"):
+    """Invalidate all quotes: increment on-chain makerNonce + deactivate DB quotes.
+
+    Only skips the on-chain tx when the DB affirmatively confirms zero
+    active non-expired quotes. Any DB failure or presence of a single
+    active quote forces the on-chain increment — we never trust
+    in-memory state to decide "already invalidated" because that state
+    can diverge from on-chain reality on reorg or process restart.
+    """
+    try:
+        has_active = _has_active_non_expired_quotes()
+        db_lookup_failed = False
+    except Exception:
+        logger.exception(
+            "Circuit breaker: failed to inspect active quotes. "
+            "Proceeding with on-chain invalidation for safety."
+        )
+        has_active = True  # treated as "must send tx"
+        db_lookup_failed = True
+
+    if not db_lookup_failed and not has_active:
+        logger.warning(
+            "Circuit breaker tripped but found no active non-expired quotes; "
+            "skipping on-chain makerNonce increment."
+        )
+        return
+
+    account = get_operator_account()
+    # 1. On-chain: increment makerNonce (MUST succeed for safety)
     try:
         settler = get_batch_settler()
         tx_fn = settler.functions.incrementMakerNonce()
-        tx_hash = await asyncio.to_thread(build_and_send_tx, tx_fn, account)
+        tx_hash = await asyncio.to_thread(
+            build_and_send_tx,
+            tx_fn,
+            account,
+            120,
+            "Circuit breaker incrementMakerNonce",
+        )
         logger.warning(
             "Circuit breaker (%s): incremented makerNonce, tx: %s",
             asset,
@@ -46,20 +117,18 @@ async def invalidate_quotes(asset: str):
         )
         raise
 
-    client = get_client()
-    result = (
-        client.table("mm_quotes")
-        .update({"is_active": False})
-        .eq("is_active", True)
-        .eq("chain", "base")
-        .execute()
-    )
-    deactivated = len(result.data) if result.data else 0
-    logger.warning(
-        "Circuit breaker (%s): deactivated %d DB quotes",
-        asset,
-        deactivated,
-    )
+    try:
+        deactivated = _deactivate_active_quotes()
+        logger.warning(
+            "Circuit breaker (%s): deactivated %d DB quotes",
+            asset,
+            deactivated,
+        )
+    except Exception:
+        logger.exception(
+            "Circuit breaker (%s): failed to deactivate DB quotes",
+            asset,
+        )
 
 
 async def check_once():
