@@ -4,6 +4,7 @@ from web3 import Web3
 
 from src.bots.otoken_manager import (
     ensure_otokens_exist,
+    _load_existing_otokens_for_specs,
     _upsert_available_otokens,
     ZERO_ADDRESS,
 )
@@ -67,6 +68,50 @@ def test_ensure_otokens_exist_already_exists(
     assert len(results) == 1
     assert results[0][0] == existing_addr
     mock_tx.assert_not_called()
+
+
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
+def test_ensure_otokens_exist_uses_existing_db_rows(mock_factory_fn, mock_account):
+    """Existing DB rows skip on-chain existence and whitelist checks."""
+    existing_addr = "0x1111111111111111111111111111111111111111"
+    spec = _make_spec()
+    results = ensure_otokens_exist(
+        [spec],
+        existing_by_key={(spec.strike, spec.expiry_ts, True): existing_addr},
+    )
+
+    assert results == [(existing_addr, spec)]
+    mock_factory_fn.assert_not_called()
+    mock_account.assert_not_called()
+
+
+@patch("src.bots.otoken_manager.get_client")
+def test_load_existing_otokens_for_specs_filters_target_specs(mock_db):
+    """DB-first diff only returns rows matching the generated target specs."""
+    spec = _make_spec(strike=2000.0)
+    table = MagicMock()
+    mock_db.return_value.table.return_value = table
+    table.select.return_value.gt.return_value.execute.return_value.data = [
+        {
+            "otoken_address": "0x1111111111111111111111111111111111111111",
+            "strike_price": "2000.0",
+            "expiry": spec.expiry_ts,
+            "is_put": True,
+        },
+        {
+            "otoken_address": "0x2222222222222222222222222222222222222222",
+            "strike_price": "2050.0",
+            "expiry": spec.expiry_ts,
+            "is_put": True,
+        },
+    ]
+
+    existing = _load_existing_otokens_for_specs([spec])
+
+    assert existing == {
+        (spec.strike, spec.expiry_ts, True): "0x1111111111111111111111111111111111111111"
+    }
 
 
 @patch("src.bots.otoken_manager.get_whitelist")

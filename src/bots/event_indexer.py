@@ -21,6 +21,7 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 from src.api.mm_ws import notify_mm_fill
+from src.pricing.utils import strike_to_8_decimals
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ _ORDER_EXECUTED_TOPIC = Web3.keccak(
 _PHYSICAL_DELIVERY_TOPIC = Web3.keccak(
     text="PhysicalDelivery(address,address,uint256,uint256)"
 )
+_otoken_metadata_cache: dict[str, dict] = {}
 
 
 def _get_last_indexed_block() -> int:
@@ -61,6 +63,66 @@ def _set_last_indexed_block(block: int) -> None:
     ).execute()
 
 
+def _load_otoken_metadata_from_db(otoken_address: str) -> dict | None:
+    """Read oToken metadata from available_otokens when present.
+
+    available_otokens stores strike in human USD units, while order_events
+    expects the contract's 8-decimal integer representation.
+    """
+    client = get_client()
+    result = (
+        client.table("available_otokens")
+        .select("strike_price,expiry,is_put")
+        .eq("otoken_address", otoken_address.lower())
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+
+    row = result.data[0]
+    if (
+        row.get("strike_price") is None
+        or row.get("expiry") is None
+        or row.get("is_put") is None
+    ):
+        return None
+
+    return {
+        "strike_price": strike_to_8_decimals(float(row["strike_price"])),
+        "expiry": int(row["expiry"]),
+        "is_put": bool(row["is_put"]),
+    }
+
+
+def _load_otoken_metadata_from_chain(otoken_address: str) -> dict:
+    ot = get_otoken(otoken_address)
+    strike = ot.functions.strikePrice().call()
+    expiry = ot.functions.expiry().call()
+    is_put = ot.functions.isPut().call()
+    return {
+        "strike_price": strike,
+        "expiry": expiry,
+        "is_put": is_put,
+    }
+
+
+def _load_otoken_metadata(otoken_address: str) -> dict | None:
+    addr = otoken_address.lower()
+    if addr in _otoken_metadata_cache:
+        return _otoken_metadata_cache[addr]
+
+    metadata = _load_otoken_metadata_from_db(addr)
+    source = "db"
+    if metadata is None:
+        metadata = _load_otoken_metadata_from_chain(addr)
+        source = "chain"
+
+    _otoken_metadata_cache[addr] = metadata
+    logger.debug("Loaded oToken metadata from %s: %s", source, addr)
+    return metadata
+
+
 def _enrich_with_otoken_metadata(event_data: dict) -> dict:
     """Read oToken on-chain metadata for denormalization into DB.
 
@@ -69,14 +131,13 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict:
     (identify_itm_positions depends on them).
     """
     try:
-        ot = get_otoken(event_data["otoken_address"])
-        strike = ot.functions.strikePrice().call()
-        expiry = ot.functions.expiry().call()
-        is_put = ot.functions.isPut().call()
+        metadata = _load_otoken_metadata(event_data["otoken_address"])
+        if metadata is None:
+            return event_data
         # Assign only after all reads succeed — no partial enrichment
-        event_data["strike_price"] = strike
-        event_data["expiry"] = expiry
-        event_data["is_put"] = is_put
+        event_data["strike_price"] = metadata["strike_price"]
+        event_data["expiry"] = metadata["expiry"]
+        event_data["is_put"] = metadata["is_put"]
     except Exception:
         logger.exception(
             "Could not read oToken metadata for %s. "
@@ -254,8 +315,10 @@ def _build_delivery_event_data(ev) -> dict | None:
     """Extract a flat dict from a decoded PhysicalDelivery event."""
     otoken_addr = ev.args.oToken.lower()
     try:
-        ot = get_otoken(otoken_addr)
-        is_put = ot.functions.isPut().call()
+        metadata = _load_otoken_metadata(otoken_addr)
+        if metadata is None:
+            return None
+        is_put = metadata["is_put"]
     except Exception:
         logger.exception(
             "Could not read isPut() for oToken %s (tx=%s). "

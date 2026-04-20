@@ -183,6 +183,12 @@ def _sign_send_and_confirm(
     if receipt.status != 1:
         logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
         raise RuntimeError(f"{label} reverted: {tx_hash.hex()}")
+    logger.info(
+        "%s confirmed: tx=%s gas_used=%s",
+        label,
+        tx_hash.hex(),
+        receipt.gasUsed,
+    )
     return tx_hash.hex()
 
 
@@ -203,7 +209,12 @@ def build_and_send_eth_transfer(
 FALLBACK_GAS_LIMIT = 3_000_000
 
 
-def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
+def build_and_send_tx(
+    contract_fn,
+    account,
+    tx_timeout: int = 120,
+    label: str = "Transaction",
+) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
     Uses a lock + local nonce tracker to prevent nonce collisions.
@@ -229,7 +240,7 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
     )
     try:
         return _sign_send_and_confirm(
-            w3, tx_dict, account, "Transaction", tx_timeout,
+            w3, tx_dict, account, label, tx_timeout,
         )
     except RuntimeError as e:
         if "reverted" not in str(e):
@@ -247,5 +258,5 @@ def build_and_send_tx(contract_fn, account, tx_timeout: int = 120) -> str:
         }
     )
     return _sign_send_and_confirm(
-        w3, tx_dict, account, "Transaction (gas retry)", tx_timeout,
+        w3, tx_dict, account, f"{label} (gas retry)", tx_timeout,
     )
