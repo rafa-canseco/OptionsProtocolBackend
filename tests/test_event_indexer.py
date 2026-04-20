@@ -7,10 +7,29 @@ from src.bots import event_indexer
 
 @pytest.fixture(autouse=True)
 def _reset_otoken_cache():
-    """Wipe the metadata cache before every test so tests don't leak."""
+    """Wipe the metadata cache and pending-failure state before every test."""
     event_indexer._otoken_metadata_cache.clear()
+    event_indexer._pending_failure_block = None
     yield
     event_indexer._otoken_metadata_cache.clear()
+    event_indexer._pending_failure_block = None
+
+
+def _make_order_event(block_number: int, tx_hash: str, otoken: str = "0xOK"):
+    ev = MagicMock()
+    ev.transactionHash.hex.return_value = tx_hash
+    ev.blockNumber = block_number
+    ev.logIndex = 0
+    ev.args.user = "0x" + "a" * 40
+    ev.args.mm = "0x" + "b" * 40
+    ev.args.oToken = otoken
+    ev.args.amount = 1
+    ev.args.grossPremium = 1
+    ev.args.netPremium = 1
+    ev.args.fee = 0
+    ev.args.collateral = 1
+    ev.args.vaultId = block_number
+    return ev
 
 
 def test_enrich_with_otoken_metadata_uses_available_otokens_cache():
@@ -203,6 +222,218 @@ def test_fetch_and_store_skips_events_with_failed_enrichment():
     stored = mock_store.call_args[0][0]
     assert len(stored) == 1
     assert stored[0]["tx_hash"] == "0xaaa"
+
+
+def test_fetch_and_store_returns_first_failed_block_and_stops():
+    """On failure, later events in the batch must not be stored either,
+    preserving ordering and ensuring the cursor stops at the failure."""
+    settler = MagicMock()
+    settler.events.OrderExecuted.get_logs.return_value = [
+        _make_order_event(10, "0xa", otoken="0xOK"),
+        _make_order_event(12, "0xb", otoken="0xBAD"),
+        _make_order_event(14, "0xc", otoken="0xOK"),
+    ]
+
+    def enrich(event_data):
+        if event_data["otoken_address"] == "0xbad":
+            return None
+        event_data["strike_price"] = 1
+        event_data["expiry"] = 1
+        event_data["is_put"] = True
+        return event_data
+
+    with patch(
+        "src.bots.event_indexer._enrich_with_otoken_metadata", side_effect=enrich
+    ), patch("src.bots.event_indexer._store_events", return_value=1) as mock_store, patch(
+        "src.bots.event_indexer._notify_mm"
+    ):
+        stored, first_failed = event_indexer._fetch_and_store_order_events(
+            settler, 10, 14
+        )
+
+    assert first_failed == 12
+    stored_batch = mock_store.call_args[0][0]
+    assert [e["tx_hash"] for e in stored_batch] == ["0xa"]
+    assert stored == 1
+
+
+def test_fetch_and_update_delivery_returns_first_failed_block_and_stops():
+    """Delivery enrichment failures must also gate cursor advance."""
+    settler = MagicMock()
+    ev_bad = MagicMock()
+    ev_bad.blockNumber = 20
+    ev_bad.transactionHash.hex.return_value = "0xbad"
+    ev_good = MagicMock()
+    ev_good.blockNumber = 22
+    ev_good.transactionHash.hex.return_value = "0xgood"
+    settler.events.PhysicalDelivery.get_logs.return_value = [ev_bad, ev_good]
+
+    def build(ev):
+        if ev is ev_bad:
+            return None
+        return {
+            "user_address": "0x1",
+            "otoken_address": "0x2",
+            "delivered_asset": "0x3",
+            "delivered_amount": "1",
+            "delivery_tx_hash": "0xgood",
+        }
+
+    with patch(
+        "src.bots.event_indexer._build_delivery_event_data", side_effect=build
+    ), patch(
+        "src.bots.event_indexer._update_delivery_events", return_value=0
+    ) as mock_update:
+        updated, first_failed = event_indexer._fetch_and_update_delivery_events(
+            settler, 20, 22
+        )
+
+    assert first_failed == 20
+    assert mock_update.call_args[0][0] == []
+    assert updated == 0
+
+
+def test_index_once_does_not_advance_past_failed_block():
+    """Forward pass must clamp cursor to (first_failed - 1)."""
+    w3 = MagicMock()
+    w3.eth.block_number = 100
+    settler = MagicMock()
+
+    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
+        "src.bots.event_indexer.get_batch_settler", return_value=settler
+    ), patch(
+        "src.bots.event_indexer._get_last_indexed_block", return_value=49
+    ), patch(
+        "src.bots.event_indexer._set_last_indexed_block"
+    ) as mock_set, patch(
+        "src.bots.event_indexer._fetch_and_store_order_events",
+        return_value=(0, 75),
+    ), patch(
+        "src.bots.event_indexer._fetch_and_update_delivery_events",
+        return_value=(0, None),
+    ):
+        import asyncio
+
+        asyncio.run(event_indexer.index_once())
+
+    # from_block = 50, to_block = min(50+2000-1, 98) = 98, failure at 75.
+    # safe_to_block = 74. Assert the cursor moved to 74, not 98.
+    advance_calls = [c.args[0] for c in mock_set.call_args_list]
+    assert 74 in advance_calls
+    assert 98 not in advance_calls
+    assert event_indexer._pending_failure_block == 75
+
+
+def test_index_once_does_not_advance_when_first_block_fails():
+    """If the very first block in the batch fails, cursor stays put."""
+    w3 = MagicMock()
+    w3.eth.block_number = 100
+    settler = MagicMock()
+
+    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
+        "src.bots.event_indexer.get_batch_settler", return_value=settler
+    ), patch(
+        "src.bots.event_indexer._get_last_indexed_block", return_value=49
+    ), patch(
+        "src.bots.event_indexer._set_last_indexed_block"
+    ) as mock_set, patch(
+        "src.bots.event_indexer._fetch_and_store_order_events",
+        return_value=(0, 50),
+    ), patch(
+        "src.bots.event_indexer._fetch_and_update_delivery_events",
+        return_value=(0, None),
+    ):
+        import asyncio
+
+        asyncio.run(event_indexer.index_once())
+
+    # Failure at from_block itself → the forward-pass branch of
+    # _set_last_indexed_block must not be called with any value.
+    forward_calls = mock_set.call_args_list
+    # Rescan uses _set_last_indexed_block indirectly through fetchers only if
+    # they raise; here neither raises, so no call expected from this path.
+    assert forward_calls == []
+
+
+def test_index_once_clears_pending_failure_when_catchup_succeeds():
+    """A successful forward pass past the pending block clears the marker."""
+    event_indexer._pending_failure_block = 70
+
+    w3 = MagicMock()
+    w3.eth.block_number = 100
+    settler = MagicMock()
+
+    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
+        "src.bots.event_indexer.get_batch_settler", return_value=settler
+    ), patch(
+        "src.bots.event_indexer._get_last_indexed_block", return_value=49
+    ), patch(
+        "src.bots.event_indexer._set_last_indexed_block"
+    ), patch(
+        "src.bots.event_indexer._fetch_and_store_order_events",
+        return_value=(5, None),
+    ), patch(
+        "src.bots.event_indexer._fetch_and_update_delivery_events",
+        return_value=(0, None),
+    ):
+        import asyncio
+
+        asyncio.run(event_indexer.index_once())
+
+    assert event_indexer._pending_failure_block is None
+
+
+def test_subscription_skip_does_not_advance_cursor_on_later_event():
+    """After a subscription enrichment failure at block B, a later event
+    at block B+N must not advance the cursor past B-1."""
+    # Simulate prior failure at block 50.
+    event_indexer._pending_failure_block = 50
+
+    decoded = MagicMock()
+    decoded.blockNumber = 60
+    decoded.transactionHash.hex.return_value = "0x60"
+    settler = MagicMock()
+    settler.events.OrderExecuted.process_log.return_value = decoded
+
+    with patch(
+        "src.bots.event_indexer._build_order_event_data",
+        return_value={"tx_hash": "0x60", "block_number": 60, "otoken_address": "0x"},
+    ), patch(
+        "src.bots.event_indexer._enrich_with_otoken_metadata",
+        side_effect=lambda ev: {
+            **ev,
+            "strike_price": 1,
+            "expiry": 1,
+            "is_put": True,
+        },
+    ), patch(
+        "src.bots.event_indexer._store_events", return_value=1
+    ), patch("src.bots.event_indexer._notify_mm"), patch(
+        "src.bots.event_indexer._set_last_indexed_block"
+    ) as mock_set:
+        event_indexer._process_order_subscription_log(settler, {"dummy": True})
+
+    mock_set.assert_called_once_with(49)
+
+
+def test_subscription_failure_records_pending_block():
+    """Enrichment failure in subscription must set `_pending_failure_block`."""
+    decoded = MagicMock()
+    decoded.blockNumber = 77
+    decoded.transactionHash.hex.return_value = "0x77"
+    settler = MagicMock()
+    settler.events.OrderExecuted.process_log.return_value = decoded
+
+    with patch(
+        "src.bots.event_indexer._build_order_event_data",
+        return_value={"tx_hash": "0x77", "block_number": 77, "otoken_address": "0x"},
+    ), patch(
+        "src.bots.event_indexer._enrich_with_otoken_metadata", return_value=None
+    ), patch("src.bots.event_indexer._set_last_indexed_block") as mock_set:
+        event_indexer._process_order_subscription_log(settler, {"dummy": True})
+
+    assert event_indexer._pending_failure_block == 77
+    mock_set.assert_not_called()
 
 
 def test_otoken_metadata_cache_is_bounded():

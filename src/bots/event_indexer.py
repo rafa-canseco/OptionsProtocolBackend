@@ -43,6 +43,12 @@ _PHYSICAL_DELIVERY_TOPIC = Web3.keccak(
     text="PhysicalDelivery(address,address,uint256,uint256)"
 )
 _otoken_metadata_cache: OrderedDict[str, dict] = OrderedDict()
+# Lowest block with a known enrichment failure. The cursor must not
+# advance past `_pending_failure_block - 1` in either the subscription
+# or forward-pass path — otherwise a settlement-critical event could
+# be lost permanently if the failure outlives the rescan window.
+# Cleared when a forward pass indexes past the failure successfully.
+_pending_failure_block: int | None = None
 
 
 def _get_last_indexed_block() -> int:
@@ -269,20 +275,41 @@ def _fetch_and_store_order_events(
     settler,
     from_block: int,
     to_block: int,
-) -> int:
-    """Fetch OrderExecuted events in range and upsert into DB."""
+) -> tuple[int, int | None]:
+    """Fetch OrderExecuted events in range and upsert into DB.
+
+    Returns (stored_count, first_failed_block). If first_failed_block
+    is not None, the caller MUST NOT advance the cursor past
+    first_failed_block - 1 — the failed event must remain eligible for
+    retry on the next cycle, not rely on the narrow rescan window.
+    """
     raw_events = settler.events.OrderExecuted.get_logs(
         from_block=from_block,
         to_block=to_block,
     )
 
     events_to_store = []
+    first_failed_block: int | None = None
     for ev in raw_events:
         event_data = _build_order_event_data(ev)
         enriched = _enrich_with_otoken_metadata(event_data)
         if enriched is None:
-            # Enrichment failed — skip storage; rescan will retry.
-            # Never upsert a row missing strike/expiry/is_put.
+            # Enrichment failed — don't store AND report the block so
+            # the caller can halt cursor advancement at this point.
+            if first_failed_block is None or ev.blockNumber < first_failed_block:
+                first_failed_block = ev.blockNumber
+            logger.error(
+                "OrderExecuted enrichment failed at block=%d tx=%s. "
+                "Cursor will not advance past block=%d until retry succeeds.",
+                ev.blockNumber,
+                ev.transactionHash.hex(),
+                ev.blockNumber - 1,
+            )
+            continue
+        # Once we've seen a failure, don't store later events either — they
+        # must wait for the failing block to clear so ordering is preserved
+        # (MMs observe events in block order).
+        if first_failed_block is not None:
             continue
         events_to_store.append(enriched)
 
@@ -291,7 +318,7 @@ def _fetch_and_store_order_events(
     for ev_data in events_to_store:
         _notify_mm(ev_data)
 
-    return stored
+    return stored, first_failed_block
 
 
 def _build_order_event_data(ev) -> dict:
@@ -317,8 +344,13 @@ def _fetch_and_update_delivery_events(
     settler,
     from_block: int,
     to_block: int,
-) -> int:
-    """Fetch PhysicalDelivery events in range and update matching DB rows."""
+) -> tuple[int, int | None]:
+    """Fetch PhysicalDelivery events in range and update matching DB rows.
+
+    Returns (updated_count, first_failed_block). Same contract as
+    _fetch_and_store_order_events: a non-None first_failed_block means
+    the caller MUST NOT advance the cursor past first_failed_block - 1.
+    """
     try:
         delivery_event_type = settler.events.PhysicalDelivery
     except AttributeError:
@@ -326,7 +358,7 @@ def _fetch_and_update_delivery_events(
             "PhysicalDelivery event not in ABI "
             "(contract pending upgrade), skipping delivery indexing"
         )
-        return 0
+        return 0, None
 
     delivery_events_raw = delivery_event_type.get_logs(
         from_block=from_block,
@@ -334,15 +366,28 @@ def _fetch_and_update_delivery_events(
     )
 
     if not delivery_events_raw:
-        return 0
+        return 0, None
 
     delivery_to_update = []
+    first_failed_block: int | None = None
     for ev in delivery_events_raw:
         row = _build_delivery_event_data(ev)
-        if row:
-            delivery_to_update.append(row)
+        if row is None:
+            if first_failed_block is None or ev.blockNumber < first_failed_block:
+                first_failed_block = ev.blockNumber
+            logger.error(
+                "PhysicalDelivery enrichment failed at block=%d tx=%s. "
+                "Cursor will not advance past block=%d until retry succeeds.",
+                ev.blockNumber,
+                ev.transactionHash.hex(),
+                ev.blockNumber - 1,
+            )
+            continue
+        if first_failed_block is not None:
+            continue
+        delivery_to_update.append(row)
 
-    return _update_delivery_events(delivery_to_update)
+    return _update_delivery_events(delivery_to_update), first_failed_block
 
 
 def _build_delivery_event_data(ev) -> dict | None:
@@ -387,9 +432,15 @@ async def index_once():
     """Single indexing cycle: fetch new events from chain, store in DB.
 
     Two passes per cycle:
-    1. Forward pass: index from last_indexed_block to safe_block
-    2. Re-scan pass: re-check last RESCAN_BLOCKS for missed events
+    1. Forward pass: index from last_indexed_block to safe_block.
+       If any event in the batch fails enrichment, the cursor is
+       clamped to that block - 1 so the next cycle retries it. A
+       failure at `from_block` means no progress this cycle, which is
+       the correct behaviour: correctness over throughput.
+    2. Re-scan pass: re-check last RESCAN_BLOCKS for missed events.
     """
+    global _pending_failure_block
+
     w3 = get_w3()
     current_block = w3.eth.block_number
     safe_block = current_block - CONFIRMATION_BLOCKS
@@ -402,14 +453,49 @@ async def index_once():
     if from_block <= safe_block:
         to_block = min(from_block + BLOCK_RANGE - 1, safe_block)
 
-        stored = _fetch_and_store_order_events(settler, from_block, to_block)
-        delivered = _fetch_and_update_delivery_events(
-            settler,
-            from_block,
-            to_block,
+        stored, order_fail = _fetch_and_store_order_events(
+            settler, from_block, to_block
+        )
+        delivered, delivery_fail = _fetch_and_update_delivery_events(
+            settler, from_block, to_block,
         )
 
-        _set_last_indexed_block(to_block)
+        failures = [b for b in (order_fail, delivery_fail) if b is not None]
+        if failures:
+            min_failed = min(failures)
+            safe_to_block = min_failed - 1
+            if min_failed <= from_block:
+                # First block in the batch failed — cannot make any progress.
+                logger.error(
+                    "Forward pass: failure at block=%d == from_block. "
+                    "Cursor stays at %d. Will retry next cycle.",
+                    min_failed,
+                    last_indexed,
+                )
+            else:
+                _set_last_indexed_block(safe_to_block)
+                logger.warning(
+                    "Forward pass partial: advanced cursor to %d "
+                    "(halted before failed block %d).",
+                    safe_to_block,
+                    min_failed,
+                )
+            # Track the failure so any subscription events at ≥min_failed
+            # don't silently advance past it.
+            if (
+                _pending_failure_block is None
+                or min_failed < _pending_failure_block
+            ):
+                _pending_failure_block = min_failed
+        else:
+            _set_last_indexed_block(to_block)
+            # No failures in this range → any previously pending failure
+            # that sat at or below to_block has now been resolved.
+            if (
+                _pending_failure_block is not None
+                and _pending_failure_block <= to_block
+            ):
+                _pending_failure_block = None
 
         if stored > 0:
             logger.info(
@@ -429,12 +515,12 @@ async def index_once():
     rescan_to = min(safe_block, rescan_from + BLOCK_RANGE - 1)
     if rescan_from < rescan_to:
         try:
-            rescued = _fetch_and_store_order_events(
+            rescued, _ = _fetch_and_store_order_events(
                 settler,
                 rescan_from,
                 rescan_to,
             )
-            rescued_delivery = _fetch_and_update_delivery_events(
+            rescued_delivery, _ = _fetch_and_update_delivery_events(
                 settler,
                 rescan_from,
                 rescan_to,
@@ -487,8 +573,22 @@ def _process_subscription_log(settler, log) -> None:
         )
 
 
+def _safe_advance_target(block: int) -> int | None:
+    """Return the highest block we can set as the cursor, or None if stalled.
+
+    Clamps against `_pending_failure_block` so a successful event at
+    block B cannot advance past a known-failed earlier block.
+    """
+    if _pending_failure_block is not None:
+        if block >= _pending_failure_block:
+            return _pending_failure_block - 1
+    return block
+
+
 def _process_order_subscription_log(settler, log) -> None:
     """Decode and store an OrderExecuted log from the subscription."""
+    global _pending_failure_block
+
     try:
         decoded = settler.events.OrderExecuted.process_log(log)
     except Exception:
@@ -498,11 +598,20 @@ def _process_order_subscription_log(settler, log) -> None:
     raw_event = _build_order_event_data(decoded)
     event_data = _enrich_with_otoken_metadata(raw_event)
     if event_data is None:
-        # Enrichment failed; catchup getLogs pass will retry on next reconnect.
+        # Enrichment failed; catchup getLogs pass will retry on reconnect.
+        # Record the block so later subscription events don't advance past it.
         logger.warning(
-            "Subscription: skipped OrderExecuted tx=%s — missing oToken metadata",
+            "Subscription: skipped OrderExecuted tx=%s block=%d — "
+            "missing oToken metadata. Cursor will not advance past %d.",
             raw_event["tx_hash"],
+            decoded.blockNumber,
+            decoded.blockNumber - 1,
         )
+        if (
+            _pending_failure_block is None
+            or decoded.blockNumber < _pending_failure_block
+        ):
+            _pending_failure_block = decoded.blockNumber
         return
 
     try:
@@ -521,18 +630,23 @@ def _process_order_subscription_log(settler, log) -> None:
 
     _notify_mm(event_data)
 
+    target = _safe_advance_target(decoded.blockNumber)
+    if target is None or target < 0:
+        return
     try:
-        _set_last_indexed_block(decoded.blockNumber)
+        _set_last_indexed_block(target)
     except Exception:
         logger.warning(
             "Failed to update last_indexed_block to %d, "
             "will be corrected on next event or catchup",
-            decoded.blockNumber,
+            target,
         )
 
 
 def _process_delivery_subscription_log(settler, log) -> None:
     """Decode and update a PhysicalDelivery log from the subscription."""
+    global _pending_failure_block
+
     try:
         decoded = settler.events.PhysicalDelivery.process_log(log)
     except Exception:
@@ -540,7 +654,19 @@ def _process_delivery_subscription_log(settler, log) -> None:
         return
 
     row = _build_delivery_event_data(decoded)
-    if not row:
+    if row is None:
+        logger.warning(
+            "Subscription: skipped PhysicalDelivery tx=%s block=%d — "
+            "missing oToken metadata. Cursor will not advance past %d.",
+            decoded.transactionHash.hex(),
+            decoded.blockNumber,
+            decoded.blockNumber - 1,
+        )
+        if (
+            _pending_failure_block is None
+            or decoded.blockNumber < _pending_failure_block
+        ):
+            _pending_failure_block = decoded.blockNumber
         return
 
     try:
@@ -558,13 +684,16 @@ def _process_delivery_subscription_log(settler, log) -> None:
         )
         return
 
+    target = _safe_advance_target(decoded.blockNumber)
+    if target is None or target < 0:
+        return
     try:
-        _set_last_indexed_block(decoded.blockNumber)
+        _set_last_indexed_block(target)
     except Exception:
         logger.warning(
             "Failed to update last_indexed_block to %d, "
             "will be corrected on next event or catchup",
-            decoded.blockNumber,
+            target,
         )
 
 
