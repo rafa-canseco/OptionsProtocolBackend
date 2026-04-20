@@ -31,7 +31,12 @@ logger = logging.getLogger(__name__)
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 OTokenKey = tuple[float, int, bool]
-FULL_RECONCILE_EVERY_CYCLES = 12
+# Run a full on-chain reconcile every Nth publish cycle. With the default
+# 5-min cadence this bounds the stale-whitelist window to ~15 min: an
+# externally-removed oToken whitelist is re-detected and re-whitelisted
+# within 2 DB-fast cycles at most before the market surface shows it
+# as unusable to MMs.
+FULL_RECONCILE_EVERY_CYCLES = 3
 _publish_cycle_count = 0
 
 

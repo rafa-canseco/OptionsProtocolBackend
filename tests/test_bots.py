@@ -442,12 +442,23 @@ def test_upsert_available_otokens_call_uses_weth_collateral(mock_db):
     assert rows[0]["is_put"] is False
 
 
-def test_publish_once_full_reconcile_every_12th_cycle():
-    """Full reconcile skips the DB-diff shortcut on cycles 1, 13, 25, ..."""
+def test_publish_once_full_reconcile_on_schedule():
+    """Full reconcile skips the DB-diff shortcut on cycles 1, 1+N, 1+2N, ...
+
+    Over `cycles` iterations, the DB shortcut runs on every cycle that
+    is NOT a full reconcile. This test adapts to FULL_RECONCILE_EVERY_CYCLES
+    so changing the constant doesn't break it.
+    """
     import asyncio
 
     otoken_manager._publish_cycle_count = 0
     spec = _make_spec()
+    period = otoken_manager.FULL_RECONCILE_EVERY_CYCLES
+    cycles = period * 3
+    expected_full_reconciles = sum(
+        1 for i in range(1, cycles + 1) if i % period == 1
+    )
+    expected_db_shortcut = cycles - expected_full_reconciles
 
     async def run_n(n):
         for _ in range(n):
@@ -463,10 +474,8 @@ def test_publish_once_full_reconcile_every_12th_cycle():
         "src.bots.otoken_manager.ensure_otokens_exist", return_value=[]
     ):
         try:
-            asyncio.run(run_n(13))
+            asyncio.run(run_n(cycles))
         finally:
             otoken_manager._publish_cycle_count = 0
 
-    # Cycles 1 and 13 are full reconciles → _load_existing_otokens_for_specs
-    # must NOT be called on those. Cycles 2-12 do call it. That's 11 calls total.
-    assert mock_load.call_count == 11
+    assert mock_load.call_count == expected_db_shortcut

@@ -22,33 +22,29 @@ from src.contracts.web3_client import (
 
 logger = logging.getLogger(__name__)
 
-_last_invalidated_quote_marker: str | None = None
 
-
-def _active_quote_marker() -> str | None:
-    """Return a stable marker for the newest active quote, or None if none exist.
+def _has_active_non_expired_quotes() -> bool:
+    """Return True if any active, non-expired quote exists in the DB.
 
     Raises on DB failure so callers can distinguish "no active quotes"
     (safe to skip) from "could not inspect DB" (must fall back to
-    unconditional on-chain invalidation).
+    unconditional on-chain invalidation). Does NOT memoize any result —
+    we re-check on every trip so a reorg, process restart, or external
+    nonce change cannot cause a silent skip of the on-chain tx.
     """
     now_ts = int(time.time())
     client = get_client()
     result = (
         client.table("mm_quotes")
-        .select("id,created_at")
+        .select("id")
         .eq("is_active", True)
         .gt("deadline", now_ts)
-        .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
     if result.data is None:
         raise RuntimeError("mm_quotes query returned data=None")
-    if not result.data:
-        return None
-    row = result.data[0]
-    return f"{row['id']}:{row['created_at']}"
+    return bool(result.data)
 
 
 def _deactivate_active_quotes() -> int:
@@ -63,59 +59,53 @@ def _deactivate_active_quotes() -> int:
 
 
 async def invalidate_quotes():
-    """Invalidate all quotes: increment on-chain makerNonce + deactivate DB quotes."""
-    global _last_invalidated_quote_marker
+    """Invalidate all quotes: increment on-chain makerNonce + deactivate DB quotes.
 
+    Only skips the on-chain tx when the DB affirmatively confirms zero
+    active non-expired quotes. Any DB failure or presence of a single
+    active quote forces the on-chain increment — we never trust
+    in-memory state to decide "already invalidated" because that state
+    can diverge from on-chain reality on reorg or process restart.
+    """
     try:
-        marker = _active_quote_marker()
+        has_active = _has_active_non_expired_quotes()
         db_lookup_failed = False
     except Exception:
         logger.exception(
             "Circuit breaker: failed to inspect active quotes. "
             "Proceeding with on-chain invalidation for safety."
         )
-        marker = None
+        has_active = True  # treated as "must send tx"
         db_lookup_failed = True
 
-    if not db_lookup_failed and marker is None:
+    if not db_lookup_failed and not has_active:
         logger.warning(
             "Circuit breaker tripped but found no active non-expired quotes; "
             "skipping on-chain makerNonce increment."
         )
         return
 
-    should_send_tx = db_lookup_failed or marker != _last_invalidated_quote_marker
-    if should_send_tx:
-        account = get_operator_account()
-        # 1. On-chain: increment makerNonce (MUST succeed for safety)
-        try:
-            settler = get_batch_settler()
-            tx_fn = settler.functions.incrementMakerNonce()
-            tx_hash = await asyncio.to_thread(
-                build_and_send_tx,
-                tx_fn,
-                account,
-                120,
-                "Circuit breaker incrementMakerNonce",
-            )
-            # Only persist the marker when we know what it was.
-            # On DB failure we re-send on every trip until the DB recovers.
-            if marker is not None:
-                _last_invalidated_quote_marker = marker
-            logger.warning(
-                f"Circuit breaker: incremented makerNonce on-chain, tx: {tx_hash}"
-            )
-        except Exception:
-            logger.exception(
-                "CRITICAL: Circuit breaker failed to increment makerNonce on-chain. "
-                "Signed quotes remain valid. Will retry on next cycle."
-            )
-            raise
-    else:
-        logger.warning(
-            "Circuit breaker: active quote set already invalidated on-chain; "
-            "retrying DB deactivation without another makerNonce tx."
+    account = get_operator_account()
+    # 1. On-chain: increment makerNonce (MUST succeed for safety)
+    try:
+        settler = get_batch_settler()
+        tx_fn = settler.functions.incrementMakerNonce()
+        tx_hash = await asyncio.to_thread(
+            build_and_send_tx,
+            tx_fn,
+            account,
+            120,
+            "Circuit breaker incrementMakerNonce",
         )
+        logger.warning(
+            f"Circuit breaker: incremented makerNonce on-chain, tx: {tx_hash}"
+        )
+    except Exception:
+        logger.exception(
+            "CRITICAL: Circuit breaker failed to increment makerNonce on-chain. "
+            "Signed quotes remain valid. Will retry on next cycle."
+        )
+        raise
 
     # 2. Off-chain: deactivate ALL active DB quotes (all MMs, not just operator)
     try:

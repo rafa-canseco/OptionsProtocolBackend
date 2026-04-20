@@ -135,27 +135,36 @@ def _load_otoken_metadata(otoken_address: str) -> dict | None:
     return metadata
 
 
-def _enrich_with_otoken_metadata(event_data: dict) -> dict:
+def _enrich_with_otoken_metadata(event_data: dict) -> dict | None:
     """Read oToken on-chain metadata for denormalization into DB.
 
-    Fetches all three fields before assigning any, so either all succeed
-    or none are set. These fields are critical for settlement
-    (identify_itm_positions depends on them).
+    Returns the enriched event_data, or None if any required field
+    (strike_price/expiry/is_put) could not be resolved. Returning None
+    signals the caller to skip storage — we MUST NOT upsert a row
+    missing these fields because identify_itm_positions relies on them
+    for settlement and a missing strike could cause a payout to be
+    incorrectly classified as OTM.
     """
     try:
         metadata = _load_otoken_metadata(event_data["otoken_address"])
-        if metadata is None:
-            return event_data
-        # Assign only after all reads succeed — no partial enrichment
-        event_data["strike_price"] = metadata["strike_price"]
-        event_data["expiry"] = metadata["expiry"]
-        event_data["is_put"] = metadata["is_put"]
     except Exception:
         logger.exception(
             "Could not read oToken metadata for %s. "
-            "This position will lack settlement-critical fields.",
+            "Skipping storage until next rescan.",
             event_data["otoken_address"],
         )
+        return None
+    if metadata is None:
+        logger.error(
+            "oToken metadata returned None for %s. "
+            "Skipping storage until next rescan.",
+            event_data["otoken_address"],
+        )
+        return None
+    # Assign only after all reads succeed — no partial enrichment
+    event_data["strike_price"] = metadata["strike_price"]
+    event_data["expiry"] = metadata["expiry"]
+    event_data["is_put"] = metadata["is_put"]
     return event_data
 
 
@@ -165,9 +174,18 @@ def _store_events(events: list[dict]) -> int:
     Uses upsert on tx_hash so re-scanned events are safely deduplicated.
     Raises if Supabase accepts the request but returns empty data for a
     non-empty input — prevents the block pointer from advancing past lost events.
+    Also raises if any event is missing a settlement-critical field, which
+    would otherwise poison downstream ITM/OTM classification.
     """
     if not events:
         return 0
+    for ev in events:
+        for critical in ("strike_price", "expiry", "is_put"):
+            if ev.get(critical) is None:
+                raise ValueError(
+                    f"Refusing to store order_event with missing {critical}: "
+                    f"tx={ev.get('tx_hash')} otoken={ev.get('otoken_address')}"
+                )
     client = get_client()
     result = (
         client.table("order_events")
@@ -261,8 +279,12 @@ def _fetch_and_store_order_events(
     events_to_store = []
     for ev in raw_events:
         event_data = _build_order_event_data(ev)
-        event_data = _enrich_with_otoken_metadata(event_data)
-        events_to_store.append(event_data)
+        enriched = _enrich_with_otoken_metadata(event_data)
+        if enriched is None:
+            # Enrichment failed — skip storage; rescan will retry.
+            # Never upsert a row missing strike/expiry/is_put.
+            continue
+        events_to_store.append(enriched)
 
     stored = _store_events(events_to_store)
 
@@ -473,8 +495,15 @@ def _process_order_subscription_log(settler, log) -> None:
         logger.exception("Failed to decode OrderExecuted log: %s", log)
         return
 
-    event_data = _build_order_event_data(decoded)
-    event_data = _enrich_with_otoken_metadata(event_data)
+    raw_event = _build_order_event_data(decoded)
+    event_data = _enrich_with_otoken_metadata(raw_event)
+    if event_data is None:
+        # Enrichment failed; catchup getLogs pass will retry on next reconnect.
+        logger.warning(
+            "Subscription: skipped OrderExecuted tx=%s — missing oToken metadata",
+            raw_event["tx_hash"],
+        )
+        return
 
     try:
         _store_events([event_data])
