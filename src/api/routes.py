@@ -973,13 +973,9 @@ async def get_balances(
                 sol_balances["wsol"] = str(
                     sol_get_balance(solana_address, settings.solana_wsol_mint)
                 )
-            if settings.solana_jup_mint:
-                sol_balances["jup"] = str(
-                    sol_get_balance(solana_address, settings.solana_jup_mint)
-                )
-            if settings.solana_xau_mint:
-                sol_balances["xau"] = str(
-                    sol_get_balance(solana_address, settings.solana_xau_mint)
+            if settings.solana_tslax_mint:
+                sol_balances["tslax"] = str(
+                    sol_get_balance(solana_address, settings.solana_tslax_mint)
                 )
             balances["solana"] = sol_balances
         except Exception:
