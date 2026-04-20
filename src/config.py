@@ -100,8 +100,6 @@ class Settings(BaseSettings):
     solana_usdc_mint: str = ""
     solana_wsol_mint: str = "So11111111111111111111111111111111111111112"
     solana_tslax_mint: str = "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
-    solana_paxg_mint: str = ""
-    solana_xau_mint: str = ""
 
     # Pyth oracle
     solana_pyth_receiver_program: str = ""
