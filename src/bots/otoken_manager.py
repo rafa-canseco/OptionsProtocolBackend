@@ -30,6 +30,18 @@ from src.pricing.chainlink import get_asset_price
 logger = logging.getLogger(__name__)
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+OTokenKey = tuple[float, int, bool]
+# Run a full on-chain reconcile every Nth publish cycle. With the default
+# 5-min cadence this bounds the stale-whitelist window to ~15 min: an
+# externally-removed oToken whitelist is re-detected and re-whitelisted
+# within 2 DB-fast cycles at most before the market surface shows it
+# as unusable to MMs.
+FULL_RECONCILE_EVERY_CYCLES = 3
+_publish_cycle_count = 0
+
+
+def _spec_key(spec: OTokenSpec) -> OTokenKey:
+    return (spec.strike, spec.expiry_ts, spec.option_type == OptionType.PUT)
 
 
 def _find_or_create_otoken(
@@ -125,7 +137,8 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
 
 def ensure_otokens_exist(
     specs: list[OTokenSpec],
-    asset: Asset = Asset.ETH,
+    asset: Asset | dict[OTokenKey, str] = Asset.ETH,
+    existing_by_key: dict[OTokenKey, str] | None = None,
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure the corresponding oToken exists on-chain.
 
@@ -133,18 +146,23 @@ def ensure_otokens_exist(
     on-chain calls. Skips individual specs on failure without aborting
     the whole cycle. Returns (otoken_address, spec) pairs.
     """
-    factory = get_otoken_factory()
-    account = get_operator_account()
+    if isinstance(asset, dict):
+        existing_by_key = asset
+        asset = Asset.ETH
+
     cfg = get_asset_config(asset)
     underlying = Web3.to_checksum_address(cfg.underlying_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
+    existing_by_key = existing_by_key or {}
     seen: dict[tuple, str | None] = {}
     results: list[tuple[str, OTokenSpec]] = []
+    factory = None
+    account = None
 
     for spec in specs:
         is_put = spec.option_type == OptionType.PUT
-        key = (spec.strike, spec.expiry_ts, is_put)
+        key = _spec_key(spec)
         expiry_date = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc).strftime(
             "%Y-%m-%d"
         )
@@ -156,6 +174,17 @@ def ensure_otokens_exist(
             if seen[key] is not None:
                 results.append((seen[key], spec))
             continue
+
+        existing_addr = existing_by_key.get(key)
+        if existing_addr:
+            seen[key] = existing_addr
+            results.append((existing_addr, spec))
+            continue
+
+        if factory is None:
+            factory = get_otoken_factory()
+        if account is None:
+            account = get_operator_account()
 
         strike_price = strike_to_8_decimals(spec.strike)
         expiry = spec.expiry_ts
@@ -197,6 +226,53 @@ def ensure_otokens_exist(
         results.append((otoken_addr, spec))
 
     return results
+
+
+def _load_existing_otokens_for_specs(
+    specs: list[OTokenSpec],
+    asset: Asset = Asset.ETH,
+) -> dict[OTokenKey, str]:
+    """Load already-published oTokens from DB for the target specs.
+
+    This keeps the normal market surface unchanged while avoiding repeated
+    on-chain existence and whitelist checks for rows the bot has already
+    published to `available_otokens`.
+    """
+    if not specs:
+        return {}
+
+    target_keys = {_spec_key(spec) for spec in specs}
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    underlying = get_asset_config(asset).underlying_address.lower()
+    client = get_client()
+    result = (
+        client.table("available_otokens")
+        .select("otoken_address,strike_price,expiry,is_put,underlying")
+        .gt("expiry", now_ts)
+        .execute()
+    )
+    if result.data is None:
+        raise RuntimeError("available_otokens query returned data=None")
+
+    existing: dict[OTokenKey, str] = {}
+    for row in result.data:
+        try:
+            row_underlying = row.get("underlying")
+            if row_underlying is not None and str(row_underlying).lower() != underlying:
+                continue
+            key = (
+                float(row["strike_price"]),
+                int(row["expiry"]),
+                bool(row["is_put"]),
+            )
+            addr = str(row["otoken_address"]).lower()
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Skipping malformed available_otokens row: %s", row)
+            continue
+        if key in target_keys and key not in existing:
+            existing[key] = addr
+
+    return existing
 
 
 def _is_valid_expiry(ts: int) -> bool:
@@ -312,6 +388,9 @@ def _parse_custom_expiries() -> list[int] | None:
 
 async def publish_once():
     """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
+    global _publish_cycle_count
+    _publish_cycle_count += 1
+
     _prune_near_expiry_otokens()
 
     custom_expiries = _parse_custom_expiries()
@@ -327,7 +406,32 @@ async def publish_once():
             spot=spot, asset=asset, expiry_timestamps=custom_expiries
         )
 
-        paired = await asyncio.to_thread(ensure_otokens_exist, specs, asset)
+        if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
+            existing_by_key = {}
+            logger.info(
+                "oToken manager full reconciliation cycle for %s: "
+                "checking target specs on-chain",
+                asset.value,
+            )
+        else:
+            existing_by_key = await asyncio.to_thread(
+                _load_existing_otokens_for_specs,
+                specs,
+                asset,
+            )
+            logger.info(
+                "oToken manager DB diff for %s: %d/%d target specs already published",
+                asset.value,
+                len(existing_by_key),
+                len({_spec_key(spec) for spec in specs}),
+            )
+
+        paired = await asyncio.to_thread(
+            ensure_otokens_exist,
+            specs,
+            asset,
+            existing_by_key,
+        )
         if not paired:
             logger.warning("No oTokens created for %s, skipping", asset.value)
             continue
