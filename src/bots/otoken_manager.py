@@ -235,9 +235,11 @@ def _load_existing_otokens_for_specs(specs: list[OTokenSpec]) -> dict[OTokenKey,
         .gt("expiry", now_ts)
         .execute()
     )
+    if result.data is None:
+        raise RuntimeError("available_otokens query returned data=None")
 
     existing: dict[OTokenKey, str] = {}
-    for row in result.data or []:
+    for row in result.data:
         try:
             key = (
                 float(row["strike_price"]),

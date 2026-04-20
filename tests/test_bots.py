@@ -1,7 +1,9 @@
 from unittest.mock import patch, MagicMock
 
+import pytest
 from web3 import Web3
 
+from src.bots import otoken_manager
 from src.bots.otoken_manager import (
     ensure_otokens_exist,
     _load_existing_otokens_for_specs,
@@ -84,6 +86,49 @@ def test_ensure_otokens_exist_uses_existing_db_rows(mock_factory_fn, mock_accoun
     assert results == [(existing_addr, spec)]
     mock_factory_fn.assert_not_called()
     mock_account.assert_not_called()
+
+
+@patch("src.bots.otoken_manager.get_whitelist")
+@patch("src.bots.otoken_manager.build_and_send_tx")
+@patch("src.bots.otoken_manager.get_operator_account")
+@patch("src.bots.otoken_manager.get_otoken_factory")
+def test_ensure_otokens_exist_partial_overlap_skips_only_known_specs(
+    mock_factory_fn, mock_account, mock_tx, mock_wl
+):
+    """Specs in existing_by_key hit zero RPC; missing specs still go to chain."""
+    known_addr = "0xaaaa111111111111111111111111111111111111"
+    new_addr = "0xbbbb222222222222222222222222222222222222"
+    factory = _setup_factory_mock(new_addr, exists=True)
+    mock_factory_fn.return_value = factory
+    mock_account.return_value = MagicMock()
+    whitelist = MagicMock()
+    whitelist.functions.isWhitelistedOToken.return_value.call.return_value = True
+    mock_wl.return_value = whitelist
+
+    known_spec = _make_spec(strike=2000.0)
+    new_spec = _make_spec(strike=2100.0)
+    existing_by_key = {
+        (known_spec.strike, known_spec.expiry_ts, True): known_addr,
+    }
+
+    results = ensure_otokens_exist([known_spec, new_spec], existing_by_key)
+
+    assert [addr for addr, _ in results] == [known_addr, new_addr]
+    # Only 1 chain lookup (for new_spec); the known_spec never hits the factory.
+    assert factory.functions.getTargetOTokenAddress.return_value.call.call_count == 1
+    # Operator account lazily initialised only when at least one spec misses DB.
+    mock_account.assert_called_once()
+
+
+@patch("src.bots.otoken_manager.get_client")
+def test_load_existing_otokens_for_specs_raises_on_data_none(mock_db):
+    """Silent Supabase failure (data=None) must raise, not masquerade as empty."""
+    table = MagicMock()
+    mock_db.return_value.table.return_value = table
+    table.select.return_value.gt.return_value.execute.return_value.data = None
+
+    with pytest.raises(RuntimeError, match="data=None"):
+        _load_existing_otokens_for_specs([_make_spec()])
 
 
 @patch("src.bots.otoken_manager.get_client")
@@ -395,3 +440,33 @@ def test_upsert_available_otokens_call_uses_weth_collateral(mock_db):
     rows = table_mock.upsert.call_args[0][0]
     assert rows[0]["collateral_asset"] == WETH.lower()
     assert rows[0]["is_put"] is False
+
+
+def test_publish_once_full_reconcile_every_12th_cycle():
+    """Full reconcile skips the DB-diff shortcut on cycles 1, 13, 25, ..."""
+    import asyncio
+
+    otoken_manager._publish_cycle_count = 0
+    spec = _make_spec()
+
+    async def run_n(n):
+        for _ in range(n):
+            await otoken_manager.publish_once()
+
+    with patch("src.bots.otoken_manager._prune_near_expiry_otokens"), patch(
+        "src.bots.otoken_manager.get_eth_price", return_value=(2000.0, None)
+    ), patch(
+        "src.bots.otoken_manager.generate_otoken_specs", return_value=[spec]
+    ), patch(
+        "src.bots.otoken_manager._load_existing_otokens_for_specs", return_value={}
+    ) as mock_load, patch(
+        "src.bots.otoken_manager.ensure_otokens_exist", return_value=[]
+    ):
+        try:
+            asyncio.run(run_n(13))
+        finally:
+            otoken_manager._publish_cycle_count = 0
+
+    # Cycles 1 and 13 are full reconciles → _load_existing_otokens_for_specs
+    # must NOT be called on those. Cycles 2-12 do call it. That's 11 calls total.
+    assert mock_load.call_count == 11

@@ -14,6 +14,7 @@ Tracks last_indexed_block for resumability.
 
 import asyncio
 import logging
+from collections import OrderedDict
 
 from web3 import AsyncWeb3, Web3, WebSocketProvider
 
@@ -29,6 +30,7 @@ BLOCK_RANGE = 2000  # max blocks per getLogs query
 CONFIRMATION_BLOCKS = 2  # wait N blocks before indexing (Base has fast finality)
 RESCAN_BLOCKS = 50  # re-scan last N blocks each cycle to catch missed events
 MAX_RECONNECT_DELAY = 60  # cap exponential backoff at 60s
+_OTOKEN_CACHE_MAX = 4096  # bounded LRU to avoid unbounded growth on long-running bot
 
 # Event topic hashes (keccak256 of canonical signature) — computed once
 _ORDER_EXECUTED_TOPIC = Web3.keccak(
@@ -40,7 +42,7 @@ _ORDER_EXECUTED_TOPIC = Web3.keccak(
 _PHYSICAL_DELIVERY_TOPIC = Web3.keccak(
     text="PhysicalDelivery(address,address,uint256,uint256)"
 )
-_otoken_metadata_cache: dict[str, dict] = {}
+_otoken_metadata_cache: OrderedDict[str, dict] = OrderedDict()
 
 
 def _get_last_indexed_block() -> int:
@@ -108,8 +110,14 @@ def _load_otoken_metadata_from_chain(otoken_address: str) -> dict:
 
 
 def _load_otoken_metadata(otoken_address: str) -> dict | None:
+    """Resolve oToken metadata via DB-first, chain fallback, bounded LRU cache.
+
+    Cache is capped at _OTOKEN_CACHE_MAX entries (oldest evicted first)
+    so a long-running indexer cannot grow memory without bound.
+    """
     addr = otoken_address.lower()
     if addr in _otoken_metadata_cache:
+        _otoken_metadata_cache.move_to_end(addr)
         return _otoken_metadata_cache[addr]
 
     metadata = _load_otoken_metadata_from_db(addr)
@@ -117,9 +125,13 @@ def _load_otoken_metadata(otoken_address: str) -> dict | None:
     if metadata is None:
         metadata = _load_otoken_metadata_from_chain(addr)
         source = "chain"
+        logger.info("Loaded oToken metadata from chain fallback: %s", addr)
+    else:
+        logger.debug("Loaded oToken metadata from %s: %s", source, addr)
 
     _otoken_metadata_cache[addr] = metadata
-    logger.debug("Loaded oToken metadata from %s: %s", source, addr)
+    if len(_otoken_metadata_cache) > _OTOKEN_CACHE_MAX:
+        _otoken_metadata_cache.popitem(last=False)
     return metadata
 
 
@@ -317,11 +329,17 @@ def _build_delivery_event_data(ev) -> dict | None:
     try:
         metadata = _load_otoken_metadata(otoken_addr)
         if metadata is None:
+            logger.warning(
+                "No oToken metadata available for %s (tx=%s). "
+                "Skipping delivery update for this event.",
+                otoken_addr,
+                ev.transactionHash.hex(),
+            )
             return None
         is_put = metadata["is_put"]
     except Exception:
         logger.exception(
-            "Could not read isPut() for oToken %s (tx=%s). "
+            "Could not load oToken metadata for %s (tx=%s). "
             "Skipping delivery update for this event.",
             otoken_addr,
             ev.transactionHash.hex(),

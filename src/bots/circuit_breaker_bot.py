@@ -26,7 +26,12 @@ _last_invalidated_quote_marker: str | None = None
 
 
 def _active_quote_marker() -> str | None:
-    """Return a stable marker for the newest active quote, or None if none exist."""
+    """Return a stable marker for the newest active quote, or None if none exist.
+
+    Raises on DB failure so callers can distinguish "no active quotes"
+    (safe to skip) from "could not inspect DB" (must fall back to
+    unconditional on-chain invalidation).
+    """
     now_ts = int(time.time())
     client = get_client()
     result = (
@@ -38,11 +43,12 @@ def _active_quote_marker() -> str | None:
         .limit(1)
         .execute()
     )
-    rows = result.data or []
-    if not rows:
+    if result.data is None:
+        raise RuntimeError("mm_quotes query returned data=None")
+    if not result.data:
         return None
-    row = rows[0]
-    return f"{row.get('id')}:{row.get('created_at')}"
+    row = result.data[0]
+    return f"{row['id']}:{row['created_at']}"
 
 
 def _deactivate_active_quotes() -> int:
@@ -62,21 +68,24 @@ async def invalidate_quotes():
 
     try:
         marker = _active_quote_marker()
+        db_lookup_failed = False
     except Exception:
         logger.exception(
             "Circuit breaker: failed to inspect active quotes. "
             "Proceeding with on-chain invalidation for safety."
         )
-        marker = "unknown"
+        marker = None
+        db_lookup_failed = True
 
-    if marker is None:
+    if not db_lookup_failed and marker is None:
         logger.warning(
             "Circuit breaker tripped but found no active non-expired quotes; "
             "skipping on-chain makerNonce increment."
         )
         return
 
-    if marker != _last_invalidated_quote_marker:
+    should_send_tx = db_lookup_failed or marker != _last_invalidated_quote_marker
+    if should_send_tx:
         account = get_operator_account()
         # 1. On-chain: increment makerNonce (MUST succeed for safety)
         try:
@@ -89,7 +98,10 @@ async def invalidate_quotes():
                 120,
                 "Circuit breaker incrementMakerNonce",
             )
-            _last_invalidated_quote_marker = marker
+            # Only persist the marker when we know what it was.
+            # On DB failure we re-send on every trip until the DB recovers.
+            if marker is not None:
+                _last_invalidated_quote_marker = marker
             logger.warning(
                 f"Circuit breaker: incremented makerNonce on-chain, tx: {tx_hash}"
             )

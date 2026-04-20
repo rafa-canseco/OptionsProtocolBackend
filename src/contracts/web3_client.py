@@ -181,14 +181,19 @@ def _sign_send_and_confirm(
 
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
-        logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {receipt.gasUsed}")
+        gas_used = getattr(receipt, "gasUsed", "?")
+        logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {gas_used}")
         raise RuntimeError(f"{label} reverted: {tx_hash.hex()}")
-    logger.info(
-        "%s confirmed: tx=%s gas_used=%s",
-        label,
-        tx_hash.hex(),
-        receipt.gasUsed,
-    )
+    # Defensive: logging failures must never rewrite tx success semantics.
+    try:
+        logger.info(
+            "%s confirmed: tx=%s gas_used=%s",
+            label,
+            tx_hash.hex(),
+            getattr(receipt, "gasUsed", "?"),
+        )
+    except Exception:
+        logger.info("%s confirmed: tx=%s (gas_used log failed)", label, tx_hash.hex())
     return tx_hash.hex()
 
 
