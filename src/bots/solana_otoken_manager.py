@@ -523,6 +523,15 @@ def ensure_solana_otokens_exist(
         seen[key] = mint_addr
         results.append((mint_addr, spec))
 
+        # Incremental DB upsert so `/prices?asset=X` can see this oToken
+        # immediately, instead of waiting ~30-60 min for the full asset
+        # cycle to finish (especially painful on first-run with many new
+        # strikes × expiries on-chain).
+        try:
+            _upsert_solana_otokens([(mint_addr, spec)], asset)
+        except Exception:
+            logger.exception("Failed incremental upsert for %s", label)
+
     return results
 
 
