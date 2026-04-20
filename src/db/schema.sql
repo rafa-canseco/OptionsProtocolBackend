@@ -75,6 +75,8 @@ create table if not exists order_events (
   delivered_asset text,
   delivered_amount numeric,
   delivery_tx_hash text,
+  -- Range grouping (put+call pair share a group_id)
+  group_id uuid,
   -- Indexing metadata
   indexed_at timestamptz not null default now()
 );
@@ -86,6 +88,8 @@ create index if not exists idx_order_events_block on order_events(block_number);
 create index if not exists idx_order_events_expiry on order_events(expiry);
 create index if not exists idx_order_events_unsettled
   on order_events(is_settled) where is_settled = false;
+create index if not exists idx_order_events_group_id
+  on order_events(group_id) where group_id is not null;
 
 -- Singleton row tracking last indexed block (for resumability)
 create table if not exists indexer_state (
@@ -206,3 +210,23 @@ create table if not exists available_otokens (
 
 create index if not exists idx_available_otokens_expiry
   on available_otokens(expiry);
+
+-- ============================================================
+-- MM capacity reports (one row per MM, upserted on each report)
+-- ============================================================
+
+create table if not exists mm_capacity (
+  mm_address text primary key,
+  asset text not null default 'ETH',
+  capacity_eth numeric not null,
+  capacity_usd numeric not null,
+  premium_pool_usd numeric,
+  hedge_pool_usd numeric,
+  hedge_pool_withdrawable_usd numeric,
+  leverage integer,
+  open_positions_count integer,
+  open_positions_notional_usd numeric,
+  status text not null default 'active'
+    check (status in ('active', 'degraded', 'full')),
+  reported_at timestamptz not null default now()
+);

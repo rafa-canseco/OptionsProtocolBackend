@@ -2,8 +2,9 @@
 
 Technical reference for integrating with the b1nary options protocol as a market maker.
 
-**Base URL:** `https://api.b1nary.app`
-**Chain:** Base Sepolia (chain ID `84532`)
+**Base URL (production):** `https://api.b1nary.app`
+**Base URL (staging):** `https://optionsprotocolbackend-staging.up.railway.app`
+**Chain:** Base (chain ID `8453`) / Base Sepolia (chain ID `84532` for staging)
 
 ---
 
@@ -26,7 +27,7 @@ Technical reference for integrating with the b1nary options protocol as a market
 
 ## 1. Overview
 
-b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH and earn premium.
+b1nary is a fully-collateralized options protocol on Base. Users sell cash-secured puts or covered calls on ETH or BTC and earn premium.
 
 **The MM's role:** You are the counterparty. You buy the options that users sell. When a user accepts a price, your signed quote is used on-chain to execute the trade atomically.
 
@@ -79,7 +80,7 @@ EIP712Domain(
 | `name` | `"b1nary"` |
 | `version` | `"1"` |
 | `chainId` | `84532` (Base Sepolia) |
-| `verifyingContract` | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` (BatchSettler) |
+| `verifyingContract` | `0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918` (BatchSettler) |
 
 ### Quote Struct
 
@@ -119,7 +120,7 @@ DOMAIN = {
     "name": "b1nary",
     "version": "1",
     "chainId": 84532,
-    "verifyingContract": "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+    "verifyingContract": "0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
 }
 
 QUOTE_TYPES = {
@@ -166,7 +167,7 @@ SETTLER_ABI = [
     }
 ]
 settler = w3.eth.contract(
-    address="0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+    address="0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
     abi=SETTLER_ABI,
 )
 nonce = settler.functions.makerNonce(MM_ADDRESS).call()
@@ -198,7 +199,8 @@ resp = requests.post(
                 "max_amount": quote["maxAmount"],
                 "maker_nonce": quote["makerNonce"],
                 "signature": signature,
-                # Optional metadata (for display only):
+                # Optional metadata (for display/filtering):
+                "asset": "eth",  # "eth" or "btc"
                 "strike_price": 2400.0,
                 "expiry": int(time.time()) + 7 * 86400,
                 "is_put": True,
@@ -221,7 +223,7 @@ const DOMAIN = {
   name: "b1nary",
   version: "1",
   chainId: 84532,
-  verifyingContract: "0x29bb32c014aC3378FfbE335804B94cED48f2afc4",
+  verifyingContract: "0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918",
 };
 
 const QUOTE_TYPES = {
@@ -275,6 +277,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
       "max_amount": 100000000,
       "maker_nonce": 0,
       "signature": "0x...",
+      "asset": "eth",
       "strike_price": 2400.0,
       "expiry": 1741200000,
       "is_put": true
@@ -295,6 +298,7 @@ Submit a batch of EIP-712 signed quotes. Each quote's signature is verified: the
 | `strike_price` | No | Strike in USD (for display) |
 | `expiry` | No | Expiry timestamp (for display) |
 | `is_put` | No | `true` for put, `false` for call (for display) |
+| `asset` | No | Underlying asset: `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -334,6 +338,7 @@ Returns all your active, non-expired quotes.
     "max_amount": "100000000",
     "maker_nonce": 0,
     "signature": "0x...",
+    "asset": "eth",
     "strike_price": 2400.0,
     "expiry": 1741200000,
     "is_put": true,
@@ -525,12 +530,19 @@ Aggregated view of your outstanding risk.
 
 Returns market data for your pricing engine.
 
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
+
 **Response:**
 
 ```json
 {
-  "eth_spot": 2450.50,
-  "eth_iv": 0.65,
+  "asset": "eth",
+  "spot": 2450.50,
+  "iv": 0.65,
   "protocol_fee_bps": 400,
   "gas_price_gwei": 0.01,
   "available_otokens": [
@@ -546,8 +558,9 @@ Returns market data for your pricing engine.
 
 | Field | Description |
 |-------|-------------|
-| `eth_spot` | Current ETH/USD price from Chainlink |
-| `eth_iv` | Implied volatility from Deribit (annualized, decimal) |
+| `asset` | Asset symbol (`"eth"` or `"btc"`) |
+| `spot` | Current spot price in USD from Chainlink |
+| `iv` | Implied volatility from Deribit (annualized, decimal) |
 | `protocol_fee_bps` | Protocol fee in basis points (400 = 4%) |
 | `gas_price_gwei` | Current Base gas price |
 | `available_otokens` | oTokens created on-chain by the platform, available for quoting |
@@ -556,9 +569,37 @@ Returns market data for your pricing engine.
 
 ### Public Endpoints (no auth)
 
+#### `GET /spot` — Current spot price
+
+Returns the live Chainlink spot price for an asset. Does not depend on MM quotes.
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
+
+**Response:**
+
+```json
+{
+  "asset": "btc",
+  "spot": 74185.20,
+  "updated_at": 1773797896
+}
+```
+
+---
+
 #### `GET /prices` — Best bids (price sheet)
 
 Returns the best bid for each oToken across all MMs. This is what users see.
+
+**Query parameters:**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `asset` | `string` (optional) | `"eth"` (default) or `"btc"` |
 
 **Response:**
 
@@ -587,7 +628,7 @@ Returns the best bid for each oToken across all MMs. This is what users see.
 
 The `premium` field is the net premium after protocol fee (what the user receives). The `bid_price_raw` is your gross bid.
 
-Returns **503** if the circuit breaker is active (>2% ETH price move detected).
+Returns **503** if the circuit breaker is active for the requested asset (>2% price move detected). Each asset has an independent circuit breaker.
 
 **Cache:** Results are cached for 15 seconds.
 
@@ -730,7 +771,7 @@ Compute `quoteHash` by calling `hashQuote(quote)` on the BatchSettler.
 
 ### Automated circuit breaker
 
-The b1nary backend runs a circuit breaker bot that monitors ETH/USD via Chainlink every 10 seconds. If ETH moves more than 2% from a reference price:
+The b1nary backend runs a circuit breaker bot that monitors asset prices via Chainlink every 10 seconds. If any monitored asset (ETH, BTC) moves more than 2% from its reference price:
 
 1. The bot calls `incrementMakerNonce()` for the protocol's own MM (if applicable).
 2. `GET /prices` returns **503** until the circuit breaker resets.
@@ -825,7 +866,7 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 | Settlement timing | Weekly, 08:00 UTC | Operator bot |
 | Physical delivery execution | Aave flash loan + Uniswap swap | Operator bot |
 | oToken creation | Factory creates oTokens for each strike/expiry combo | OTokenFactory |
-| Circuit breaker threshold | 2% ETH price move | Backend config |
+| Circuit breaker threshold | 2% price move (per asset) | Backend config |
 
 ### Decimal reference
 
@@ -846,25 +887,25 @@ During physical delivery, the operator redeems your oTokens for the user's locke
 
 | Contract | Address | BaseScan |
 |----------|---------|----------|
-| BatchSettler | `0x29bb32c014aC3378FfbE335804B94cED48f2afc4` | [View](https://sepolia.basescan.org/address/0x29bb32c014aC3378FfbE335804B94cED48f2afc4) |
-| Controller | `0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e` | [View](https://sepolia.basescan.org/address/0x5f3fAb42F74ce2455732e7d2F444ABbD6C5AAd2e) |
-| MarginPool | `0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44` | [View](https://sepolia.basescan.org/address/0xA1832B3bf28272Ae9F1Fa28288Bb894b47491D44) |
-| OTokenFactory | `0x29f897775ccFcFc7382929e0EC9580756041E4FE` | [View](https://sepolia.basescan.org/address/0x29f897775ccFcFc7382929e0EC9580756041E4FE) |
-| Oracle | `0x7843A0b0288DeEceCef333b8764342eA4Fc439D9` | [View](https://sepolia.basescan.org/address/0x7843A0b0288DeEceCef333b8764342eA4Fc439D9) |
-| AddressBook | `0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3` | [View](https://sepolia.basescan.org/address/0x2043b48D7Cb9ED1b983c51F805E3D364230cbAd3) |
-| Whitelist | `0xe188f203650425AcFF343bD64F7FF5bd8c89AB43` | [View](https://sepolia.basescan.org/address/0xe188f203650425AcFF343bD64F7FF5bd8c89AB43) |
+| BatchSettler | `0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918` | [View](https://sepolia.basescan.org/address/0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918) |
+| Controller | `0xB64a532B71E711B5F45B906D9Fc09c184EC54CA0` | [View](https://sepolia.basescan.org/address/0xB64a532B71E711B5F45B906D9Fc09c184EC54CA0) |
+| MarginPool | `0x727ddBD04A691E73feaE26349F48144953Ef20d6` | [View](https://sepolia.basescan.org/address/0x727ddBD04A691E73feaE26349F48144953Ef20d6) |
+| OTokenFactory | `0x1cEA6AE65c06972249831f617ea196863Fb66e6D` | [View](https://sepolia.basescan.org/address/0x1cEA6AE65c06972249831f617ea196863Fb66e6D) |
+| Oracle | `0x101cB9E8a3105EfB18A81E768238eFc041F31E15` | [View](https://sepolia.basescan.org/address/0x101cB9E8a3105EfB18A81E768238eFc041F31E15) |
+| Whitelist | `0xda732e343cfAd50Df28881B66f111779671a17E1` | [View](https://sepolia.basescan.org/address/0xda732e343cfAd50Df28881B66f111779671a17E1) |
 
 ### Mock Tokens (Testnet)
 
 | Token | Address | Decimals | BaseScan |
 |-------|---------|----------|----------|
-| LUSD (Mock USDC) | `0x5A2972d3390ABe3E57010272c8032BfC84E2077b` | 6 | [View](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b) |
-| LETH (Mock WETH) | `0x8C259D169378B705ae62AA697F3233C8dc3774Da` | 18 | [View](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da) |
+| LUSD (Mock USDC) | `0xAB51a471493832C1D70cef8ff937A850cf37c860` | 6 | [View](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860) |
+| LETH (Mock WETH) | `0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6` | 18 | [View](https://sepolia.basescan.org/address/0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6) |
+| LBTC (Mock WBTC) | `0x39fA11EbBE82699Fd9F79C566D7384064571d2b4` | 8 | [View](https://sepolia.basescan.org/address/0x39fA11EbBE82699Fd9F79C566D7384064571d2b4) |
 
 **Minting testnet USDC (LUSD):** The LUSD contract exposes a public `mint(address to, uint256 amount)` function. Call it directly to fund your MM wallet with test USDC — no faucet needed.
 
 ```python
-LUSD_ADDRESS = "0x5A2972d3390ABe3E57010272c8032BfC84E2077b"
+LUSD_ADDRESS = "0xAB51a471493832C1D70cef8ff937A850cf37c860"
 LUSD_ABI = [
     {
         "inputs": [
@@ -890,7 +931,7 @@ signed = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
 w3.eth.send_raw_transaction(signed.raw_transaction)
 ```
 
-You can also call `mint` directly on [BaseScan](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract) using the **Write Contract** tab (connect your wallet via MetaMask).
+You can also call `mint` directly on [BaseScan](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860#writeContract) using the **Write Contract** tab (connect your wallet via MetaMask).
 
 ### Key Addresses
 
@@ -908,7 +949,7 @@ Everything you need to go from zero to submitting your first quote on Base Sepol
 
 ### Step 1 — Fund your wallet via the API faucet
 
-The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
+The b1nary API exposes `POST /faucet` — a single call that sends **0.005 ETH** (gas), **50 LETH**, **2 LBTC**, and **100,000 LUSD** to any address. No existing ETH balance required; the operator wallet pays the gas.
 
 ```bash
 curl -X POST https://api.b1nary.app/faucet \
@@ -920,9 +961,11 @@ curl -X POST https://api.b1nary.app/faucet \
 {
   "eth_amount":  "5000000000000000",
   "leth_amount": "50000000000000000000",
+  "lbtc_amount": "200000000",
   "lusd_amount": "100000000000",
   "eth_tx_hash":  "0x...",
   "leth_tx_hash": "0x...",
+  "lbtc_tx_hash": "0x...",
   "lusd_tx_hash": "0x..."
 }
 ```
@@ -933,17 +976,17 @@ curl -X POST https://api.b1nary.app/faucet \
 
 ```python
 # Mint more LUSD
-lusd = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=MOCK_ERC20_MINT_ABI)
+lusd = w3.eth.contract(address="0xAB51a471493832C1D70cef8ff937A850cf37c860", abi=MOCK_ERC20_MINT_ABI)
 lusd.functions.mint(MM_ADDRESS, 100_000 * 10**6).transact({"from": MM_ADDRESS})
 
 # Mint more LETH
-leth = w3.eth.contract(address="0x8C259D169378B705ae62AA697F3233C8dc3774Da", abi=MOCK_ERC20_MINT_ABI)
+leth = w3.eth.contract(address="0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6", abi=MOCK_ERC20_MINT_ABI)
 leth.functions.mint(MM_ADDRESS, 50 * 10**18).transact({"from": MM_ADDRESS})
 ```
 
 Or call `mint` directly on BaseScan Write Contract tabs:
-- [LUSD mint](https://sepolia.basescan.org/address/0x5A2972d3390ABe3E57010272c8032BfC84E2077b#writeContract)
-- [LETH mint](https://sepolia.basescan.org/address/0x8C259D169378B705ae62AA697F3233C8dc3774Da#writeContract)
+- [LUSD mint](https://sepolia.basescan.org/address/0xAB51a471493832C1D70cef8ff937A850cf37c860#writeContract)
+- [LETH mint](https://sepolia.basescan.org/address/0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6#writeContract)
 
 If you need more Base Sepolia ETH for gas, external faucets: [Coinbase CDP](https://portal.cdp.coinbase.com/products/faucet), [Alchemy](https://www.alchemy.com/faucets/base-sepolia), [Superchain](https://app.optimism.io/faucet).
 
@@ -952,8 +995,8 @@ If you need more Base Sepolia ETH for gas, external faucets: [Coinbase CDP](http
 One-time approval so the contract can pull premium from your wallet when users fill your quotes. See section 5 for the full snippet. Quick version:
 
 ```python
-usdc = w3.eth.contract(address="0x5A2972d3390ABe3E57010272c8032BfC84E2077b", abi=ERC20_ABI)
-usdc.functions.approve("0x29bb32c014aC3378FfbE335804B94cED48f2afc4", 2**256 - 1).transact({"from": MM_ADDRESS})
+usdc = w3.eth.contract(address="0xAB51a471493832C1D70cef8ff937A850cf37c860", abi=ERC20_ABI)
+usdc.functions.approve("0x766bD3aF1D102f7EbcB65a7B7bC12478C2DbA918", 2**256 - 1).transact({"from": MM_ADDRESS})
 ```
 
 ### Step 3 — Get whitelisted
@@ -968,7 +1011,7 @@ Contact the b1nary team to have your wallet registered and receive an API key. T
 
 ### Testnet checklist
 
-- [ ] LUSD and LETH in wallet (`POST /faucet` or direct `mint`)
+- [ ] LUSD, LETH, and LBTC in wallet (`POST /faucet` or direct `mint`)
 - [ ] LUSD approved to BatchSettler (`approve(BATCH_SETTLER_ADDRESS, max)`)
 - [ ] Wallet whitelisted on BatchSettler (`setWhitelistedMM`)
 - [ ] API key received

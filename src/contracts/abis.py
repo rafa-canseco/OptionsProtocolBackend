@@ -198,6 +198,13 @@ OTOKEN_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [],
+        "name": "underlying",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
 ]
 
 ORACLE_ABI = [
@@ -345,6 +352,72 @@ UNISWAP_V3_QUOTER_ABI = [
             {"name": "initializedTicksCrossed", "type": "uint32"},
             {"name": "gasEstimate", "type": "uint256"},
         ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+# --- Yield tracking ABIs ---
+
+CONTROLLER_YIELD_EVENTS_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "owner", "type": "address"},
+            {"indexed": False, "name": "vaultId", "type": "uint256"},
+            {"indexed": False, "name": "asset", "type": "address"},
+            {"indexed": False, "name": "amount", "type": "uint256"},
+        ],
+        "name": "CollateralDeposited",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "owner", "type": "address"},
+            {"indexed": False, "name": "vaultId", "type": "uint256"},
+            {"indexed": False, "name": "collateralReturned", "type": "uint256"},
+        ],
+        "name": "VaultSettled",
+        "type": "event",
+    },
+]
+
+MARGIN_POOL_YIELD_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "asset", "type": "address"},
+            {"indexed": False, "name": "recipient", "type": "address"},
+            {"indexed": False, "name": "yield", "type": "uint256"},
+        ],
+        "name": "YieldHarvested",
+        "type": "event",
+    },
+    {
+        "inputs": [{"name": "asset", "type": "address"}],
+        "name": "harvestYield",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "asset", "type": "address"}],
+        "name": "getAccruedYield",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+ERC20_TRANSFER_ABI = [
+    {
+        "inputs": [
+            {"name": "to", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "transfer",
+        "outputs": [{"name": "", "type": "bool"}],
         "stateMutability": "nonpayable",
         "type": "function",
     },

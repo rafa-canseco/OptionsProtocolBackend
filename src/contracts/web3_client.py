@@ -14,6 +14,9 @@ from src.contracts.abis import (
     CONTROLLER_ABI,
     WHITELIST_ABI,
     UNISWAP_V3_QUOTER_ABI,
+    CONTROLLER_YIELD_EVENTS_ABI,
+    MARGIN_POOL_YIELD_ABI,
+    ERC20_TRANSFER_ABI,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,39 @@ def get_whitelist() -> Contract:
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.whitelist_address),
         abi=WHITELIST_ABI,
+    )
+
+
+def get_margin_pool() -> Contract:
+    if not settings.margin_pool_address:
+        raise ValueError(
+            "margin_pool_address not configured. Set MARGIN_POOL_ADDRESS env var."
+        )
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.margin_pool_address),
+        abi=MARGIN_POOL_YIELD_ABI,
+    )
+
+
+def get_controller_yield() -> Contract:
+    """Controller contract with yield-related events only."""
+    if not settings.controller_address:
+        raise ValueError(
+            "controller_address not configured. Set CONTROLLER_ADDRESS env var."
+        )
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(settings.controller_address),
+        abi=CONTROLLER_YIELD_EVENTS_ABI,
+    )
+
+
+def get_erc20(address: str) -> Contract:
+    w3 = get_w3()
+    return w3.eth.contract(
+        address=Web3.to_checksum_address(address),
+        abi=ERC20_TRANSFER_ABI,
     )
 
 
@@ -245,7 +281,11 @@ def build_and_send_tx(
     )
     try:
         return _sign_send_and_confirm(
-            w3, tx_dict, account, label, tx_timeout,
+            w3,
+            tx_dict,
+            account,
+            label,
+            tx_timeout,
         )
     except RuntimeError as e:
         if "reverted" not in str(e):
@@ -263,5 +303,9 @@ def build_and_send_tx(
         }
     )
     return _sign_send_and_confirm(
-        w3, tx_dict, account, f"{label} (gas retry)", tx_timeout,
+        w3,
+        tx_dict,
+        account,
+        f"{label} (gas retry)",
+        tx_timeout,
     )

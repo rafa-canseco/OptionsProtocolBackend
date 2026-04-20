@@ -11,6 +11,9 @@ from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
 from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
+from src.api.leaderboard import router as leaderboard_router
+from src.api.notifications import router as notifications_router
+from src.api.yield_routes import router as yield_router
 from src.config import settings
 
 logging.basicConfig(
@@ -57,12 +60,7 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(otoken_manager.run()))
         tasks.append(asyncio.create_task(event_indexer.run()))
-        if not settings.beta_mode:
-            tasks.append(asyncio.create_task(expiry_settler.run()))
-        else:
-            logger.info(
-                "Beta mode: expiry_settler disabled (settlement is user-triggered)"
-            )
+        tasks.append(asyncio.create_task(expiry_settler.run()))
         tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
         logger.info("Started %d on-chain bots", len(tasks))
     else:
@@ -70,11 +68,27 @@ async def lifespan(app: FastAPI):
             "On-chain bots not started: contract addresses or operator key not configured"
         )
 
+    # Yield indexer needs controller + margin pool addresses
+    if settings.controller_address and settings.margin_pool_address:
+        from src.bots import yield_indexer
+
+        tasks.append(asyncio.create_task(yield_indexer.run()))
+        logger.info("Yield indexer started")
+
     # Weekly aggregator only needs DB access, not on-chain config
     from src.bots import weekly_aggregator
 
     tasks.append(asyncio.create_task(weekly_aggregator.run()))
     logger.info("Weekly aggregator started")
+
+    # Notification bot only needs Resend API key, not on-chain config
+    if settings.resend_api_key:
+        from src.bots import notification_bot
+
+        tasks.append(asyncio.create_task(notification_bot.run()))
+        logger.info("Notification bot started")
+    else:
+        logger.info("Notification bot not started: RESEND_API_KEY not configured")
 
     yield
 
@@ -116,6 +130,18 @@ openapi_tags = [
         "description": "Fire-and-forget event logging for frontend interactions (slider usage, engagement events).",
     },
     {
+        "name": "Leaderboard",
+        "description": "Earnings Challenge leaderboard — two tracks per wallet.",
+    },
+    {
+        "name": "Yield",
+        "description": "Aave yield tracking, distributions, and per-user stats.",
+    },
+    {
+        "name": "Notifications",
+        "description": "Email notification opt-in, verification, and unsubscribe.",
+    },
+    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -154,6 +180,9 @@ app.include_router(analytics_router)
 app.include_router(mm_router)
 app.include_router(mm_ws_router)
 app.include_router(activity_router)
+app.include_router(leaderboard_router)
+app.include_router(notifications_router)
+app.include_router(yield_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router

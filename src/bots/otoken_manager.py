@@ -9,8 +9,7 @@ Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 
 import asyncio
 import logging
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from web3 import Web3
 
@@ -22,10 +21,11 @@ from src.contracts.web3_client import (
     get_whitelist,
 )
 from src.db.database import get_client
+from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import CUTOFF_HOURS, FRIDAY_WEEKDAY, strike_to_8_decimals
-from src.pricing.chainlink import get_eth_price
+from src.pricing.utils import strike_to_8_decimals
+from src.pricing.chainlink import get_asset_price
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _spec_key(spec: OTokenSpec) -> OTokenKey:
 def _find_or_create_otoken(
     factory,
     account,
-    weth: str,
+    underlying: str,
     usdc: str,
     collateral: str,
     strike_price: int,
@@ -60,7 +60,7 @@ def _find_or_create_otoken(
     Returns the oToken address, or None if creation failed.
     """
     target_addr = factory.functions.getTargetOTokenAddress(
-        weth, usdc, collateral, strike_price, expiry, is_put
+        underlying, usdc, collateral, strike_price, expiry, is_put
     ).call()
 
     if factory.functions.isOToken(target_addr).call():
@@ -70,7 +70,7 @@ def _find_or_create_otoken(
     logger.info("Creating oToken: %s", label)
     try:
         tx_fn = factory.functions.createOToken(
-            weth,
+            underlying,
             usdc,
             collateral,
             strike_price,
@@ -91,7 +91,7 @@ def _find_or_create_otoken(
         raise RuntimeError(f"Failed to create oToken: {label}") from create_err
 
     otoken_addr = factory.functions.getTargetOTokenAddress(
-        weth,
+        underlying,
         usdc,
         collateral,
         strike_price,
@@ -128,7 +128,8 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
         if whitelist.functions.isWhitelistedOToken(otoken_addr).call():
             logger.info(
                 "oToken %s already whitelisted (by factory), skipping: %s",
-                otoken_addr, label,
+                otoken_addr,
+                label,
             )
             return
         raise
@@ -136,6 +137,7 @@ def _whitelist_otoken(otoken_addr: str, account, label: str) -> None:
 
 def ensure_otokens_exist(
     specs: list[OTokenSpec],
+    asset: Asset | dict[OTokenKey, str] = Asset.ETH,
     existing_by_key: dict[OTokenKey, str] | None = None,
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure the corresponding oToken exists on-chain.
@@ -144,7 +146,12 @@ def ensure_otokens_exist(
     on-chain calls. Skips individual specs on failure without aborting
     the whole cycle. Returns (otoken_address, spec) pairs.
     """
-    weth = Web3.to_checksum_address(settings.weth_address)
+    if isinstance(asset, dict):
+        existing_by_key = asset
+        asset = Asset.ETH
+
+    cfg = get_asset_config(asset)
+    underlying = Web3.to_checksum_address(cfg.underlying_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
     existing_by_key = existing_by_key or {}
@@ -181,13 +188,13 @@ def ensure_otokens_exist(
 
         strike_price = strike_to_8_decimals(spec.strike)
         expiry = spec.expiry_ts
-        collateral = usdc if is_put else weth
+        collateral = usdc if is_put else underlying
 
         try:
             otoken_addr = _find_or_create_otoken(
                 factory,
                 account,
-                weth,
+                underlying,
                 usdc,
                 collateral,
                 strike_price,
@@ -221,7 +228,10 @@ def ensure_otokens_exist(
     return results
 
 
-def _load_existing_otokens_for_specs(specs: list[OTokenSpec]) -> dict[OTokenKey, str]:
+def _load_existing_otokens_for_specs(
+    specs: list[OTokenSpec],
+    asset: Asset = Asset.ETH,
+) -> dict[OTokenKey, str]:
     """Load already-published oTokens from DB for the target specs.
 
     This keeps the normal market surface unchanged while avoiding repeated
@@ -233,10 +243,11 @@ def _load_existing_otokens_for_specs(specs: list[OTokenSpec]) -> dict[OTokenKey,
 
     target_keys = {_spec_key(spec) for spec in specs}
     now_ts = int(datetime.now(timezone.utc).timestamp())
+    underlying = get_asset_config(asset).underlying_address.lower()
     client = get_client()
     result = (
         client.table("available_otokens")
-        .select("otoken_address,strike_price,expiry,is_put")
+        .select("otoken_address,strike_price,expiry,is_put,underlying")
         .gt("expiry", now_ts)
         .execute()
     )
@@ -246,6 +257,9 @@ def _load_existing_otokens_for_specs(specs: list[OTokenSpec]) -> dict[OTokenKey,
     existing: dict[OTokenKey, str] = {}
     for row in result.data:
         try:
+            row_underlying = row.get("underlying")
+            if row_underlying is not None and str(row_underlying).lower() != underlying:
+                continue
             key = (
                 float(row["strike_price"]),
                 int(row["expiry"]),
@@ -261,69 +275,62 @@ def _load_existing_otokens_for_specs(specs: list[OTokenSpec]) -> dict[OTokenKey,
     return existing
 
 
-def _get_custom_expiry_set() -> set[int]:
-    """Return custom expiry timestamps from env, or empty set."""
-    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
-    if not custom:
-        return set()
-    return {int(ts.strip()) for ts in custom.split(",")}
-
-
 def _is_valid_expiry(ts: int) -> bool:
-    """Return True if timestamp is a valid expiry (Friday 08:00 UTC or custom)."""
-    if ts in _get_custom_expiry_set():
-        return True
+    """Return True if timestamp is a valid expiry (08:00 UTC on any day)."""
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.weekday() == FRIDAY_WEEKDAY and dt.hour == 8 and dt.minute == 0
+    return dt.hour == 8 and dt.minute == 0 and dt.second == 0
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens expiring within CUTOFF_HOURS.
+    """Delete rows from available_otokens within their dynamic cutoff.
 
-    Custom expiry timestamps are exempt from pruning.
+    Short-term expiries (TTL <= 48h) use short cutoff (4h).
+    Standard expiries use standard cutoff (48h).
     """
-    cutoff_ts = int(
-        (datetime.now(timezone.utc) + timedelta(hours=CUTOFF_HOURS)).timestamp()
-    )
-    custom = _get_custom_expiry_set()
+    from src.pricing.utils import cutoff_hours_for_expiry
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    max_cutoff_ts = now_ts + settings.expiry_cutoff_hours * 3600
     client = get_client()
     result = (
         client.table("available_otokens")
         .select("id, expiry")
-        .lt("expiry", cutoff_ts)
+        .lt("expiry", max_cutoff_ts)
         .execute()
     )
+    rows = result.data or []
     prune_ids = [
-        r["id"] for r in (result.data or [])
-        if r["expiry"] not in custom
+        r["id"]
+        for r in rows
+        if r.get("expiry") is not None
+        and r["expiry"]
+        <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
     ]
     if prune_ids:
-        client.table("available_otokens").delete().in_(
-            "id", prune_ids
-        ).execute()
-    logger.info(
-        "Pruned %d available_otokens (skipped %d custom)",
-        len(prune_ids),
-        len(result.data or []) - len(prune_ids),
-    )
+        client.table("available_otokens").delete().in_("id", prune_ids).execute()
+    logger.info("Pruned %d available_otokens", len(prune_ids))
 
 
 def _upsert_available_otokens(
     paired: list[tuple[str, OTokenSpec]],
+    asset: Asset = Asset.ETH,
 ) -> None:
     """Write created oTokens to the available_otokens table.
 
-    Skips any spec whose expiry is not Friday 08:00 UTC.
+    Skips any spec whose expiry is not 08:00 UTC.
     Raises on DB failure so the caller knows the cycle did not
     complete successfully.
     """
+    cfg = get_asset_config(asset)
+    underlying = cfg.underlying_address.lower()
+
     seen_addresses: set[str] = set()
     rows = []
     for otoken_addr, spec in paired:
         if not _is_valid_expiry(spec.expiry_ts):
             expiry_dt = datetime.fromtimestamp(spec.expiry_ts, tz=timezone.utc)
             logger.warning(
-                "Skipping non-Friday oToken: %s expiry=%s",
+                "Skipping invalid expiry oToken: %s expiry=%s",
                 otoken_addr,
                 expiry_dt.isoformat(),
             )
@@ -335,13 +342,13 @@ def _upsert_available_otokens(
         seen_addresses.add(addr_lower)
 
         is_put = spec.option_type == OptionType.PUT
-        weth = settings.weth_address.lower()
         usdc = settings.usdc_address.lower()
-        collateral = usdc if is_put else weth
+        collateral = usdc if is_put else underlying
 
         rows.append(
             {
                 "otoken_address": addr_lower,
+                "underlying": underlying,
                 "strike_price": spec.strike,
                 "expiry": spec.expiry_ts,
                 "is_put": is_put,
@@ -359,36 +366,81 @@ def _upsert_available_otokens(
     logger.info("Upserted %d oTokens to available_otokens", len(rows))
 
 
+def _parse_custom_expiries() -> list[int] | None:
+    """Parse CUSTOM_EXPIRY_TIMESTAMPS env var into a list of ints, or None if unset."""
+    raw = settings.custom_expiry_timestamps.strip()
+    if not raw:
+        return None
+    try:
+        timestamps = [int(t.strip()) for t in raw.split(",") if t.strip()]
+    except ValueError:
+        logger.error(
+            "CUSTOM_EXPIRY_TIMESTAMPS is malformed: %r — using default expiries",
+            raw,
+        )
+        return None
+    if not timestamps:
+        return None
+    logger.info("Using custom expiry timestamps: %s", timestamps)
+    return timestamps
+
+
 async def publish_once():
-    """Single cycle: prune stale oTokens, generate specs, create on-chain, record them."""
+    """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
     global _publish_cycle_count
     _publish_cycle_count += 1
 
     _prune_near_expiry_otokens()
 
-    eth_price, _ = get_eth_price()
-    specs = generate_otoken_specs(spot=eth_price)
+    custom_expiries = _parse_custom_expiries()
 
-    if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
-        existing_by_key = {}
-        logger.info(
-            "oToken manager full reconciliation cycle: checking target specs on-chain"
-        )
-    else:
-        existing_by_key = await asyncio.to_thread(_load_existing_otokens_for_specs, specs)
-        logger.info(
-            "oToken manager DB diff: %d/%d target specs already published",
-            len(existing_by_key),
-            len({_spec_key(spec) for spec in specs}),
+    for asset in Asset:
+        try:
+            spot, _ = get_asset_price(asset)
+        except Exception:
+            logger.exception("Failed to fetch %s price, skipping asset", asset.value)
+            continue
+
+        specs = generate_otoken_specs(
+            spot=spot, asset=asset, expiry_timestamps=custom_expiries
         )
 
-    paired = await asyncio.to_thread(ensure_otokens_exist, specs, existing_by_key)
-    if not paired:
-        logger.warning("No oTokens created, skipping")
-        return
+        if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
+            existing_by_key = {}
+            logger.info(
+                "oToken manager full reconciliation cycle for %s: "
+                "checking target specs on-chain",
+                asset.value,
+            )
+        else:
+            existing_by_key = await asyncio.to_thread(
+                _load_existing_otokens_for_specs,
+                specs,
+                asset,
+            )
+            logger.info(
+                "oToken manager DB diff for %s: %d/%d target specs already published",
+                asset.value,
+                len(existing_by_key),
+                len({_spec_key(spec) for spec in specs}),
+            )
 
-    _upsert_available_otokens(paired)
-    logger.info("oToken manager cycle complete: %d oTokens", len(paired))
+        paired = await asyncio.to_thread(
+            ensure_otokens_exist,
+            specs,
+            asset,
+            existing_by_key,
+        )
+        if not paired:
+            logger.warning("No oTokens created for %s, skipping", asset.value)
+            continue
+
+        _upsert_available_otokens(paired, asset)
+        logger.info(
+            "oToken manager cycle for %s complete: %d oTokens",
+            asset.value,
+            len(paired),
+        )
 
 
 async def run():

@@ -16,6 +16,7 @@ Monitoring:
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,7 @@ from src.contracts.web3_client import get_batch_settler, get_w3
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
 from src.models.mm import (
+    CapacityUpdateRequest,
     ExpiryBucket,
     ExposureResponse,
     FillResponse,
@@ -37,8 +39,11 @@ from src.models.mm import (
     QuoteBatchResponse,
     QuoteResponse,
 )
-from src.pricing.chainlink import get_eth_price
-from src.pricing.deribit import get_eth_iv
+from src.pricing.assets import Asset
+from src.pricing.chainlink import get_asset_price
+from src.pricing.deribit import get_iv
+from src.pricing.utils import get_expiries
+from src.bots.otoken_manager import _parse_custom_expiries
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +135,7 @@ async def submit_quotes(
                 "max_amount": str(q.max_amount),
                 "maker_nonce": q.maker_nonce,
                 "signature": q.signature,
+                "asset": q.asset,
                 "strike_price": q.strike_price,
                 "expiry": q.expiry,
                 "is_put": q.is_put,
@@ -140,6 +146,21 @@ async def submit_quotes(
     if rows_to_upsert:
         try:
             client = get_client()
+            # Deactivate old quotes for otokens being refreshed so
+            # stale signatures are no longer served via /prices.
+            otoken_addrs = list(
+                {r["otoken_address"] for r in rows_to_upsert}
+            )
+            client.table("mm_quotes").update(
+                {"is_active": False}
+            ).eq(
+                "mm_address", mm_address.lower()
+            ).eq(
+                "is_active", True
+            ).in_(
+                "otoken_address", otoken_addrs
+            ).execute()
+            # Upsert new quotes (re-sets is_active=True)
             client.table("mm_quotes").upsert(
                 rows_to_upsert, on_conflict="mm_address,quote_id"
             ).execute()
@@ -188,6 +209,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
             max_amount=str(row["max_amount"]),
             maker_nonce=row["maker_nonce"],
             signature=row["signature"],
+            asset=row.get("asset", "eth"),
             strike_price=row.get("strike_price"),
             expiry=row.get("expiry"),
             is_put=row.get("is_put"),
@@ -410,18 +432,23 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
     summary="Get market data",
     tags=["MM Monitoring"],
 )
-async def get_market(mm_address: str = Depends(require_mm_api_key)):
-    """Return market data for MM's pricing engine."""
+async def get_market(
+    mm_address: str = Depends(require_mm_api_key),
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return market data for MM's pricing engine for a given asset."""
     try:
-        eth_spot, _ = get_eth_price()
+        spot, _ = get_asset_price(asset)
     except Exception:
-        logger.exception("Failed to fetch ETH spot price")
-        raise HTTPException(status_code=502, detail="Could not fetch ETH spot")
+        logger.exception("Failed to fetch %s spot price", asset.value)
+        raise HTTPException(
+            status_code=502, detail=f"Could not fetch {asset.value.upper()} spot"
+        )
 
     try:
-        iv = await get_eth_iv()
+        iv = await get_iv(asset)
     except Exception:
-        logger.exception("Failed to fetch ETH IV from Deribit")
+        logger.exception("Failed to fetch %s IV from Deribit", asset.value)
         raise HTTPException(status_code=502, detail="Could not fetch IV")
 
     try:
@@ -432,15 +459,20 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch gas price")
         gas_price_gwei = 0.0
 
-    # Fetch available oTokens created by the otoken_manager
+    from src.pricing.assets import get_asset_config
+
+    cfg = get_asset_config(asset)
+    underlying_addr = cfg.underlying_address.lower()
+
     otokens: list[OTokenInfo] = []
-    now_ts = int(time.time())
+    active_expiries = _parse_custom_expiries() or get_expiries()
     try:
         client = get_client()
         result = (
             client.table("available_otokens")
             .select("otoken_address,strike_price,expiry,is_put")
-            .gt("expiry", now_ts)
+            .eq("underlying", underlying_addr)
+            .in_("expiry", active_expiries)
             .execute()
         )
         for r in result.data or []:
@@ -457,18 +489,63 @@ async def get_market(mm_address: str = Depends(require_mm_api_key)):
         raise HTTPException(status_code=502, detail="Could not fetch available oTokens")
 
     return MarketDataResponse(
-        eth_spot=eth_spot,
-        eth_iv=iv,
+        asset=asset.value,
+        spot=spot,
+        iv=iv,
         protocol_fee_bps=settings.protocol_fee_bps,
         gas_price_gwei=round(gas_price_gwei, 4),
         available_otokens=otokens,
     )
 
 
+@router.post(
+    "/capacity",
+    summary="Report MM capacity",
+    tags=["MM Monitoring"],
+)
+async def report_capacity(
+    body: CapacityUpdateRequest,
+    mm_address: str = Depends(require_mm_api_key),
+):
+    """Receive a capacity report from a market maker.
+
+    The mm_address is taken from the authenticated API key, not the body.
+    Upserts into mm_capacity keyed by mm_address.
+    """
+    row = {
+        "mm_address": mm_address.lower(),
+        "asset": body.asset.lower(),
+        "capacity_eth": body.capacity_eth,
+        "capacity_usd": body.capacity_usd,
+        "status": body.status,
+        "reported_at": datetime.fromtimestamp(time.time(), tz=timezone.utc).isoformat(),
+    }
+    for field in (
+        "premium_pool_usd",
+        "hedge_pool_usd",
+        "hedge_pool_withdrawable_usd",
+        "leverage",
+        "open_positions_count",
+        "open_positions_notional_usd",
+    ):
+        val = getattr(body, field)
+        if val is not None:
+            row[field] = val
+
+    try:
+        client = get_client()
+        client.table("mm_capacity").upsert(
+            row, on_conflict="mm_address,asset"
+        ).execute()
+    except Exception:
+        logger.exception("Failed to upsert mm_capacity for %s", mm_address)
+        raise HTTPException(status_code=502, detail="Could not save capacity")
+
+    return {"status": "ok"}
+
+
 def _ts_to_iso(ts: int) -> str:
     """Convert unix timestamp to ISO 8601 string for Supabase gte filter."""
-    from datetime import datetime, timezone
-
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 

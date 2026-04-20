@@ -22,7 +22,9 @@ from src.config import settings
 from src.db.database import get_client
 from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 from src.api.mm_ws import notify_mm_fill
-from src.pricing.utils import strike_to_8_decimals
+from src.pricing.chainlink import get_asset_price
+from src.pricing.assets import Asset
+from src.pricing.utils import collateral_to_usd, strike_to_8_decimals
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,20 @@ def _set_last_indexed_block(block: int) -> None:
     ).execute()
 
 
+def _underlying_to_asset(underlying_addr: str) -> str:
+    """Map an underlying token address to an asset symbol."""
+    if not isinstance(underlying_addr, str):
+        underlying_addr = settings.weth_address
+    addr = underlying_addr.lower()
+    weth = settings.weth_address.lower()
+    wbtc = settings.wbtc_address.lower()
+    if addr == weth:
+        return "eth"
+    if addr == wbtc:
+        return "btc"
+    return "unknown"
+
+
 def _load_otoken_metadata_from_db(otoken_address: str) -> dict | None:
     """Read oToken metadata from available_otokens when present.
 
@@ -80,7 +96,7 @@ def _load_otoken_metadata_from_db(otoken_address: str) -> dict | None:
     client = get_client()
     result = (
         client.table("available_otokens")
-        .select("strike_price,expiry,is_put")
+        .select("strike_price,expiry,is_put,underlying")
         .eq("otoken_address", otoken_address.lower())
         .limit(1)
         .execute()
@@ -96,10 +112,13 @@ def _load_otoken_metadata_from_db(otoken_address: str) -> dict | None:
     ):
         return None
 
+    underlying = str(row.get("underlying") or settings.weth_address).lower()
     return {
         "strike_price": strike_to_8_decimals(float(row["strike_price"])),
         "expiry": int(row["expiry"]),
         "is_put": bool(row["is_put"]),
+        "underlying": underlying,
+        "asset": _underlying_to_asset(underlying),
     }
 
 
@@ -108,10 +127,18 @@ def _load_otoken_metadata_from_chain(otoken_address: str) -> dict:
     strike = ot.functions.strikePrice().call()
     expiry = ot.functions.expiry().call()
     is_put = ot.functions.isPut().call()
+    underlying_raw = ot.functions.underlying().call()
+    underlying = (
+        underlying_raw.lower()
+        if isinstance(underlying_raw, str)
+        else settings.weth_address.lower()
+    )
     return {
         "strike_price": strike,
         "expiry": expiry,
         "is_put": is_put,
+        "underlying": underlying,
+        "asset": _underlying_to_asset(underlying),
     }
 
 
@@ -171,6 +198,39 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict | None:
     event_data["strike_price"] = metadata["strike_price"]
     event_data["expiry"] = metadata["expiry"]
     event_data["is_put"] = metadata["is_put"]
+    event_data["asset"] = metadata["asset"]
+    return event_data
+
+
+def _enrich_with_collateral_usd(event_data: dict) -> dict:
+    """Compute collateral_usd from Chainlink spot prices and attach to event_data.
+
+    PUT options use USDC collateral — no Chainlink call needed.
+    CALL options fetch only the relevant asset's spot price.
+    Sets collateral_usd to None on RPC failure; the backfill script can fill the gap.
+    """
+    is_put = event_data.get("is_put")
+    asset = event_data.get("asset") or "eth"
+
+    if is_put is True or is_put is None:
+        # PUT: USDC collateral, conversion is purely arithmetic
+        event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, 0.0)
+        return event_data
+
+    try:
+        if asset == "btc":
+            btc_spot, _ = get_asset_price(Asset.BTC)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, 0.0, btc_spot)
+        else:
+            eth_spot, _ = get_asset_price(Asset.ETH)
+            event_data["collateral_usd"] = collateral_to_usd(event_data, eth_spot, 0.0)
+    except Exception:
+        logger.warning(
+            "Could not fetch Chainlink spot for %s CALL tx=%s. Will be backfilled later.",
+            asset,
+            event_data.get("tx_hash"),
+        )
+        event_data["collateral_usd"] = None
     return event_data
 
 
@@ -311,6 +371,7 @@ def _fetch_and_store_order_events(
         # (MMs observe events in block order).
         if first_failed_block is not None:
             continue
+        enriched = _enrich_with_collateral_usd(enriched)
         events_to_store.append(enriched)
 
     stored = _store_events(events_to_store)
@@ -404,6 +465,11 @@ def _build_delivery_event_data(ev) -> dict | None:
             )
             return None
         is_put = metadata["is_put"]
+        asset = metadata.get("asset", "eth")
+        underlying = metadata.get(
+            "underlying",
+            settings.wbtc_address.lower() if asset == "btc" else settings.weth_address.lower(),
+        )
     except Exception:
         logger.exception(
             "Could not load oToken metadata for %s (tx=%s). "
@@ -413,9 +479,7 @@ def _build_delivery_event_data(ev) -> dict | None:
         )
         return None
 
-    delivered_asset = (
-        settings.weth_address.lower() if is_put else settings.usdc_address.lower()
-    )
+    delivered_asset = underlying if is_put else settings.usdc_address.lower()
     return {
         "user_address": ev.args.user.lower(),
         "otoken_address": otoken_addr,
@@ -613,6 +677,7 @@ def _process_order_subscription_log(settler, log) -> None:
         ):
             _pending_failure_block = decoded.blockNumber
         return
+    event_data = _enrich_with_collateral_usd(event_data)
 
     try:
         _store_events([event_data])

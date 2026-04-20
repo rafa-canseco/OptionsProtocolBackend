@@ -95,6 +95,9 @@ def test_load_otoken_metadata_falls_back_to_chain_when_db_fields_null():
     otoken.functions.strikePrice.return_value.call.return_value = 200_000_000_000
     otoken.functions.expiry.return_value.call.return_value = 1773993600
     otoken.functions.isPut.return_value.call.return_value = True
+    otoken.functions.underlying.return_value.call.return_value = (
+        event_indexer.settings.weth_address
+    )
 
     with patch("src.bots.event_indexer.get_client") as mock_db, patch(
         "src.bots.event_indexer.get_otoken"
@@ -109,6 +112,8 @@ def test_load_otoken_metadata_falls_back_to_chain_when_db_fields_null():
         "strike_price": 200_000_000_000,
         "expiry": 1773993600,
         "is_put": True,
+        "underlying": event_indexer.settings.weth_address.lower(),
+        "asset": "eth",
     }
     mock_get_otoken.assert_called_once()
 

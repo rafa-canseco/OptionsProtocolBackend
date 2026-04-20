@@ -70,3 +70,10 @@ class PriceResponse(BaseModel):
         default=None,
         description="MM's makerNonce at time of signing",
     )
+    position_count: int = Field(
+        default=0,
+        description=(
+            "Active positions for this (strike, option_type) pair, "
+            "scaled by ACTIVITY_MULTIPLIER for social proof display"
+        ),
+    )

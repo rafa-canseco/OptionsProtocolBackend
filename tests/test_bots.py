@@ -27,9 +27,9 @@ def test_strike_to_8_decimals():
 
 def _make_spec(strike=2000.0, expiry_ts=None, option_type=OptionType.PUT):
     if expiry_ts is None:
-        from src.pricing.utils import get_friday_expiries
+        from src.pricing.utils import get_expiries
 
-        expiry_ts = get_friday_expiries()[0]
+        expiry_ts = get_expiries()[0]
     return OTokenSpec(
         option_type=option_type,
         strike=strike,
@@ -458,14 +458,16 @@ def test_publish_once_full_reconcile_on_schedule():
     expected_full_reconciles = sum(
         1 for i in range(1, cycles + 1) if i % period == 1
     )
-    expected_db_shortcut = cycles - expected_full_reconciles
+    expected_db_shortcut = (cycles - expected_full_reconciles) * len(
+        list(otoken_manager.Asset)
+    )
 
     async def run_n(n):
         for _ in range(n):
             await otoken_manager.publish_once()
 
     with patch("src.bots.otoken_manager._prune_near_expiry_otokens"), patch(
-        "src.bots.otoken_manager.get_eth_price", return_value=(2000.0, None)
+        "src.bots.otoken_manager.get_asset_price", return_value=(2000.0, None)
     ), patch(
         "src.bots.otoken_manager.generate_otoken_specs", return_value=[spec]
     ), patch(

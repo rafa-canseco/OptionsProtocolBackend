@@ -1,18 +1,21 @@
 import logging
 import math
-import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel
 
 from src.config import settings
 from src.db.database import get_client
+from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
+from src.pricing.assets import Asset
 from src.pricing.circuit_breaker import circuit_breaker
 
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -23,10 +26,10 @@ router = APIRouter()
 USDC_DECIMALS = 6
 OTOKEN_DECIMALS = 8
 
-# --- Caches ---
+# --- Caches (per asset) ---
 _PRICES_TTL = 15  # seconds
-_prices_cache: list | None = None
-_prices_cached_at: float = 0.0
+_prices_cache: dict[str, list] = {}
+_prices_cached_at: dict[str, float] = {}
 
 # --- In-memory rate limiting (per IP, per worker process) ---
 # NOTE: State is not shared across uvicorn workers. In a multi-worker deployment
@@ -41,6 +44,15 @@ _waitlist_hits: dict[str, list[float]] = defaultdict(list)
 _READ_WINDOW = 60  # seconds
 _READ_MAX_REQUESTS = 30  # allows 1 req/2s; frontend polls /positions every 10s
 _read_hits: dict[str, list[float]] = defaultdict(list)
+
+_CAPACITY_STALE_SECONDS = 120  # MM reports every ~30s; 2min = stale
+
+# Minimum seconds of deadline remaining for a quote to be served.
+# Matches _PRICES_TTL so a cached response never contains an
+# already-expired quote. The MM controls user-facing time via deadline.
+_MIN_QUOTE_TTL = _PRICES_TTL
+
+ACTIVITY_MULTIPLIER = 1
 
 
 def _get_client_ip(request: Request) -> str:
@@ -112,43 +124,145 @@ def _check_read_rate_limit(ip: str) -> None:
     _read_hits[ip].append(now)
 
 
-def _fetch_active_quotes() -> list[dict]:
-    """Read all active, non-expired quotes from mm_quotes.
+def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
+    """Read non-stale mm_capacity rows from Supabase, filtered by asset."""
+    cutoff = datetime.fromtimestamp(
+        time.time() - _CAPACITY_STALE_SECONDS, tz=timezone.utc
+    ).isoformat()
+    client = get_client()
+    result = (
+        client.table("mm_capacity")
+        .select("*")
+        .eq("asset", asset.value)
+        .gte("reported_at", cutoff)
+        .execute()
+    )
+    if result.data is None:
+        raise RuntimeError("mm_capacity query returned None data")
+    return result.data
 
-    Excludes quotes whose oToken expiry is within 48h of now so that
-    near-expiry options are never shown even if the DB has stale rows.
-    Custom expiry timestamps bypass the 48h cutoff.
+
+def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
+    """Aggregate capacity rows into a single summary."""
+    if not rows:
+        return {
+            "asset": asset.value,
+            "capacity": 0.0,
+            "capacity_usd": 0.0,
+            "market_open": False,
+            "market_status": "full",
+            "max_position": 0.0,
+            "mm_count": 0,
+            "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    total_native = 0.0
+    total_usd = 0.0
+    max_single = 0.0
+    any_active = False
+    any_degraded = False
+    latest_at = ""
+    parsed_count = 0
+
+    for r in rows:
+        try:
+            native = float(r["capacity_eth"])
+            usd = float(r["capacity_usd"])
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(
+                "Skipping malformed capacity row for %s: %s",
+                r.get("mm_address", "unknown"),
+                e,
+            )
+            continue
+        parsed_count += 1
+        status = r.get("status", "active")
+        if status == "full":
+            pass  # count for status logic but don't add capacity
+        else:
+            total_native += native
+            total_usd += usd
+            max_single = max(max_single, native)
+        if status == "active":
+            any_active = True
+        elif status == "degraded":
+            any_degraded = True
+        reported = r.get("reported_at", "")
+        if reported > latest_at:
+            latest_at = reported
+
+    if any_active:
+        market_status = "active"
+    elif any_degraded:
+        market_status = "degraded"
+    else:
+        market_status = "full"
+
+    return {
+        "asset": asset.value,
+        "capacity": total_native,
+        "capacity_usd": total_usd,
+        "market_open": market_status != "full",
+        "market_status": market_status,
+        "max_position": max_single,
+        "mm_count": parsed_count,
+        "updated_at": latest_at,
+    }
+
+
+@router.get(
+    "/capacity",
+    response_model=CapacityResponse,
+    tags=["Market Data"],
+    summary="Get available market capacity",
+)
+async def get_capacity(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return aggregated capacity across all active market makers.
+
+    Capacity is considered stale if not reported within 120 seconds.
     """
+    try:
+        rows = _fetch_capacity_rows(asset)
+    except Exception:
+        logger.exception("Failed to fetch mm_capacity")
+        raise HTTPException(502, "Capacity data unavailable")
+
+    return _aggregate_capacity(rows, asset)
+
+
+def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
+    """Read active, non-expired quotes from mm_quotes for a given asset.
+
+    Uses a dynamic cutoff: short-term expiries (TTL <= 48h) get a 4h
+    cutoff, standard expiries get 48h. SQL uses the minimum cutoff (4h)
+    to cast a wide net, then Python applies per-quote dynamic cutoff.
+    """
+    from src.pricing.utils import cutoff_hours_for_expiry
+
     now_ts = int(time.time())
-    expiry_cutoff_ts = now_ts + 48 * 3600
+    min_cutoff_ts = now_ts + settings.short_expiry_cutoff_hours * 3600
     client = get_client()
     result = (
         client.table("mm_quotes")
         .select("*")
         .eq("is_active", True)
-        .gt("deadline", now_ts)
-        .gt("expiry", expiry_cutoff_ts)
+        .eq("asset", asset.value)
+        .gt("deadline", now_ts + _MIN_QUOTE_TTL)
+        .gt("expiry", min_cutoff_ts)
         .execute()
     )
     quotes = result.data or []
 
-    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
-    if custom:
-        custom_ts = {int(ts.strip()) for ts in custom.split(",")}
-        custom_result = (
-            client.table("mm_quotes")
-            .select("*")
-            .eq("is_active", True)
-            .gt("deadline", now_ts)
-            .gt("expiry", now_ts)
-            .execute()
-        )
-        seen = {q["id"] for q in quotes}
-        for q in custom_result.data or []:
-            if q["id"] not in seen and q.get("expiry") in custom_ts:
-                quotes.append(q)
-
-    return quotes
+    # Apply per-quote dynamic cutoff
+    filtered = []
+    for q in quotes:
+        expiry = q.get("expiry", 0)
+        cutoff_h = cutoff_hours_for_expiry(expiry, now_ts)
+        if expiry > now_ts + cutoff_h * 3600:
+            filtered.append(q)
+    return filtered
 
 
 def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
@@ -172,6 +286,43 @@ def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
         if key not in by_option or bid > float(by_option[key]["bid_price"]):
             by_option[key] = q
     return list(by_option.values())
+
+
+def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
+    """Count active positions per (strike_usd, is_put, expiry) for the asset.
+
+    Active = not settled and not expired. Returns empty dict on any failure
+    so callers can default position_count to 0 without surfacing the error.
+    """
+    now_ts = int(time.time())
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .select("strike_price,is_put,expiry")
+            .eq("asset", asset.value)
+            .or_("is_settled.eq.false,is_settled.is.null")
+            .gt("expiry", now_ts)
+            .execute()
+        )
+        rows = result.data or []
+    except Exception:
+        logger.warning(
+            "Failed to fetch position counts; defaulting to 0", exc_info=True
+        )
+        return {}
+
+    counts: dict[tuple, int] = {}
+    for row in rows:
+        try:
+            strike_usd = float(row["strike_price"]) / 1e8
+            is_put = row["is_put"]
+            expiry = row["expiry"]
+        except (KeyError, ValueError, TypeError):
+            continue
+        key = (strike_usd, is_put, expiry)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _quote_to_price_response(q: dict) -> PriceResponse | None:
@@ -235,46 +386,72 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
 
 @router.get(
+    "/spot",
+    tags=["Market Data"],
+    summary="Get current spot price for an asset",
+)
+async def get_spot(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return the live spot price from Chainlink for a given asset."""
+    from src.pricing.chainlink import get_asset_price
+
+    try:
+        price, updated_at = get_asset_price(asset)
+    except Exception:
+        logger.exception("Failed to fetch %s spot price", asset.value)
+        raise HTTPException(502, f"Could not fetch {asset.value.upper()} spot")
+
+    return {
+        "asset": asset.value,
+        "spot": price,
+        "updated_at": updated_at,
+    }
+
+
+@router.get(
     "/prices",
     response_model=list[PriceResponse],
     tags=["Market Data"],
     summary="Get current option price menu",
 )
-async def get_prices():
-    """Return the live ETH options price sheet.
+async def get_prices(
+    asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
+):
+    """Return the live options price sheet for a given asset.
 
     Reads all active signed quotes from market makers, picks the best
     bid for each oToken, and returns enriched PriceResponse objects.
     The response includes EIP-712 signature data needed by the frontend
     to call executeOrder on BatchSettler.
 
-    Returns **503** if the circuit breaker has paused pricing (>2 % ETH move).
+    Returns **503** only if the circuit breaker has paused pricing (>2 % move).
+    Capacity status is served separately via ``GET /capacity``.
     """
-    global _prices_cache, _prices_cached_at
-
-    if circuit_breaker.is_paused:
+    if circuit_breaker.is_paused_for(asset.value):
         raise HTTPException(
             status_code=503,
-            detail=f"Pricing paused: {circuit_breaker.pause_reason}",
+            detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
         )
 
+    cache_key = asset.value
     now = time.monotonic()
-    if _prices_cache is not None and (now - _prices_cached_at) < _PRICES_TTL:
-        logger.debug("prices cache hit (age=%.1fs)", now - _prices_cached_at)
-        return _prices_cache
+    cached = _prices_cache.get(cache_key)
+    cached_at = _prices_cached_at.get(cache_key, 0.0)
+    if cached is not None and (now - cached_at) < _PRICES_TTL:
+        logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
+        return cached
 
-    logger.info("prices cache miss — fetching from mm_quotes")
+    logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
     try:
-        all_quotes = _fetch_active_quotes()
+        all_quotes = _fetch_active_quotes(asset)
     except Exception:
         logger.exception("Failed to fetch active quotes from DB")
         raise HTTPException(502, "Quote data unavailable")
 
     if not all_quotes:
-        logger.info("No active quotes in mm_quotes")
-        _prices_cache = []
-        _prices_cached_at = time.monotonic()
+        logger.info("No active quotes in mm_quotes for %s", cache_key)
         return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
@@ -282,30 +459,63 @@ async def get_prices():
     # Enrich with spot price if available (best effort)
     spot = 0.0
     try:
-        from src.pricing.chainlink import get_eth_price
+        from src.pricing.chainlink import get_asset_price
 
-        spot, _ = get_eth_price()
-        if circuit_breaker.check(spot):
+        spot, _ = get_asset_price(asset)
+        if circuit_breaker.check(spot, asset.value):
             raise HTTPException(
                 status_code=503,
-                detail=f"Pricing paused: {circuit_breaker.pause_reason}",
+                detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
-        circuit_breaker.update_reference(spot)
+        circuit_breaker.update_reference(spot, asset.value)
     except HTTPException:
         raise
     except Exception:
         logger.warning("Could not fetch spot price for enrichment", exc_info=True)
 
+    # Fetch position counts for social proof (best effort)
+    position_counts: dict[tuple, int] = {}
+    try:
+        position_counts = _fetch_position_counts(asset)
+    except Exception:
+        logger.warning("Could not enrich position counts", exc_info=True)
+
+    from src.pricing.black_scholes import OptionType
+
     result = []
+    visible_keys: dict[tuple, int] = {}  # (strike, is_put, expiry) -> index
     for q in best_quotes:
         pr = _quote_to_price_response(q)
         if pr is not None:
             if spot > 0:
                 pr.spot = spot
+            idx = len(result)
             result.append(pr)
+            is_put = pr.option_type == OptionType.PUT
+            visible_keys[(pr.strike, is_put, q.get("expiry"))] = idx
 
-    _prices_cache = result
-    _prices_cached_at = time.monotonic()
+    # Rollup: assign each position group to its visible key, or roll
+    # orphaned positions (e.g. within 48h cutoff) into the nearest
+    # visible expiry for the same (strike, option_type).
+    merged = [0] * len(result)
+    for (strike, is_put, expiry), count in position_counts.items():
+        if (strike, is_put, expiry) in visible_keys:
+            merged[visible_keys[(strike, is_put, expiry)]] += count
+        else:
+            candidates = [
+                (vis_exp, idx)
+                for (s, p, vis_exp), idx in visible_keys.items()
+                if s == strike and p == is_put
+            ]
+            if candidates:
+                nearest_idx = min(candidates, key=lambda x: abs(x[0] - expiry))[1]
+                merged[nearest_idx] += count
+
+    for i, pr in enumerate(result):
+        pr.position_count = merged[i] * ACTIVITY_MULTIPLIER
+
+    _prices_cache[cache_key] = result
+    _prices_cached_at[cache_key] = time.monotonic()
     return result
 
 
@@ -398,10 +608,11 @@ def _compute_outcome(position: dict) -> str | None:
                 strike_human = int(strike) / 1e8
             except (ValueError, TypeError):
                 return "Settled (physical) — details unavailable"
+            asset_label = position.get("asset", "ETH").upper()
             if is_put:
-                return f"Bought {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Bought {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
             else:
-                return f"Sold {amount_human:.4f} ETH @ ${strike_human:,.0f}"
+                return f"Sold {amount_human:.4f} {asset_label} @ ${strike_human:,.0f}"
         elif st == "physical_failed":
             return "Expired ITM — delivery failed, pending review"
         else:
@@ -447,3 +658,71 @@ async def get_positions(address: str, request: Request):
         if pos.get("net_premium") is not None:
             pos["premium"] = pos["net_premium"]
     return positions
+
+
+class GroupPositionsRequest(BaseModel):
+    group_id: str
+    tx_hashes: list[str]
+    user_address: str
+
+
+@router.post(
+    "/positions/group",
+    tags=["Positions"],
+    summary="Link positions into a range group",
+)
+async def group_positions(body: GroupPositionsRequest, request: Request):
+    """Tag positions with a shared group_id so the frontend can
+    display range (put+call) pairs as a single unit.
+
+    The frontend calls this after both legs of a range order confirm.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if len(body.tx_hashes) < 2 or len(body.tx_hashes) > 10:
+        raise HTTPException(400, "tx_hashes must contain 2-10 entries")
+
+    try:
+        uuid.UUID(body.group_id)
+    except ValueError:
+        raise HTTPException(400, "group_id must be a valid UUID")
+
+    if not ETH_ADDRESS_RE.match(body.user_address):
+        raise HTTPException(400, "Invalid user_address")
+
+    for tx in body.tx_hashes:
+        if not re.match(r"^0x[0-9a-fA-F]{64}$", tx):
+            raise HTTPException(400, f"Invalid tx hash: {tx}")
+
+    try:
+        client = get_client()
+        result = (
+            client.table("order_events")
+            .update({"group_id": body.group_id})
+            .eq("user_address", body.user_address.lower())
+            .is_("group_id", "null")
+            .in_("tx_hash", [tx.lower() for tx in body.tx_hashes])
+            .execute()
+        )
+        updated = len(result.data) if result.data else 0
+    except Exception:
+        logger.exception("Failed to group positions")
+        raise HTTPException(502, "Could not update positions")
+
+    expected = len(body.tx_hashes)
+    if updated == 0:
+        raise HTTPException(404, "No matching ungrouped positions found")
+    if updated != expected:
+        logger.warning(
+            "Partial group: expected %d but matched %d (group_id=%s)",
+            expected,
+            updated,
+            body.group_id,
+        )
+        raise HTTPException(
+            409,
+            f"Expected {expected} positions but found {updated}. "
+            "Some tx hashes may not be indexed yet.",
+        )
+
+    return {"grouped": updated, "group_id": body.group_id}

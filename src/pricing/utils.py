@@ -1,18 +1,30 @@
 """Shared pricing utilities.
 
-Pure functions with zero settings dependencies. Used by the
-otoken_manager bot for on-chain oToken creation.
+Used by the otoken_manager bot for on-chain oToken creation.
 """
 
-import os
+import time
 from datetime import datetime, timezone, timedelta
+
+from src.config import settings
 
 STRIKE_DECIMALS = 8
 FRIDAY_WEEKDAY = 4  # Monday=0, Friday=4
-CUTOFF_HOURS = 48
-WEEKLY_COUNT = 2
-TARGET_MONTHLY_DAYS = 28
-_MIN_VALID_FRIDAYS = 3
+_48H_SECONDS = 48 * 3600
+
+
+def cutoff_hours_for_expiry(expiry_ts: int, now_ts: int | None = None) -> int:
+    """Return the cutoff hours for a given expiry based on current TTL.
+
+    If the option expires within 48h (short-term / 1-day), use the
+    short cutoff (4h). Otherwise use the standard cutoff (48h).
+    """
+    if now_ts is None:
+        now_ts = int(time.time())
+    ttl = expiry_ts - now_ts
+    if ttl <= _48H_SECONDS:
+        return settings.short_expiry_cutoff_hours
+    return settings.expiry_cutoff_hours
 
 
 def strike_to_8_decimals(strike_usd: float) -> int:
@@ -35,59 +47,59 @@ def _next_friday_8am(after: datetime) -> datetime:
     return candidate.replace(hour=8, minute=0, second=0, microsecond=0)
 
 
-def get_friday_expiries(
+def _next_0800_utc(after: datetime) -> datetime:
+    """Return the first 08:00 UTC strictly after `after`."""
+    candidate = after.replace(hour=8, minute=0, second=0, microsecond=0)
+    if candidate <= after:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def get_expiries(
     now: datetime | None = None,
 ) -> list[int]:
-    """Return exactly 3 fixed Friday 08:00 UTC expiry timestamps.
+    """Return expiry timestamps at 08:00 UTC.
 
     Selection:
-      1. Next valid Friday (~1 week out)
-      2. 2nd Friday (~2 weeks out)
-      3. Friday closest to 28 days out (monthly), not already selected
+      0. Daily: next 08:00 UTC (after short cutoff)
+      1. Near Friday: first Friday after short cutoff
+      2. Weekly: first Friday after standard cutoff
+      3. Biweekly: weekly + 7 days
 
-    Fridays within 48h of `now` are excluded so users don't see
-    options about to expire. All timestamps satisfy the contract
-    constraint ``ts % 86400 == 28800``.
-
-    Override: set CUSTOM_EXPIRY_TIMESTAMPS env var with comma-separated
-    unix timestamps to bypass Friday logic (e.g. for pilot testing).
+    Dedup via set handles overlap (e.g. near_fri == weekly when no
+    Friday falls in the gap, or 1d == near_fri on Thursday night).
+    All timestamps satisfy ``ts % 86400 == 28800``.
     """
-    custom = os.getenv("CUSTOM_EXPIRY_TIMESTAMPS")
-    if custom:
-        return [int(ts.strip()) for ts in custom.split(",")]
-
     if now is None:
         now = datetime.now(timezone.utc)
 
-    cutoff = now + timedelta(hours=CUTOFF_HOURS)
+    short_cutoff = now + timedelta(hours=settings.short_expiry_cutoff_hours)
+    standard_cutoff = now + timedelta(hours=settings.expiry_cutoff_hours)
 
-    # Build a pool of upcoming Fridays (8 weeks covers all cases)
-    fridays: list[datetime] = []
-    candidate = _next_friday_8am(now)
-    for _ in range(8):
-        fridays.append(candidate)
-        candidate = candidate + timedelta(weeks=1)
+    # Daily: next 08:00 UTC after short cutoff
+    exp_1d = _next_0800_utc(short_cutoff)
 
-    # Filter out Fridays within the 48h cutoff
-    valid = [f for f in fridays if f > cutoff]
+    # Near Friday: first Friday after short cutoff
+    exp_near_fri = _next_friday_8am(short_cutoff)
 
-    if len(valid) < _MIN_VALID_FRIDAYS:
-        raise ValueError(
-            f"Need at least {_MIN_VALID_FRIDAYS} valid Fridays after "
-            f"48h cutoff, got {len(valid)}. now={now.isoformat()}"
-        )
+    # Weekly: first 2 Fridays after standard cutoff
+    exp_7d = _next_friday_8am(standard_cutoff)
+    exp_14d = exp_7d + timedelta(weeks=1)
 
-    # Pick weekly: first 2 valid Fridays
-    weekly = valid[:WEEKLY_COUNT]
-
-    # Pick monthly: Friday closest to 28 days out, not already selected
-    target = now + timedelta(days=TARGET_MONTHLY_DAYS)
-    weekly_set = set(weekly)
-    remaining = [f for f in valid if f not in weekly_set]
-    monthly = min(
-        remaining,
-        key=lambda f: abs((f - target).total_seconds()),
-    )
-
-    result = sorted({*weekly, monthly})
+    result = sorted({exp_1d, exp_near_fri, exp_7d, exp_14d})
     return [int(f.timestamp()) for f in result]
+
+
+def collateral_to_usd(
+    row: dict, eth_spot: float, btc_spot: float
+) -> float:
+    """Convert collateral to USD based on option type and asset."""
+    collateral = int(row.get("collateral") or 0)
+    is_put = row.get("is_put")
+    asset = row.get("asset") or "eth"
+
+    if is_put is True or is_put is None:
+        return collateral / 1_000_000
+    if asset == "btc":
+        return (collateral / 1e8) * btc_spot
+    return (collateral / 1e18) * eth_spot

@@ -1,7 +1,9 @@
+import time
 from dataclasses import dataclass
 
+from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
-from src.pricing.utils import get_friday_expiries
+from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
 
 
 @dataclass
@@ -20,37 +22,77 @@ class OTokenSpec:
             )
 
 
-def generate_strikes(spot: float, num_strikes: int = 5) -> list[float]:
+def generate_strikes(
+    spot: float,
+    step: float = 50.0,
+    num_strikes: int = 5,
+    min_otm_per_side: int = 4,
+) -> list[float]:
     """Generate strike prices around the current spot.
 
-    Rounds to the nearest $50 for ETH-sized prices.
+    Starts with ``num_strikes`` centered on spot, then extends in
+    each direction until at least ``min_otm_per_side`` OTM strikes
+    exist on both the put side (below spot) and call side (above).
     """
-    step = 50.0
     center = round(spot / step) * step
     half = num_strikes // 2
-    return [center + (i - half) * step for i in range(num_strikes)]
+    strikes = [center + (i - half) * step for i in range(num_strikes)]
+
+    lowest = min(strikes)
+    while sum(1 for s in strikes if s < spot) < min_otm_per_side:
+        lowest -= step
+        strikes.append(lowest)
+
+    highest = max(strikes)
+    while sum(1 for s in strikes if s > spot) < min_otm_per_side:
+        highest += step
+        strikes.append(highest)
+
+    return sorted(strikes)
 
 
 def generate_otoken_specs(
     spot: float,
+    asset: Asset = Asset.ETH,
     expiry_timestamps: list[int] | None = None,
-    num_strikes: int = 5,
+    num_strikes: int | None = None,
 ) -> list[OTokenSpec]:
     """Generate the set of oTokens to list (strikes x expiries x types).
 
     Args:
-        spot: Current ETH price (used to center strikes)
-        expiry_timestamps: Fixed Friday 08:00 UTC timestamps.
-            Defaults to get_friday_expiries().
-        num_strikes: Number of strikes to generate around ATM
+        spot: Current price (used to center strikes).
+        asset: Which underlying asset this is for.
+        expiry_timestamps: Fixed 08:00 UTC timestamps.
+            Defaults to get_expiries().
+        num_strikes: Override number of strikes (defaults to asset config).
     """
+    cfg = get_asset_config(asset)
     if expiry_timestamps is None:
-        expiry_timestamps = get_friday_expiries()
+        expiry_timestamps = get_expiries()
+    else:
+        now_ts = int(time.time())
+        expiry_timestamps = [
+            ts
+            for ts in expiry_timestamps
+            if ts > now_ts + cutoff_hours_for_expiry(ts, now_ts) * 3600
+        ]
+    if num_strikes is None:
+        num_strikes = cfg.num_strikes
 
-    strikes = generate_strikes(spot, num_strikes)
+    # The smallest timestamp is the 1-day slot — use tighter steps
+    daily_ts = min(expiry_timestamps) if expiry_timestamps else None
+    now_ts = int(time.time())
     specs: list[OTokenSpec] = []
 
     for ts in expiry_timestamps:
+        is_daily = ts == daily_ts and (ts - now_ts) <= 48 * 3600
+        step = cfg.short_expiry_strike_step if is_daily else cfg.strike_step
+        strikes = generate_strikes(
+            spot,
+            step=step,
+            num_strikes=num_strikes,
+            min_otm_per_side=cfg.min_otm_per_side,
+        )
         for K in strikes:
             for opt_type in (OptionType.CALL, OptionType.PUT):
                 specs.append(

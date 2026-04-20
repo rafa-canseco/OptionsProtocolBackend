@@ -1,10 +1,11 @@
 """
 Circuit Breaker Bot
 
-Monitors ETH price. When the circuit breaker trips (>2% move),
-calls BatchSettler.incrementMakerNonce() to invalidate on-chain
-quotes signed by the operator, and deactivates ALL DB quotes
-(all MMs) as a server-side safety net.
+Monitors spot prices for all supported assets. When the circuit
+breaker trips (>2% move) for ANY asset, calls
+BatchSettler.incrementMakerNonce() to invalidate on-chain quotes
+signed by the operator, and deactivates ALL DB quotes (all MMs)
+as a server-side safety net.
 """
 import asyncio
 import logging
@@ -12,7 +13,8 @@ import time
 
 from src.config import settings
 from src.db.database import get_client
-from src.pricing.chainlink import get_eth_price
+from src.pricing.assets import Asset
+from src.pricing.chainlink import get_asset_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.contracts.web3_client import (
     get_batch_settler,
@@ -58,7 +60,7 @@ def _deactivate_active_quotes() -> int:
     return len(result.data) if result.data else 0
 
 
-async def invalidate_quotes():
+async def invalidate_quotes(asset: str = "all"):
     """Invalidate all quotes: increment on-chain makerNonce + deactivate DB quotes.
 
     Only skips the on-chain tx when the DB affirmatively confirms zero
@@ -98,45 +100,58 @@ async def invalidate_quotes():
             "Circuit breaker incrementMakerNonce",
         )
         logger.warning(
-            f"Circuit breaker: incremented makerNonce on-chain, tx: {tx_hash}"
+            "Circuit breaker (%s): incremented makerNonce, tx: %s",
+            asset,
+            tx_hash,
         )
     except Exception:
         logger.exception(
-            "CRITICAL: Circuit breaker failed to increment makerNonce on-chain. "
-            "Signed quotes remain valid. Will retry on next cycle."
+            "CRITICAL: Circuit breaker (%s) failed to increment "
+            "makerNonce. Signed quotes remain valid.",
+            asset,
         )
         raise
 
-    # 2. Off-chain: deactivate ALL active DB quotes (all MMs, not just operator)
     try:
         deactivated = _deactivate_active_quotes()
         logger.warning(
-            f"Circuit breaker: deactivated {deactivated} DB quotes (all MMs)"
+            "Circuit breaker (%s): deactivated %d DB quotes",
+            asset,
+            deactivated,
         )
     except Exception:
-        logger.exception("Circuit breaker: failed to deactivate DB quotes")
+        logger.exception(
+            "Circuit breaker (%s): failed to deactivate DB quotes",
+            asset,
+        )
 
 
 async def check_once():
-    """Single circuit breaker check. If tripped, invalidates quotes."""
-    try:
-        eth_price, _ = get_eth_price()
-    except Exception:
-        logger.exception(
-            "Circuit breaker: failed to read ETH price from oracle. "
-            "Safety check skipped this cycle."
-        )
-        return
+    """Check all assets. If any trips, invalidate quotes."""
+    for asset in Asset:
+        try:
+            price, _ = get_asset_price(asset)
+        except Exception:
+            logger.exception(
+                "Circuit breaker: failed to read %s price. "
+                "Safety check skipped for this asset.",
+                asset.value,
+            )
+            continue
 
-    if circuit_breaker.check(eth_price):
-        logger.warning(f"Circuit breaker tripped: {circuit_breaker.pause_reason}")
-        await invalidate_quotes()  # raises if on-chain nonce increment fails
-        circuit_breaker.update_reference(eth_price)
+        if circuit_breaker.check(price, asset.value):
+            reason = circuit_breaker.pause_reason_for(asset.value)
+            logger.warning("Circuit breaker tripped: %s", reason)
+            await invalidate_quotes(asset.value)
+            circuit_breaker.update_reference(price, asset.value)
 
 
 async def run():
-    """Main loop: check ETH price every N seconds."""
-    logger.info(f"Circuit breaker bot starting (interval={settings.circuit_breaker_poll_seconds}s)")
+    """Main loop: check prices every N seconds."""
+    logger.info(
+        "Circuit breaker bot starting (interval=%ds)",
+        settings.circuit_breaker_poll_seconds,
+    )
     while True:
         try:
             await check_once()
