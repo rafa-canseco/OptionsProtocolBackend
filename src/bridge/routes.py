@@ -65,12 +65,16 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
     client = get_client()
 
     # Dedup by burn_tx_hash
-    existing = (
-        client.table("bridge_jobs")
-        .select("id, status")
-        .eq("burn_tx_hash", body.burn_tx_hash)
-        .execute()
-    )
+    try:
+        existing = (
+            client.table("bridge_jobs")
+            .select("id, status")
+            .eq("burn_tx_hash", body.burn_tx_hash)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to check for duplicate burn tx")
+        raise HTTPException(502, "Could not check for duplicate bridge job")
     if existing.data:
         raise HTTPException(
             409,
@@ -81,12 +85,16 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
 
     # Dedup by quote_id
     if body.quote_id:
-        existing_quote = (
-            client.table("bridge_jobs")
-            .select("id, status")
-            .eq("quote_id", body.quote_id)
-            .execute()
-        )
+        try:
+            existing_quote = (
+                client.table("bridge_jobs")
+                .select("id, status")
+                .eq("quote_id", body.quote_id)
+                .execute()
+            )
+        except Exception:
+            logger.exception("Failed to check for duplicate quote")
+            raise HTTPException(502, "Could not check for duplicate quote")
         if existing_quote.data:
             raise HTTPException(
                 409,

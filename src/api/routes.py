@@ -245,8 +245,8 @@ async def get_capacity(
     return _aggregate_capacity(rows, asset)
 
 
-def _fetch_valid_otoken_addresses(asset: Asset) -> set[str] | None:
-    """Return set of otoken_addresses in available_otokens, or None on error."""
+def _fetch_valid_otoken_addresses(asset: Asset) -> set[str]:
+    """Return set of otoken_addresses in available_otokens for the given asset."""
     try:
         chain = get_chain_for_asset(asset).value
         client = get_client()
@@ -258,12 +258,12 @@ def _fetch_valid_otoken_addresses(asset: Asset) -> set[str] | None:
         )
         return {r["otoken_address"] for r in (result.data or [])}
     except Exception:
-        logger.warning(
-            "Could not fetch available_otokens for %s, skipping filter",
+        logger.error(
+            "Could not fetch available_otokens for %s",
             asset.value,
             exc_info=True,
         )
-        return None
+        raise HTTPException(502, "Quote validation data unavailable")
 
 
 def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
@@ -535,6 +535,9 @@ async def get_prices(
         logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
         return cached
 
+    if not spot_ok:
+        raise HTTPException(503, "Spot price unavailable")
+
     logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
     try:
@@ -549,18 +552,17 @@ async def get_prices(
 
     # Filter quotes to only those with oTokens in available_otokens
     valid_addrs = _fetch_valid_otoken_addresses(asset)
-    if valid_addrs is not None:
-        before = len(all_quotes)
-        all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
-        pruned = before - len(all_quotes)
-        if pruned:
-            logger.info(
-                "Filtered %d stale quotes (oToken not in available_otokens) for %s",
-                pruned,
-                cache_key,
-            )
-        if not all_quotes:
-            return []
+    before = len(all_quotes)
+    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+    pruned = before - len(all_quotes)
+    if pruned:
+        logger.info(
+            "Filtered %d stale quotes (oToken not in available_otokens) for %s",
+            pruned,
+            cache_key,
+        )
+    if not all_quotes:
+        return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
 
@@ -1004,7 +1006,7 @@ async def get_balances(
                 sol_balances["wsol"] = str(
                     sol_get_balance(solana_address, settings.solana_wsol_mint)
                 )
-            if settings.solana_tslax_mint:
+            if settings.solana_tslax_mint and is_asset_visible("tslax"):
                 sol_balances["tslax"] = str(
                     sol_get_balance(solana_address, settings.solana_tslax_mint)
                 )

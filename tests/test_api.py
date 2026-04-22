@@ -83,7 +83,9 @@ def test_get_prices_strips_execution_fields_for_read_only_asset(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        routes_module, "_fetch_valid_otoken_addresses", lambda asset: None
+        routes_module,
+        "_fetch_valid_otoken_addresses",
+        lambda asset: {"H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"},
     )
     monkeypatch.setattr(routes_module, "_fetch_position_counts", lambda asset: {})
     monkeypatch.setattr(
@@ -163,7 +165,9 @@ def test_tradable_asset_returns_execution_fields(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        routes_module, "_fetch_valid_otoken_addresses", lambda asset: None
+        routes_module,
+        "_fetch_valid_otoken_addresses",
+        lambda asset: {"H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"},
     )
     monkeypatch.setattr(routes_module, "_fetch_position_counts", lambda asset: {})
     monkeypatch.setattr(
