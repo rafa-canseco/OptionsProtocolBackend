@@ -25,6 +25,31 @@ class TestBridgeConfig:
 
         assert has_bridge_config() is False
 
+    def test_production_defaults_fail_closed_for_solana_trading(self):
+        from src.config import is_asset_tradable, is_chain_tradable
+
+        with patch("src.config.settings") as mock_settings:
+            mock_settings.app_env = "production"
+            mock_settings.tradable_assets = None
+            mock_settings.tradable_chains = None
+            assert is_asset_tradable("eth") is True
+            assert is_asset_tradable("btc") is True
+            assert is_asset_tradable("sol") is False
+            assert is_asset_tradable("tslax") is False
+            assert is_chain_tradable("base") is True
+            assert is_chain_tradable("solana") is False
+
+    def test_staging_defaults_keep_solana_trading_enabled(self):
+        from src.config import is_asset_tradable, is_chain_tradable
+
+        with patch("src.config.settings") as mock_settings:
+            mock_settings.app_env = "staging"
+            mock_settings.tradable_assets = None
+            mock_settings.tradable_chains = None
+            assert is_asset_tradable("sol") is True
+            assert is_asset_tradable("tslax") is True
+            assert is_chain_tradable("solana") is True
+
     def test_attestation_url_sandbox_in_beta(self):
         from src.config import get_cctp_attestation_url
 
