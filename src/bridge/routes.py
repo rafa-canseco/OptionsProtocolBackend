@@ -11,6 +11,7 @@ from src.bridge.models import (
     BridgeJobStatus,
 )
 from src.bridge.relayer import enqueue_job
+from src.config import is_chain_tradable, settings
 from src.db.database import get_client
 
 logger = logging.getLogger(__name__)
@@ -52,17 +53,28 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
     if body.source_chain == body.dest_chain:
         raise HTTPException(400, "source_chain and dest_chain must differ")
 
+    for chain in (body.source_chain.value, body.dest_chain.value):
+        if not is_chain_tradable(chain):
+            raise HTTPException(
+                403,
+                f"Trading is disabled for {chain} in {settings.app_env}",
+            )
+
     _validate_tx_hash(body.burn_tx_hash, body.source_chain.value)
 
     client = get_client()
 
     # Dedup by burn_tx_hash
-    existing = (
-        client.table("bridge_jobs")
-        .select("id, status")
-        .eq("burn_tx_hash", body.burn_tx_hash)
-        .execute()
-    )
+    try:
+        existing = (
+            client.table("bridge_jobs")
+            .select("id, status")
+            .eq("burn_tx_hash", body.burn_tx_hash)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to check for duplicate burn tx")
+        raise HTTPException(502, "Could not check for duplicate bridge job")
     if existing.data:
         raise HTTPException(
             409,
@@ -73,12 +85,16 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
 
     # Dedup by quote_id
     if body.quote_id:
-        existing_quote = (
-            client.table("bridge_jobs")
-            .select("id, status")
-            .eq("quote_id", body.quote_id)
-            .execute()
-        )
+        try:
+            existing_quote = (
+                client.table("bridge_jobs")
+                .select("id, status")
+                .eq("quote_id", body.quote_id)
+                .execute()
+            )
+        except Exception:
+            logger.exception("Failed to check for duplicate quote")
+            raise HTTPException(502, "Could not check for duplicate quote")
         if existing_quote.data:
             raise HTTPException(
                 409,

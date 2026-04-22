@@ -10,7 +10,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from src.config import settings
+from src.config import settings, is_asset_tradable, is_asset_visible
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
@@ -146,6 +146,14 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     return result.data
 
 
+def _ensure_asset_visible(asset: Asset) -> None:
+    if not is_asset_visible(asset.value):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{asset.value.upper()} market data is not available in this environment",
+        )
+
+
 def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
     """Aggregate capacity rows into a single summary."""
     if not rows:
@@ -227,6 +235,7 @@ async def get_capacity(
 
     Capacity is considered stale if not reported within 120 seconds.
     """
+    _ensure_asset_visible(asset)
     try:
         rows = _fetch_capacity_rows(asset)
     except Exception:
@@ -236,8 +245,8 @@ async def get_capacity(
     return _aggregate_capacity(rows, asset)
 
 
-def _fetch_valid_otoken_addresses(asset: Asset) -> set[str] | None:
-    """Return set of otoken_addresses in available_otokens, or None on error."""
+def _fetch_valid_otoken_addresses(asset: Asset) -> set[str]:
+    """Return set of otoken_addresses in available_otokens for the given asset."""
     try:
         chain = get_chain_for_asset(asset).value
         client = get_client()
@@ -249,12 +258,12 @@ def _fetch_valid_otoken_addresses(asset: Asset) -> set[str] | None:
         )
         return {r["otoken_address"] for r in (result.data or [])}
     except Exception:
-        logger.warning(
-            "Could not fetch available_otokens for %s, skipping filter",
+        logger.error(
+            "Could not fetch available_otokens for %s",
             asset.value,
             exc_info=True,
         )
-        return None
+        raise HTTPException(502, "Quote validation data unavailable")
 
 
 def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
@@ -417,6 +426,22 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         return None
 
 
+def _strip_trade_fields(pr: PriceResponse) -> PriceResponse:
+    """Drop execution-only fields for read-only assets. Returns a new copy."""
+    return pr.model_copy(
+        update={
+            "otoken_address": None,
+            "signature": None,
+            "mm_address": None,
+            "bid_price_raw": None,
+            "deadline": None,
+            "quote_id": None,
+            "max_amount_raw": None,
+            "maker_nonce": None,
+        }
+    )
+
+
 @router.get(
     "/spot",
     tags=["Market Data"],
@@ -426,6 +451,7 @@ async def get_spot(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
     """Return the live spot price for a given asset (Chainlink or Pyth)."""
+    _ensure_asset_visible(asset)
     chain = get_chain_for_asset(asset)
 
     try:
@@ -467,6 +493,9 @@ async def get_prices(
     Returns **503** only if the circuit breaker has paused pricing (>2 % move).
     Capacity status is served separately via ``GET /capacity``.
     """
+    _ensure_asset_visible(asset)
+    tradable = is_asset_tradable(asset.value)
+
     # Fetch spot early so we can self-heal a paused circuit breaker.
     spot = 0.0
     spot_ok = False
@@ -498,13 +527,16 @@ async def get_prices(
                 detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
 
-    cache_key = asset.value
+    cache_key = f"{asset.value}:{'tradable' if tradable else 'readonly'}"
     now = time.monotonic()
     cached = _prices_cache.get(cache_key)
     cached_at = _prices_cached_at.get(cache_key, 0.0)
     if cached is not None and (now - cached_at) < _PRICES_TTL:
         logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
         return cached
+
+    if not spot_ok:
+        raise HTTPException(503, "Spot price unavailable")
 
     logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
@@ -520,18 +552,17 @@ async def get_prices(
 
     # Filter quotes to only those with oTokens in available_otokens
     valid_addrs = _fetch_valid_otoken_addresses(asset)
-    if valid_addrs is not None:
-        before = len(all_quotes)
-        all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
-        pruned = before - len(all_quotes)
-        if pruned:
-            logger.info(
-                "Filtered %d stale quotes (oToken not in available_otokens) for %s",
-                pruned,
-                cache_key,
-            )
-        if not all_quotes:
-            return []
+    before = len(all_quotes)
+    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+    pruned = before - len(all_quotes)
+    if pruned:
+        logger.info(
+            "Filtered %d stale quotes (oToken not in available_otokens) for %s",
+            pruned,
+            cache_key,
+        )
+    if not all_quotes:
+        return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
 
@@ -560,6 +591,8 @@ async def get_prices(
         if pr is not None:
             if spot > 0:
                 pr.spot = spot
+            if not tradable:
+                pr = _strip_trade_fields(pr)
             idx = len(result)
             result.append(pr)
             is_put = pr.option_type == OptionType.PUT
@@ -973,7 +1006,7 @@ async def get_balances(
                 sol_balances["wsol"] = str(
                     sol_get_balance(solana_address, settings.solana_wsol_mint)
                 )
-            if settings.solana_tslax_mint:
+            if settings.solana_tslax_mint and is_asset_visible("tslax"):
                 sol_balances["tslax"] = str(
                     sol_get_balance(solana_address, settings.solana_tslax_mint)
                 )
