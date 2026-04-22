@@ -1,3 +1,5 @@
+import functools
+
 from pydantic_settings import BaseSettings
 
 
@@ -39,7 +41,6 @@ class Settings(BaseSettings):
     # Tradable = backend may return execution data or submit trades.
     visible_assets: str = "eth,btc,sol,tslax"
     tradable_assets: str = "eth,btc,sol,tslax"
-    visible_chains: str = "base,solana"
     tradable_chains: str = "base,solana"
 
     # Bot intervals
@@ -171,6 +172,7 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+@functools.lru_cache(maxsize=None)
 def _parse_allowlist(raw: str) -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
@@ -181,10 +183,6 @@ def is_asset_visible(asset: str) -> bool:
 
 def is_asset_tradable(asset: str) -> bool:
     return asset.lower() in _parse_allowlist(settings.tradable_assets)
-
-
-def is_chain_visible(chain: str) -> bool:
-    return chain.lower() in _parse_allowlist(settings.visible_chains)
 
 
 def is_chain_tradable(chain: str) -> bool:

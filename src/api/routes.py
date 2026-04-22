@@ -427,16 +427,19 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
 
 def _strip_trade_fields(pr: PriceResponse) -> PriceResponse:
-    """Drop execution-only fields for read-only assets."""
-    pr.otoken_address = None
-    pr.signature = None
-    pr.mm_address = None
-    pr.bid_price_raw = None
-    pr.deadline = None
-    pr.quote_id = None
-    pr.max_amount_raw = None
-    pr.maker_nonce = None
-    return pr
+    """Drop execution-only fields for read-only assets. Returns a new copy."""
+    return pr.model_copy(
+        update={
+            "otoken_address": None,
+            "signature": None,
+            "mm_address": None,
+            "bid_price_raw": None,
+            "deadline": None,
+            "quote_id": None,
+            "max_amount_raw": None,
+            "maker_nonce": None,
+        }
+    )
 
 
 @router.get(

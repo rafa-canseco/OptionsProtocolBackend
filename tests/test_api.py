@@ -82,10 +82,16 @@ def test_get_prices_strips_execution_fields_for_read_only_asset(monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(routes_module, "_fetch_valid_otoken_addresses", lambda asset: None)
+    monkeypatch.setattr(
+        routes_module, "_fetch_valid_otoken_addresses", lambda asset: None
+    )
     monkeypatch.setattr(routes_module, "_fetch_position_counts", lambda asset: {})
-    monkeypatch.setattr(routes_module.circuit_breaker, "is_paused_for", lambda asset: False)
-    monkeypatch.setattr(routes_module.circuit_breaker, "check", lambda spot, asset: False)
+    monkeypatch.setattr(
+        routes_module.circuit_breaker, "is_paused_for", lambda asset: False
+    )
+    monkeypatch.setattr(
+        routes_module.circuit_breaker, "check", lambda spot, asset: False
+    )
     monkeypatch.setattr(
         routes_module.circuit_breaker,
         "update_reference",
@@ -108,6 +114,80 @@ def test_get_prices_strips_execution_fields_for_read_only_asset(monkeypatch):
     assert data[0]["quote_id"] is None
     assert data[0]["max_amount_raw"] is None
     assert data[0]["maker_nonce"] is None
+
+
+def test_invisible_asset_returns_404_on_spot(monkeypatch):
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc")
+    response = client.get("/spot?asset=tslax")
+    assert response.status_code == 404
+
+
+def test_invisible_asset_returns_404_on_capacity(monkeypatch):
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc")
+    response = client.get("/capacity?asset=tslax")
+    assert response.status_code == 404
+
+
+def test_invisible_asset_returns_404_on_prices(monkeypatch):
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc")
+    response = client.get("/prices?asset=tslax")
+    assert response.status_code == 404
+
+
+def test_tradable_asset_returns_execution_fields(monkeypatch):
+    now = 1_900_000_000
+
+    from src.chains.solana import oracle
+
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc,sol,tslax")
+    monkeypatch.setattr(routes_module.settings, "tradable_assets", "eth,btc,sol,tslax")
+    monkeypatch.setattr(oracle, "get_spot_price", lambda asset: (180.25, now))
+    monkeypatch.setattr(
+        routes_module,
+        "_fetch_active_quotes",
+        lambda asset: [
+            {
+                "bid_price": str(12_500_000),
+                "max_amount": str(2 * 10**8),
+                "deadline": now + 30,
+                "strike_price": 180.0,
+                "expiry": now + 7 * 86400,
+                "is_put": True,
+                "chain": "solana",
+                "otoken_address": "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF",
+                "signature": "sig123",
+                "mm_address": "maker123",
+                "quote_id": "quote-1",
+                "maker_nonce": 7,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        routes_module, "_fetch_valid_otoken_addresses", lambda asset: None
+    )
+    monkeypatch.setattr(routes_module, "_fetch_position_counts", lambda asset: {})
+    monkeypatch.setattr(
+        routes_module.circuit_breaker, "is_paused_for", lambda asset: False
+    )
+    monkeypatch.setattr(
+        routes_module.circuit_breaker, "check", lambda spot, asset: False
+    )
+    monkeypatch.setattr(
+        routes_module.circuit_breaker,
+        "update_reference",
+        lambda spot, asset: None,
+    )
+
+    response = client.get("/prices?asset=tslax")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["otoken_address"] == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
+    assert data[0]["signature"] == "sig123"
+    assert data[0]["mm_address"] == "maker123"
+    assert data[0]["quote_id"] == "quote-1"
+    assert data[0]["maker_nonce"] == 7
 
 
 def test_get_spot_invalid_asset_clean_error():
