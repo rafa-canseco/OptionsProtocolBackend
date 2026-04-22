@@ -258,6 +258,18 @@ class TestConfig:
         assert is_solana_bot_enabled("event_indexer") is True
         assert is_solana_bot_enabled("expiry_settler") is False
 
+    def test_any_enabled_solana_bots_honors_individual_override(self, monkeypatch):
+        from src.config import has_enabled_solana_bots, settings
+
+        monkeypatch.setattr(settings, "app_env", "production")
+        monkeypatch.setattr(settings, "solana_bots_enabled", False)
+        monkeypatch.setattr(settings, "solana_circuit_breaker_bot_enabled", None)
+        monkeypatch.setattr(settings, "solana_event_indexer_enabled", True)
+        monkeypatch.setattr(settings, "solana_expiry_settler_enabled", None)
+        monkeypatch.setattr(settings, "solana_otoken_manager_enabled", None)
+
+        assert has_enabled_solana_bots() is True
+
 
 # ── API endpoint tests ──
 

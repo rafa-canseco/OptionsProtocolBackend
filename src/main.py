@@ -19,7 +19,7 @@ from src.config import (
     settings,
     has_solana_config,
     has_bridge_config,
-    has_solana_runtime_enabled,
+    has_enabled_solana_bots,
     is_solana_bot_enabled,
 )
 
@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
     logger.info("Weekly aggregator started")
 
     # ── Solana bots ──
-    if has_solana_config() and has_solana_runtime_enabled():
+    if has_solana_config() and has_enabled_solana_bots():
         from src.bots import (
             solana_circuit_breaker_bot,
             solana_event_indexer,
@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
             )
     elif has_solana_config():
         logger.info(
-            "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true to opt in)",
+            "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true or enable an individual bot flag to opt in)",
             settings.app_env,
         )
     else:

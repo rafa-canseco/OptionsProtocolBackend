@@ -274,3 +274,16 @@ def is_solana_bot_enabled(bot_name: str) -> bool:
     if override is not None:
         return override
     return has_solana_runtime_enabled()
+
+
+def has_enabled_solana_bots() -> bool:
+    """True when at least one Solana bot is enabled after applying overrides."""
+    return any(
+        is_solana_bot_enabled(bot_name)
+        for bot_name in (
+            "circuit_breaker",
+            "event_indexer",
+            "expiry_settler",
+            "otoken_manager",
+        )
+    )
