@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    app_env: str = "dev"
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
@@ -32,6 +33,14 @@ class Settings(BaseSettings):
 
     # Pricing defaults
     risk_free_rate: float = 0.05  # 5% annualized
+
+    # Asset/chain exposure controls.
+    # Visible = endpoints may return read-only market data.
+    # Tradable = backend may return execution data or submit trades.
+    visible_assets: str = "eth,btc,sol,tslax"
+    tradable_assets: str = "eth,btc,sol,tslax"
+    visible_chains: str = "base,solana"
+    tradable_chains: str = "base,solana"
 
     # Bot intervals
     otoken_publish_interval_seconds: int = 300  # 5 minutes
@@ -160,6 +169,26 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _parse_allowlist(raw: str) -> set[str]:
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def is_asset_visible(asset: str) -> bool:
+    return asset.lower() in _parse_allowlist(settings.visible_assets)
+
+
+def is_asset_tradable(asset: str) -> bool:
+    return asset.lower() in _parse_allowlist(settings.tradable_assets)
+
+
+def is_chain_visible(chain: str) -> bool:
+    return chain.lower() in _parse_allowlist(settings.visible_chains)
+
+
+def is_chain_tradable(chain: str) -> bool:
+    return chain.lower() in _parse_allowlist(settings.tradable_chains)
 
 
 def get_cctp_attestation_url() -> str:

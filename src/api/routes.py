@@ -10,7 +10,7 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from src.config import settings
+from src.config import settings, is_asset_tradable, is_asset_visible
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
@@ -146,6 +146,14 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     return result.data
 
 
+def _ensure_asset_visible(asset: Asset) -> None:
+    if not is_asset_visible(asset.value):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{asset.value.upper()} market data is not available in this environment",
+        )
+
+
 def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
     """Aggregate capacity rows into a single summary."""
     if not rows:
@@ -227,6 +235,7 @@ async def get_capacity(
 
     Capacity is considered stale if not reported within 120 seconds.
     """
+    _ensure_asset_visible(asset)
     try:
         rows = _fetch_capacity_rows(asset)
     except Exception:
@@ -417,6 +426,19 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         return None
 
 
+def _strip_trade_fields(pr: PriceResponse) -> PriceResponse:
+    """Drop execution-only fields for read-only assets."""
+    pr.otoken_address = None
+    pr.signature = None
+    pr.mm_address = None
+    pr.bid_price_raw = None
+    pr.deadline = None
+    pr.quote_id = None
+    pr.max_amount_raw = None
+    pr.maker_nonce = None
+    return pr
+
+
 @router.get(
     "/spot",
     tags=["Market Data"],
@@ -426,6 +448,7 @@ async def get_spot(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
     """Return the live spot price for a given asset (Chainlink or Pyth)."""
+    _ensure_asset_visible(asset)
     chain = get_chain_for_asset(asset)
 
     try:
@@ -467,6 +490,9 @@ async def get_prices(
     Returns **503** only if the circuit breaker has paused pricing (>2 % move).
     Capacity status is served separately via ``GET /capacity``.
     """
+    _ensure_asset_visible(asset)
+    tradable = is_asset_tradable(asset.value)
+
     # Fetch spot early so we can self-heal a paused circuit breaker.
     spot = 0.0
     spot_ok = False
@@ -498,7 +524,7 @@ async def get_prices(
                 detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
 
-    cache_key = asset.value
+    cache_key = f"{asset.value}:{'tradable' if tradable else 'readonly'}"
     now = time.monotonic()
     cached = _prices_cache.get(cache_key)
     cached_at = _prices_cached_at.get(cache_key, 0.0)
@@ -560,6 +586,8 @@ async def get_prices(
         if pr is not None:
             if spot > 0:
                 pr.spot = spot
+            if not tradable:
+                pr = _strip_trade_fields(pr)
             idx = len(result)
             result.append(pr)
             is_put = pr.option_type == OptionType.PUT

@@ -14,9 +14,13 @@ def reset_rate_limit_state():
     """Clear in-memory rate-limit dicts between tests to prevent state leakage."""
     routes_module._waitlist_hits.clear()
     routes_module._read_hits.clear()
+    routes_module._prices_cache.clear()
+    routes_module._prices_cached_at.clear()
     yield
     routes_module._waitlist_hits.clear()
     routes_module._read_hits.clear()
+    routes_module._prices_cache.clear()
+    routes_module._prices_cached_at.clear()
 
 
 def test_health():
@@ -48,6 +52,62 @@ def test_get_tslax_spot_uses_solana_oracle():
         "spot": 180.25,
         "updated_at": 1_700_000_000,
     }
+
+
+def test_get_prices_strips_execution_fields_for_read_only_asset(monkeypatch):
+    now = 1_900_000_000
+
+    from src.chains.solana import oracle
+
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc,sol,tslax")
+    monkeypatch.setattr(routes_module.settings, "tradable_assets", "eth,btc")
+    monkeypatch.setattr(oracle, "get_spot_price", lambda asset: (180.25, now))
+    monkeypatch.setattr(
+        routes_module,
+        "_fetch_active_quotes",
+        lambda asset: [
+            {
+                "bid_price": str(12_500_000),
+                "max_amount": str(2 * 10**8),
+                "deadline": now + 30,
+                "strike_price": 180.0,
+                "expiry": now + 7 * 86400,
+                "is_put": True,
+                "chain": "solana",
+                "otoken_address": "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF",
+                "signature": "sig123",
+                "mm_address": "maker123",
+                "quote_id": "quote-1",
+                "maker_nonce": 7,
+            }
+        ],
+    )
+    monkeypatch.setattr(routes_module, "_fetch_valid_otoken_addresses", lambda asset: None)
+    monkeypatch.setattr(routes_module, "_fetch_position_counts", lambda asset: {})
+    monkeypatch.setattr(routes_module.circuit_breaker, "is_paused_for", lambda asset: False)
+    monkeypatch.setattr(routes_module.circuit_breaker, "check", lambda spot, asset: False)
+    monkeypatch.setattr(
+        routes_module.circuit_breaker,
+        "update_reference",
+        lambda spot, asset: None,
+    )
+
+    response = client.get("/prices?asset=tslax")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["premium"] == 12.0
+    assert data[0]["spot"] == 180.25
+    assert data[0]["chain"] == "solana"
+    assert data[0]["otoken_address"] is None
+    assert data[0]["signature"] is None
+    assert data[0]["mm_address"] is None
+    assert data[0]["bid_price_raw"] is None
+    assert data[0]["deadline"] is None
+    assert data[0]["quote_id"] is None
+    assert data[0]["max_amount_raw"] is None
+    assert data[0]["maker_nonce"] is None
 
 
 def test_get_spot_invalid_asset_clean_error():

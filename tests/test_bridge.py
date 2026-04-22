@@ -198,6 +198,25 @@ class TestBridgeAndTradeEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_rejects_non_tradable_chain(self, mock_db, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.app_env", "production")
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base")
+
+        resp = client.post(
+            "/api/bridge-and-trade",
+            json={
+                "burn_tx_hash": BURN_TX,
+                "source_chain": "base",
+                "dest_chain": "solana",
+                "user_id": "test",
+                "mint_recipient": SOL_ADDR,
+                "burn_amount": "1000000",
+            },
+        )
+
+        assert resp.status_code == 403
+        assert "Trading is disabled for solana in production" in resp.text
+
     def test_dedup_by_burn_tx(self, mock_db):
         mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
             data=[{"id": "existing-job", "status": "attesting"}]

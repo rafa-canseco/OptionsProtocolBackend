@@ -11,6 +11,7 @@ from src.bridge.models import (
     BridgeJobStatus,
 )
 from src.bridge.relayer import enqueue_job
+from src.config import is_chain_tradable, settings
 from src.db.database import get_client
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,13 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
     """
     if body.source_chain == body.dest_chain:
         raise HTTPException(400, "source_chain and dest_chain must differ")
+
+    for chain in (body.source_chain.value, body.dest_chain.value):
+        if not is_chain_tradable(chain):
+            raise HTTPException(
+                403,
+                f"Trading is disabled for {chain} in {settings.app_env}",
+            )
 
     _validate_tx_hash(body.burn_tx_hash, body.source_chain.value)
 
