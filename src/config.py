@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     # Solana chain ID (for display only)
     solana_cluster: str = "devnet"
 
+    # Solana runtime gates.
+    # API/read-only exposure is controlled by has_solana_config() plus route-level checks.
+    # Background bot runtime is controlled separately so production can stay read-only by default.
+    solana_bots_enabled: Optional[bool] = None
+    solana_circuit_breaker_bot_enabled: Optional[bool] = None
+    solana_event_indexer_enabled: Optional[bool] = None
+    solana_expiry_settler_enabled: Optional[bool] = None
+    solana_otoken_manager_enabled: Optional[bool] = None
+
     # ── CCTP V2 (Cross-Chain Transfer Protocol) ──
     # Attestation API — sandbox for testnet, production for mainnet
     cctp_attestation_api_url: str = ""  # set by has_bridge_config default
@@ -236,3 +245,32 @@ def has_solana_config() -> bool:
         and settings.solana_batch_settler_program_id
         and settings.solana_otoken_factory_program_id
     )
+
+
+def _solana_bots_default_enabled() -> bool:
+    """Enable Solana runtime by default outside production."""
+    return settings.app_env.lower() != "production"
+
+
+def has_solana_runtime_enabled() -> bool:
+    """True when Solana background runtime is enabled for this environment."""
+    if settings.solana_bots_enabled is not None:
+        return settings.solana_bots_enabled
+    return _solana_bots_default_enabled()
+
+
+def is_solana_bot_enabled(bot_name: str) -> bool:
+    """Return whether an individual Solana bot should run."""
+    overrides = {
+        "circuit_breaker": settings.solana_circuit_breaker_bot_enabled,
+        "event_indexer": settings.solana_event_indexer_enabled,
+        "expiry_settler": settings.solana_expiry_settler_enabled,
+        "otoken_manager": settings.solana_otoken_manager_enabled,
+    }
+    if bot_name not in overrides:
+        raise ValueError(f"Unknown Solana bot: {bot_name}")
+
+    override = overrides[bot_name]
+    if override is not None:
+        return override
+    return has_solana_runtime_enabled()

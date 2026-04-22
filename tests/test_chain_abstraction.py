@@ -223,6 +223,41 @@ class TestConfig:
         assert fresh.solana_wsol_mint == "So11111111111111111111111111111111111111112"
         assert fresh.solana_tslax_mint == "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
 
+    def test_solana_runtime_defaults_enabled_outside_production(self, monkeypatch):
+        from src.config import has_solana_runtime_enabled, settings
+
+        monkeypatch.setattr(settings, "app_env", "staging")
+        monkeypatch.setattr(settings, "solana_bots_enabled", None)
+
+        assert has_solana_runtime_enabled() is True
+
+    def test_solana_runtime_defaults_disabled_in_production(self, monkeypatch):
+        from src.config import has_solana_runtime_enabled, settings
+
+        monkeypatch.setattr(settings, "app_env", "production")
+        monkeypatch.setattr(settings, "solana_bots_enabled", None)
+
+        assert has_solana_runtime_enabled() is False
+
+    def test_solana_runtime_can_opt_in_in_production(self, monkeypatch):
+        from src.config import has_solana_runtime_enabled, settings
+
+        monkeypatch.setattr(settings, "app_env", "production")
+        monkeypatch.setattr(settings, "solana_bots_enabled", True)
+
+        assert has_solana_runtime_enabled() is True
+
+    def test_individual_solana_bot_flag_overrides_global_runtime(self, monkeypatch):
+        from src.config import is_solana_bot_enabled, settings
+
+        monkeypatch.setattr(settings, "app_env", "production")
+        monkeypatch.setattr(settings, "solana_bots_enabled", False)
+        monkeypatch.setattr(settings, "solana_event_indexer_enabled", True)
+        monkeypatch.setattr(settings, "solana_expiry_settler_enabled", None)
+
+        assert is_solana_bot_enabled("event_indexer") is True
+        assert is_solana_bot_enabled("expiry_settler") is False
+
 
 # ── API endpoint tests ──
 

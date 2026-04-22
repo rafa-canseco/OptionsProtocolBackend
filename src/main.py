@@ -15,7 +15,13 @@ from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
-from src.config import settings, has_solana_config, has_bridge_config
+from src.config import (
+    settings,
+    has_solana_config,
+    has_bridge_config,
+    has_solana_runtime_enabled,
+    is_solana_bot_enabled,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,7 +89,7 @@ async def lifespan(app: FastAPI):
     logger.info("Weekly aggregator started")
 
     # ── Solana bots ──
-    if has_solana_config():
+    if has_solana_config() and has_solana_runtime_enabled():
         from src.bots import (
             solana_circuit_breaker_bot,
             solana_event_indexer,
@@ -91,13 +97,34 @@ async def lifespan(app: FastAPI):
             solana_otoken_manager,
         )
 
-        tasks.append(asyncio.create_task(solana_circuit_breaker_bot.run()))
-        tasks.append(asyncio.create_task(solana_event_indexer.run()))
-        tasks.append(asyncio.create_task(solana_expiry_settler.run()))
-        tasks.append(asyncio.create_task(solana_otoken_manager.run()))
+        started_solana_bots = []
+        if is_solana_bot_enabled("circuit_breaker"):
+            tasks.append(asyncio.create_task(solana_circuit_breaker_bot.run()))
+            started_solana_bots.append("circuit breaker")
+        if is_solana_bot_enabled("event_indexer"):
+            tasks.append(asyncio.create_task(solana_event_indexer.run()))
+            started_solana_bots.append("event indexer")
+        if is_solana_bot_enabled("expiry_settler"):
+            tasks.append(asyncio.create_task(solana_expiry_settler.run()))
+            started_solana_bots.append("expiry settler")
+        if is_solana_bot_enabled("otoken_manager"):
+            tasks.append(asyncio.create_task(solana_otoken_manager.run()))
+            started_solana_bots.append("otoken manager")
+
+        if started_solana_bots:
+            logger.info(
+                "Solana bots started (cluster=%s): %s",
+                settings.solana_cluster,
+                ", ".join(started_solana_bots),
+            )
+        else:
+            logger.info(
+                "Solana runtime enabled but no Solana bots selected by flags"
+            )
+    elif has_solana_config():
         logger.info(
-            "Solana bots started (cluster=%s): circuit breaker, event indexer, expiry settler, otoken manager",
-            settings.solana_cluster,
+            "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true to opt in)",
+            settings.app_env,
         )
     else:
         logger.info(
