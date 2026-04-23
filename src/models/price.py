@@ -52,7 +52,7 @@ class PriceResponse(BaseModel):
     )
     bid_price_raw: int | None = Field(
         default=None,
-        description="Bid price in USDC smallest units (6 decimals)",
+        description="Bid price in USDC on-chain units (6 decimals)",
     )
     deadline: int | None = Field(
         default=None,
@@ -69,10 +69,6 @@ class PriceResponse(BaseModel):
     maker_nonce: int | None = Field(
         default=None,
         description="MM's makerNonce at time of signing",
-    )
-    chain: str = Field(
-        default="base",
-        description="Chain this quote is on (base or solana)",
     )
     position_count: int = Field(
         default=0,
