@@ -23,7 +23,7 @@ from src.db.database import get_client
 from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
 from src.api.mm_ws import notify_mm_fill
 from src.pricing.chainlink import get_asset_price
-from src.pricing.assets import Asset
+from src.pricing.assets import Asset, get_asset_config
 from src.pricing.utils import collateral_to_usd, strike_to_8_decimals
 
 logger = logging.getLogger(__name__)
@@ -273,15 +273,18 @@ def _store_events(events: list[dict]) -> int:
 def _update_delivery_events(delivery_events: list[dict]) -> int:
     """Update existing order_events rows with physical delivery data.
 
-    Matches on (user_address, otoken_address). If a user has multiple positions
-    for the same oToken, all will be updated — this is acceptable because all
-    positions on the same oToken share the same ITM/OTM outcome.
+    PhysicalDelivery does not include vault_id, so matching must be inferred
+    from already indexed order state. We only update when exactly one row can
+    be identified deterministically; otherwise we log and skip the event.
     """
     if not delivery_events:
         return 0
     client = get_client()
     updated = 0
     for ev in delivery_events:
+        matched = _match_delivery_event_to_row(ev, client)
+        if matched is None:
+            continue
         result = (
             client.table("order_events")
             .update(
@@ -293,23 +296,109 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
                     "is_itm": True,
                 }
             )
-            .eq("user_address", ev["user_address"])
-            .eq(
-                "otoken_address",
-                ev["otoken_address"],
-            )
+            .eq("id", matched["id"])
             .execute()
         )
         if result.data:
             updated += len(result.data)
         else:
             logger.warning(
-                "Physical delivery event matched no DB row: user=%s otoken=%s tx=%s",
-                ev["user_address"],
-                ev["otoken_address"],
+                "Physical delivery update matched no DB row after selection: "
+                "id=%s vault=%s tx=%s",
+                matched["id"],
+                matched.get("vault_id"),
                 ev["delivery_tx_hash"],
             )
     return updated
+
+
+def _match_delivery_event_to_row(ev: dict, client) -> dict | None:
+    """Match a PhysicalDelivery event to exactly one order_events row."""
+    result = (
+        client.table("order_events")
+        .select(
+            "id, vault_id, amount, strike_price, is_put, asset, "
+            "delivery_tx_hash, delivered_amount"
+        )
+        .eq("user_address", ev["user_address"])
+        .eq("otoken_address", ev["otoken_address"])
+        .execute()
+    )
+    candidates = result.data or []
+    if not candidates:
+        logger.warning(
+            "Physical delivery event matched 0 candidates: user=%s otoken=%s tx=%s",
+            ev["user_address"],
+            ev["otoken_address"],
+            ev["delivery_tx_hash"],
+        )
+        return None
+
+    same_tx = [row for row in candidates if row.get("delivery_tx_hash") == ev["delivery_tx_hash"]]
+    if len(same_tx) == 1:
+        return same_tx[0]
+    if len(same_tx) > 1:
+        logger.error(
+            "Physical delivery event matched >1 rows by tx hash: user=%s otoken=%s tx=%s vaults=%s",
+            ev["user_address"],
+            ev["otoken_address"],
+            ev["delivery_tx_hash"],
+            [row.get("vault_id") for row in same_tx],
+        )
+        return None
+
+    unmatched = [row for row in candidates if not row.get("delivery_tx_hash")]
+    amount_matches = [
+        row
+        for row in unmatched
+        if _expected_delivered_amount(row) == str(ev["delivered_amount"])
+    ]
+    if len(amount_matches) == 1:
+        return amount_matches[0]
+    if len(amount_matches) == 0:
+        logger.warning(
+            "Physical delivery event matched 0 deterministic rows: user=%s otoken=%s tx=%s delivered_amount=%s candidate_vaults=%s",
+            ev["user_address"],
+            ev["otoken_address"],
+            ev["delivery_tx_hash"],
+            ev["delivered_amount"],
+            [row.get("vault_id") for row in candidates],
+        )
+        return None
+
+    logger.error(
+        "Physical delivery event matched >1 deterministic rows: user=%s otoken=%s tx=%s delivered_amount=%s vaults=%s",
+        ev["user_address"],
+        ev["otoken_address"],
+        ev["delivery_tx_hash"],
+        ev["delivered_amount"],
+        [row.get("vault_id") for row in amount_matches],
+    )
+    return None
+
+
+def _expected_delivered_amount(row: dict) -> str | None:
+    """Compute expected delivered amount from indexed order row."""
+    try:
+        amount_raw = int(row["amount"])
+        is_put = row["is_put"]
+        if is_put:
+            asset_str = str(row.get("asset") or "eth").lower()
+            try:
+                decimals = get_asset_config(Asset(asset_str)).decimals
+            except (ValueError, KeyError):
+                decimals = get_asset_config(Asset.ETH).decimals
+            return str(amount_raw * (10 ** (decimals - 8)))
+
+        strike = int(row["strike_price"])
+        return str((amount_raw * strike) // 10**10)
+    except Exception:
+        logger.exception(
+            "Could not derive expected delivered amount for order_event_id=%s vault=%s",
+            row.get("id"),
+            row.get("vault_id"),
+        )
+        return None
 
 
 def _notify_mm(event_data: dict) -> None:

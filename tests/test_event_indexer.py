@@ -141,6 +141,107 @@ def test_build_delivery_event_data_uses_cached_metadata():
     mock_get_otoken.assert_not_called()
 
 
+def test_update_delivery_events_matches_only_one_vault_when_same_user_and_otoken():
+    """Different vault amounts for the same user/oToken must stay distinct."""
+    db = MagicMock()
+    candidates = [
+        {
+            "id": "evt-24",
+            "vault_id": 24,
+            "amount": "100000000",
+            "strike_price": "200000000000",
+            "is_put": True,
+            "asset": "eth",
+            "delivery_tx_hash": None,
+            "delivered_amount": None,
+        },
+        {
+            "id": "evt-26",
+            "vault_id": 26,
+            "amount": "200000000",
+            "strike_price": "200000000000",
+            "is_put": True,
+            "asset": "eth",
+            "delivery_tx_hash": None,
+            "delivered_amount": None,
+        },
+    ]
+    select_result = MagicMock()
+    select_result.data = candidates
+    select_chain = db.table.return_value.select.return_value
+    select_chain.eq.return_value = select_chain
+    select_chain.execute.return_value = select_result
+
+    update_result = MagicMock()
+    update_result.data = [{"id": "evt-24"}]
+    update_chain = db.table.return_value.update.return_value
+    update_chain.eq.return_value = update_chain
+    update_chain.execute.return_value = update_result
+
+    ev = {
+        "user_address": "0xuser",
+        "otoken_address": "0xotoken",
+        "delivered_asset": "0xweth",
+        "delivered_amount": str(10**18),
+        "delivery_tx_hash": "0xtx24",
+    }
+
+    with patch("src.bots.event_indexer.get_client", return_value=db):
+        updated = event_indexer._update_delivery_events([ev])
+
+    assert updated == 1
+    update_chain.eq.assert_called_once_with("id", "evt-24")
+
+
+def test_update_delivery_events_skips_ambiguous_same_amount_match():
+    """If multiple candidate rows imply the same delivery amount, skip safely."""
+    db = MagicMock()
+    candidates = [
+        {
+            "id": "evt-24",
+            "vault_id": 24,
+            "amount": "100000000",
+            "strike_price": "200000000000",
+            "is_put": True,
+            "asset": "eth",
+            "delivery_tx_hash": None,
+            "delivered_amount": None,
+        },
+        {
+            "id": "evt-26",
+            "vault_id": 26,
+            "amount": "100000000",
+            "strike_price": "200000000000",
+            "is_put": True,
+            "asset": "eth",
+            "delivery_tx_hash": None,
+            "delivered_amount": None,
+        },
+    ]
+    select_result = MagicMock()
+    select_result.data = candidates
+    select_chain = db.table.return_value.select.return_value
+    select_chain.eq.return_value = select_chain
+    select_chain.execute.return_value = select_result
+
+    ev = {
+        "user_address": "0xuser",
+        "otoken_address": "0xotoken",
+        "delivered_asset": "0xweth",
+        "delivered_amount": str(10**18),
+        "delivery_tx_hash": "0xtx-ambiguous",
+    }
+
+    with patch("src.bots.event_indexer.get_client", return_value=db), patch(
+        "src.bots.event_indexer.logger"
+    ) as mock_logger:
+        updated = event_indexer._update_delivery_events([ev])
+
+    assert updated == 0
+    db.table.return_value.update.assert_not_called()
+    mock_logger.error.assert_called()
+
+
 def test_enrich_returns_none_when_metadata_unavailable():
     """Failed enrichment signals callers to skip storage (no partial rows)."""
     table = MagicMock()
