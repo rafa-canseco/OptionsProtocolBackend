@@ -4,6 +4,7 @@ from src.bots.expiry_settler import _send_settlement_emails
 
 def _make_position(wallet, vault_id, is_itm=False, asset="eth", **kw):
     pos = {
+        "id": f"evt-{wallet}-{vault_id}",
         "user_address": wallet,
         "vault_id": vault_id,
         "otoken_address": "0xtoken",
@@ -27,9 +28,13 @@ def _make_position(wallet, vault_id, is_itm=False, asset="eth", **kw):
 
 def _mock_db_with_emails(email_map: dict[str, str]):
     mock = MagicMock()
+    tables: dict[str, MagicMock] = {}
 
     def table_router(name):
+        if name in tables:
+            return tables[name]
         t = MagicMock()
+        tables[name] = t
         if name == "user_emails":
             result = MagicMock()
             result.data = [
@@ -49,6 +54,7 @@ def _mock_db_with_emails(email_map: dict[str, str]):
         return t
 
     mock.table.side_effect = table_router
+    mock._tables = tables
     return mock
 
 
@@ -73,6 +79,8 @@ def test_sends_otm_result_email():
         formatted = mock_build.call_args[1]["positions"][0]
         assert formatted["is_itm"] is False
         mock_send.assert_called_once()
+        update_chain = mock_db._tables["order_events"].update.return_value
+        update_chain.eq.assert_called_once_with("id", pos["id"])
 
 
 def test_sends_itm_result_email():

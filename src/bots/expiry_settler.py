@@ -49,7 +49,7 @@ def get_expired_unsettled() -> list[dict]:
     result = (
         client.table("order_events")
         .select(
-            "user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address, asset"
+            "id, user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address, asset"
         )
         .or_("is_settled.eq.false,is_settled.is.null")
         .lte("expiry", now)
@@ -329,6 +329,20 @@ def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> Non
         raise
 
 
+def _db_update_by_id(order_event_id: str, fields: dict, context: str) -> None:
+    """Update a single order_events row by primary key. Logs on no-match or failure."""
+    client = get_client()
+    try:
+        result = (
+            client.table("order_events").update(fields).eq("id", order_event_id).execute()
+        )
+        if not result.data:
+            logger.warning("%s: matched no rows order_event_id=%s", context, order_event_id)
+    except Exception:
+        logger.exception("%s: DB write failed order_event_id=%s", context, order_event_id)
+        raise
+
+
 def _ensure_expiry_prices_set(expiries: set[int]) -> None:
     """Set Oracle expiry prices from Chainlink for all needed expiries.
 
@@ -574,11 +588,11 @@ def _prepare_settlement_email_batch(
     all_positions: list[dict],
     email_map: dict[str, str],
     itm_keys: set[tuple[str, int]],
-) -> tuple[list[dict], list[list[tuple[str, int]]]]:
+) -> tuple[list[dict], list[list[str]]]:
     """Build one consolidated email per wallet covering all their settled positions.
 
     Returns (emails_to_send, position_refs) where position_refs[i] is the list
-    of (wallet, vault_id) pairs covered by emails_to_send[i]. result_sent_at is
+    of order_events.id values covered by emails_to_send[i]. result_sent_at is
     marked per individual position so dedup stays correct on retry.
     itm_positions must be a subset of all_positions (i.e. settled_positions).
     """
@@ -596,11 +610,11 @@ def _prepare_settlement_email_batch(
         by_wallet.setdefault(wallet, []).append(pos)
 
     emails_to_send: list[dict] = []
-    position_refs: list[list[tuple[str, int]]] = []
+    position_refs: list[list[str]] = []
 
     for wallet, positions in by_wallet.items():
         formatted = [_format_position_for_email(p, wallet, itm_keys) for p in positions]
-        refs = [(wallet, p["vault_id"]) for p in positions]
+        refs = [p["id"] for p in positions]
         try:
             email_dict = build_consolidated_result_email(
                 email=email_map[wallet],
@@ -668,19 +682,15 @@ def _send_settlement_emails(
     now = datetime.now(timezone.utc).isoformat()
     for i, refs in enumerate(position_refs):
         if i < len(results) and results[i].get("id"):
-            for wallet, vault_id in refs:
+            for order_event_id in refs:
                 try:
-                    _db_update(
-                        wallet,
-                        vault_id,
-                        {"result_sent_at": now},
-                        "Settlement email mark",
+                    _db_update_by_id(
+                        order_event_id, {"result_sent_at": now}, "Settlement email mark"
                     )
                 except Exception:
                     logger.exception(
-                        "Failed to mark result_sent_at for %s vault %d",
-                        wallet,
-                        vault_id,
+                        "Failed to mark result_sent_at for order_event_id=%s",
+                        order_event_id,
                     )
 
 

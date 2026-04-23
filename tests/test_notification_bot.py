@@ -8,6 +8,7 @@ from src.bots.notification_bot import check_once
 def _make_position(**overrides) -> dict:
     now_ts = int(time.time())
     defaults = {
+        "id": "evt-1",
         "user_address": "0xabc123",
         "vault_id": 1,
         "otoken_address": "0xdef456",
@@ -38,9 +39,13 @@ def _make_user_email(wallet: str, **overrides) -> dict:
 def _mock_db(positions: list[dict], user_emails: list[dict]):
     """Mock Supabase client with separate responses per table."""
     mock = MagicMock()
+    tables: dict[str, MagicMock] = {}
 
     def table_router(name):
+        if name in tables:
+            return tables[name]
         t = MagicMock()
+        tables[name] = t
         if name == "order_events":
             result = MagicMock()
             result.data = positions
@@ -72,6 +77,7 @@ def _mock_db(positions: list[dict], user_emails: list[dict]):
         return t
 
     mock.table.side_effect = table_router
+    mock._tables = tables
     return mock
 
 
@@ -94,6 +100,8 @@ def test_check_once_sends_reminder():
         check_once()
         mock_build.assert_called_once()
         mock_send.assert_called_once()
+        update_chain = mock_db._tables["order_events"].update.return_value
+        update_chain.eq.assert_called_once_with("id", pos["id"])
 
 
 def test_check_once_skips_unsubscribed():
