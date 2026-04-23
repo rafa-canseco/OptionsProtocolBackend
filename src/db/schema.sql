@@ -50,7 +50,6 @@ create table if not exists order_events (
   tx_hash text not null unique,
   block_number bigint not null,
   log_index integer not null,
-  chain text not null default 'base',
   user_address text not null,
   mm_address text,
   otoken_address text not null,
@@ -87,7 +86,6 @@ create index if not exists idx_order_events_user on order_events(user_address);
 create index if not exists idx_order_events_otoken on order_events(otoken_address);
 create index if not exists idx_order_events_block on order_events(block_number);
 create index if not exists idx_order_events_expiry on order_events(expiry);
-create index if not exists idx_order_events_chain on order_events(chain);
 create index if not exists idx_order_events_unsettled
   on order_events(is_settled) where is_settled = false;
 create index if not exists idx_order_events_group_id
@@ -102,17 +100,6 @@ create table if not exists indexer_state (
 
 insert into indexer_state (last_indexed_block) values (0)
   on conflict (id) do nothing;
-
--- Solana event indexer cursor (independent from Base indexer_state)
-create table if not exists solana_indexer_state (
-  chain text not null default 'solana',
-  program_id text not null,
-  last_signature text,
-  last_slot bigint not null default 0,
-  updated_at timestamptz not null default now(),
-  primary key (chain, program_id),
-  check (chain in ('solana'))
-);
 
 -- ============================================================
 -- Waitlist

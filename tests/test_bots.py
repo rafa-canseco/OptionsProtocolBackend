@@ -459,7 +459,7 @@ def test_publish_once_full_reconcile_on_schedule():
         1 for i in range(1, cycles + 1) if i % period == 1
     )
     expected_db_shortcut = (cycles - expected_full_reconciles) * len(
-        list(otoken_manager.get_base_assets())
+        list(otoken_manager.Asset)
     )
 
     async def run_n(n):

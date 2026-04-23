@@ -22,15 +22,9 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from web3 import Web3
 
-from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
-from solders.signature import Signature as SolSignature  # type: ignore[import-untyped]
-
 from src.api.deps import require_mm_api_key
-from src.chains.explorer import tx_explorer_url
-from src.chains.solana.client import get_solana_maker_nonce
 from src.config import settings
 from src.contracts.web3_client import get_batch_settler, get_w3
-from src.crypto.ed25519 import build_solana_quote_message, verify_solana_quote
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
 from src.models.mm import (
@@ -44,9 +38,8 @@ from src.models.mm import (
     QuoteBatchRequest,
     QuoteBatchResponse,
     QuoteResponse,
-    QuoteSubmission,
 )
-from src.pricing.assets import Asset, get_chain_for_asset
+from src.pricing.assets import Asset
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
 from src.pricing.utils import get_expiries
@@ -55,43 +48,6 @@ from src.bots.otoken_manager import _parse_custom_expiries
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mm", tags=["Market Making"])
-
-
-def _normalize_mm_address(addr: str) -> str:
-    """Normalize MM address: lowercase for EVM (0x), as-is for Solana (base58)."""
-    if addr.startswith("0x"):
-        return addr.lower()
-    return addr
-
-
-def _resolve_nonce(
-    chain: str, body: QuoteBatchRequest, mm_address: str
-) -> tuple[str, int]:
-    """Return (mm_id, on_chain_nonce) for the chain.
-
-    For Solana: mm_id is the maker pubkey, nonce from MakerState PDA.
-    For Base: mm_id is the lowercased EVM address, nonce from BatchSettler.
-    """
-    if chain == "solana":
-        maker = body.quotes[0].maker
-        if not maker:
-            raise HTTPException(400, "maker required for Solana quotes")
-        try:
-            nonce = get_solana_maker_nonce(maker)
-        except Exception:
-            logger.exception("Failed to read Solana makerNonce for %s", maker)
-            raise HTTPException(502, "Could not read Solana makerNonce")
-        return maker, nonce
-    else:
-        try:
-            settler = get_batch_settler()
-            nonce = settler.functions.makerNonce(
-                Web3.to_checksum_address(mm_address)
-            ).call()
-        except Exception:
-            logger.exception("Failed to read makerNonce for %s", mm_address)
-            raise HTTPException(502, "Could not read on-chain makerNonce")
-        return mm_address.lower(), nonce
 
 
 @router.post(
@@ -103,35 +59,39 @@ async def submit_quotes(
     body: QuoteBatchRequest,
     mm_address: str = Depends(require_mm_api_key),
 ):
-    """Submit a batch of signed quotes (EIP-712 for Base, ed25519 for Solana).
+    """Submit a batch of EIP-712 signed quotes.
 
-    The chain is determined from the first quote — MMs send per-chain batches.
-    Signatures, nonces, and addresses are validated per-chain. Quotes with
-    invalid signatures, expired deadlines, or wrong makerNonce are rejected.
+    Each quote's signature is verified: the recovered signer must match
+    the MM address associated with the API key. Quotes with invalid
+    signatures, expired deadlines, or wrong makerNonce are rejected.
     """
     now_ts = int(time.time())
     accepted = 0
     errors: list[str] = []
 
-    chains_in_batch = {q.chain for q in body.quotes}
-    if len(chains_in_batch) > 1:
+    # Read the on-chain makerNonce for this MM
+    try:
+        settler = get_batch_settler()
+        on_chain_nonce = settler.functions.makerNonce(
+            Web3.to_checksum_address(mm_address)
+        ).call()
+    except Exception:
+        logger.exception("Failed to read makerNonce for %s", mm_address)
         raise HTTPException(
-            status_code=400,
-            detail=f"All quotes in a batch must target the same chain, got: {chains_in_batch}",
+            status_code=502, detail="Could not read on-chain makerNonce"
         )
-    chain = chains_in_batch.pop()
-
-    mm_id, on_chain_nonce = _resolve_nonce(chain, body, mm_address)
 
     rows_to_upsert = []
 
     for i, q in enumerate(body.quotes):
         label = f"quote[{i}]"
 
+        # Check deadline
         if q.deadline <= now_ts:
             errors.append(f"{label}: deadline {q.deadline} already passed")
             continue
 
+        # Check makerNonce matches on-chain
         if q.maker_nonce != on_chain_nonce:
             errors.append(
                 f"{label}: makerNonce mismatch (got {q.maker_nonce}, "
@@ -139,28 +99,42 @@ async def submit_quotes(
             )
             continue
 
-        if chain == "solana":
-            valid = _verify_solana_sig(q, label, errors)
-            if not valid:
-                continue
-            otoken_addr = q.otoken_address
-        else:
-            valid = _verify_base_sig(q, label, mm_address, errors)
-            if not valid:
-                continue
-            otoken_addr = q.otoken_address.lower()
+        # Verify EIP-712 signature
+        try:
+            recovered = recover_quote_signer(
+                otoken=q.otoken_address,
+                bid_price=q.bid_price,
+                deadline=q.deadline,
+                quote_id=q.quote_id,
+                max_amount=q.max_amount,
+                maker_nonce=q.maker_nonce,
+                signature=q.signature,
+            )
+        except Exception:
+            logger.exception("%s: signature recovery failed", label)
+            errors.append(f"{label}: invalid signature")
+            continue
+
+        if recovered.lower() != mm_address.lower():
+            logger.warning(
+                "%s: signer mismatch (recovered %s, expected %s)",
+                label,
+                recovered,
+                mm_address,
+            )
+            errors.append(f"{label}: signature does not match authenticated MM address")
+            continue
 
         rows_to_upsert.append(
             {
-                "mm_address": mm_id,
-                "otoken_address": otoken_addr,
+                "mm_address": mm_address.lower(),
+                "otoken_address": q.otoken_address.lower(),
                 "bid_price": str(q.bid_price),
                 "deadline": q.deadline,
                 "quote_id": str(q.quote_id),
                 "max_amount": str(q.max_amount),
                 "maker_nonce": q.maker_nonce,
                 "signature": q.signature,
-                "chain": chain,
                 "asset": q.asset,
                 "strike_price": q.strike_price,
                 "expiry": q.expiry,
@@ -171,12 +145,23 @@ async def submit_quotes(
 
     if rows_to_upsert:
         try:
-            db = get_client()
-            otoken_addrs = list({r["otoken_address"] for r in rows_to_upsert})
-            db.table("mm_quotes").update({"is_active": False}).eq(
-                "mm_address", mm_id
-            ).eq("is_active", True).in_("otoken_address", otoken_addrs).execute()
-            db.table("mm_quotes").upsert(
+            client = get_client()
+            # Deactivate old quotes for otokens being refreshed so
+            # stale signatures are no longer served via /prices.
+            otoken_addrs = list(
+                {r["otoken_address"] for r in rows_to_upsert}
+            )
+            client.table("mm_quotes").update(
+                {"is_active": False}
+            ).eq(
+                "mm_address", mm_address.lower()
+            ).eq(
+                "is_active", True
+            ).in_(
+                "otoken_address", otoken_addrs
+            ).execute()
+            # Upsert new quotes (re-sets is_active=True)
+            client.table("mm_quotes").upsert(
                 rows_to_upsert, on_conflict="mm_address,quote_id"
             ).execute()
             accepted = len(rows_to_upsert)
@@ -189,61 +174,6 @@ async def submit_quotes(
         rejected=len(body.quotes) - accepted,
         errors=errors,
     )
-
-
-def _verify_solana_sig(q: QuoteSubmission, label: str, errors: list[str]) -> bool:
-    """Verify an ed25519 Solana quote signature. Returns True if valid."""
-    try:
-        pubkey = SolPubkey.from_string(q.maker)
-        otoken_bytes = bytes(SolPubkey.from_string(q.otoken_address))
-        msg = build_solana_quote_message(
-            otoken_bytes,
-            bid_price=q.bid_price,
-            deadline=q.deadline,
-            quote_id=q.quote_id,
-            max_amount=q.max_amount,
-            maker_nonce=q.maker_nonce,
-        )
-        sig_bytes = bytes(SolSignature.from_string(q.signature))
-        if not verify_solana_quote(pubkey, msg, sig_bytes):
-            errors.append(f"{label}: signature does not match maker pubkey")
-            return False
-    except Exception:
-        logger.exception("%s: Solana signature verification failed", label)
-        errors.append(f"{label}: invalid signature")
-        return False
-    return True
-
-
-def _verify_base_sig(
-    q: QuoteSubmission, label: str, mm_address: str, errors: list[str]
-) -> bool:
-    """Verify an EIP-712 Base quote signature. Returns True if valid."""
-    try:
-        recovered = recover_quote_signer(
-            otoken=q.otoken_address,
-            bid_price=q.bid_price,
-            deadline=q.deadline,
-            quote_id=q.quote_id,
-            max_amount=q.max_amount,
-            maker_nonce=q.maker_nonce,
-            signature=q.signature,
-        )
-    except Exception:
-        logger.exception("%s: EIP-712 signature recovery failed", label)
-        errors.append(f"{label}: invalid signature")
-        return False
-
-    if recovered.lower() != mm_address.lower():
-        logger.warning(
-            "%s: signer mismatch (recovered %s, expected %s)",
-            label,
-            recovered,
-            mm_address,
-        )
-        errors.append(f"{label}: signature does not match authenticated MM address")
-        return False
-    return True
 
 
 @router.get(
@@ -259,7 +189,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("mm_quotes")
             .select("*")
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
             .eq("is_active", True)
             .gt("deadline", now_ts)
             .order("created_at", desc=True)
@@ -305,7 +235,7 @@ async def cancel_quotes(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("mm_quotes")
             .update({"is_active": False})
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
             .eq("is_active", True)
             .execute()
         )
@@ -335,7 +265,7 @@ async def get_fills(
         q = (
             client.table("order_events")
             .select("*")
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
         )
         if since is not None:
             q = q.gte("indexed_at", _ts_to_iso(since))
@@ -349,8 +279,6 @@ async def get_fills(
     return [
         FillResponse(
             tx_hash=r["tx_hash"],
-            chain=r.get("chain", "base"),
-            tx_url=tx_explorer_url(r.get("tx_hash"), r.get("chain", "base")),
             block_number=r["block_number"],
             otoken_address=r["otoken_address"],
             amount=str(r["amount"]),
@@ -383,7 +311,7 @@ async def get_positions(mm_address: str = Depends(require_mm_api_key)):
         result = (
             client.table("order_events")
             .select("*")
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
             .gt("expiry", now_ts)
             .order("expiry")
             .execute()
@@ -440,7 +368,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
         quotes_result = (
             client.table("mm_quotes")
             .select("max_amount")
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
             .eq("is_active", True)
             .gt("deadline", now_ts)
             .execute()
@@ -453,7 +381,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
         fills_result = (
             client.table("order_events")
             .select("expiry,amount,gross_premium,premium,is_settled")
-            .eq("mm_address", _normalize_mm_address(mm_address))
+            .eq("mm_address", mm_address.lower())
             .execute()
         )
         fills = fills_result.data or []
@@ -509,18 +437,8 @@ async def get_market(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
     """Return market data for MM's pricing engine for a given asset."""
-    from src.pricing.assets import get_asset_config, get_chain_for_asset
-    from src.chains import Chain
-
-    chain = get_chain_for_asset(asset)
-
     try:
-        if chain == Chain.SOLANA:
-            from src.chains.solana.oracle import get_spot_price
-
-            spot, _ = get_spot_price(asset)
-        else:
-            spot, _ = get_asset_price(asset)
+        spot, _ = get_asset_price(asset)
     except Exception:
         logger.exception("Failed to fetch %s spot price", asset.value)
         raise HTTPException(
@@ -528,29 +446,23 @@ async def get_market(
         )
 
     try:
-        iv_result = await get_iv(asset)
+        iv = await get_iv(asset)
     except Exception:
         logger.exception("Failed to fetch %s IV from Deribit", asset.value)
         raise HTTPException(status_code=502, detail="Could not fetch IV")
 
-    # Gas price only relevant for Base
-    gas_price_gwei = 0.0
-    if chain == Chain.BASE:
-        try:
-            w3 = get_w3()
-            gas_price_wei = w3.eth.gas_price
-            gas_price_gwei = gas_price_wei / 1e9
-        except Exception:
-            logger.exception("Failed to fetch gas price")
+    try:
+        w3 = get_w3()
+        gas_price_wei = w3.eth.gas_price
+        gas_price_gwei = gas_price_wei / 1e9
+    except Exception:
+        logger.exception("Failed to fetch gas price")
+        gas_price_gwei = 0.0
+
+    from src.pricing.assets import get_asset_config
 
     cfg = get_asset_config(asset)
-    # Base: hex addresses are case-insensitive → lowercase
-    # Solana: base58 addresses are case-sensitive → keep as-is
-    underlying_addr = (
-        cfg.underlying_address
-        if chain == Chain.SOLANA
-        else cfg.underlying_address.lower()
-    )
+    underlying_addr = cfg.underlying_address.lower()
 
     otokens: list[OTokenInfo] = []
     active_expiries = _parse_custom_expiries() or get_expiries()
@@ -579,8 +491,7 @@ async def get_market(
     return MarketDataResponse(
         asset=asset.value,
         spot=spot,
-        iv=iv_result.value,
-        iv_source=iv_result.source,
+        iv=iv,
         protocol_fee_bps=settings.protocol_fee_bps,
         gas_price_gwei=round(gas_price_gwei, 4),
         available_otokens=otokens,
@@ -601,12 +512,9 @@ async def report_capacity(
     The mm_address is taken from the authenticated API key, not the body.
     Upserts into mm_capacity keyed by mm_address.
     """
-    asset_val = body.asset.lower()
-    chain_val = get_chain_for_asset(Asset(asset_val)).value
     row = {
-        "mm_address": _normalize_mm_address(mm_address),
-        "asset": asset_val,
-        "chain": chain_val,
+        "mm_address": mm_address.lower(),
+        "asset": body.asset.lower(),
         "capacity_eth": body.capacity_eth,
         "capacity_usd": body.capacity_usd,
         "status": body.status,

@@ -17,24 +17,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["MM Monitoring"])
 
-# normalized mm_address → set of connected WebSocket clients
+# mm_address (lowercase) → set of connected WebSocket clients
 _connections: dict[str, set[WebSocket]] = {}
-
-
-def _normalize_mm_key(mm_address: str) -> str:
-    """Normalize MM key for connection lookups.
-
-    EVM addresses are case-insensitive; Solana pubkeys are not.
-    """
-    if mm_address.startswith("0x"):
-        return mm_address.lower()
-    return mm_address
 
 
 async def notify_mm_fill(mm_address: str, fill_data: dict) -> None:
     """Push a fill event to all connected WebSocket clients for this MM."""
-    key = _normalize_mm_key(mm_address)
-    clients = _connections.get(key)
+    clients = _connections.get(mm_address.lower())
     if not clients:
         return
 
@@ -49,7 +38,7 @@ async def notify_mm_fill(mm_address: str, fill_data: dict) -> None:
     for ws in dead:
         clients.discard(ws)
     if not clients:
-        _connections.pop(key, None)
+        _connections.pop(mm_address.lower(), None)
 
 
 def _authenticate(api_key: str) -> str:
@@ -97,10 +86,9 @@ async def mm_stream(websocket: WebSocket):
             return
 
     # Register connection
-    conn_key = _normalize_mm_key(mm_address)
-    if conn_key not in _connections:
-        _connections[conn_key] = set()
-    _connections[conn_key].add(websocket)
+    if mm_address not in _connections:
+        _connections[mm_address] = set()
+    _connections[mm_address].add(websocket)
 
     await websocket.send_text(
         json.dumps({"type": "auth", "status": "ok", "mm_address": mm_address})
@@ -114,9 +102,9 @@ async def mm_stream(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        conns = _connections.get(conn_key)
+        conns = _connections.get(mm_address)
         if conns:
             conns.discard(websocket)
             if not conns:
-                _connections.pop(conn_key, None)
+                _connections.pop(mm_address, None)
         logger.info("WS disconnected: %s", mm_address)

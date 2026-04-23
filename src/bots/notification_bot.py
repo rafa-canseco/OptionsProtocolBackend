@@ -28,7 +28,7 @@ def _get_positions_needing_reminder() -> list[dict]:
     result = (
         client.table("order_events")
         .select(
-            "id, user_address, vault_id, expiry, amount, strike_price, "
+            "user_address, vault_id, expiry, amount, strike_price, "
             "is_put, asset, indexed_at"
         )
         .is_("reminder_sent_at", "null")
@@ -56,19 +56,12 @@ def _get_verified_emails(wallet_addresses: list[str]) -> dict[str, str]:
     return {row["wallet_address"]: row["email"] for row in (result.data or [])}
 
 
-def _mark_reminder_sent(order_event_id: str) -> None:
+def _mark_reminder_sent(user_address: str, vault_id: int) -> None:
     now = datetime.now(timezone.utc).isoformat()
     client = get_client()
-    result = (
-        client.table("order_events")
-        .update({"reminder_sent_at": now})
-        .eq("id", order_event_id)
-        .execute()
-    )
-    if not result.data:
-        raise RuntimeError(
-            f"Reminder email mark matched no rows for order_event_id={order_event_id}"
-        )
+    client.table("order_events").update({"reminder_sent_at": now}).eq(
+        "user_address", user_address
+    ).eq("vault_id", vault_id).execute()
 
 
 def _format_strike(strike_raw: str | int) -> str:
@@ -88,7 +81,7 @@ def check_once() -> None:
         return
 
     emails_to_send: list[dict] = []
-    position_refs: list[str] = []
+    position_refs: list[tuple[str, int]] = []
 
     for pos in positions:
         wallet = pos["user_address"]
@@ -116,13 +109,12 @@ def check_once() -> None:
                 expiry_date=expiry_date,
             )
             emails_to_send.append(email_dict)
-            position_refs.append(pos["id"])
+            position_refs.append((wallet, pos["vault_id"]))
         except Exception:
             logger.exception(
-                "Failed to build reminder email for %s vault %d (order_event_id=%s)",
+                "Failed to build reminder email for %s vault %d",
                 wallet,
                 pos["vault_id"],
-                pos.get("id"),
             )
 
     if not emails_to_send:
@@ -135,37 +127,22 @@ def check_once() -> None:
         logger.exception("Reminder batch send failed")
         return
 
-    if len(results) != len(emails_to_send):
-        logger.error(
-            "Reminder batch results length mismatch: sent=%d got=%d",
-            len(emails_to_send),
-            len(results),
-        )
-
-    failed_marks: list[str] = []
-    for i, order_event_id in enumerate(position_refs):
+    for i, (wallet, vault_id) in enumerate(position_refs):
         if i < len(results) and results[i].get("id"):
             try:
-                _mark_reminder_sent(order_event_id)
+                _mark_reminder_sent(wallet, vault_id)
             except Exception:
                 logger.exception(
-                    "Failed to mark reminder_sent_at for order_event_id=%s",
-                    order_event_id,
+                    "Failed to mark reminder_sent_at for %s vault %d",
+                    wallet,
+                    vault_id,
                 )
-                failed_marks.append(order_event_id)
         else:
             logger.warning(
-                "Reminder email failed for order_event_id=%s, will retry",
-                order_event_id,
+                "Reminder email failed for %s vault %d, will retry",
+                wallet,
+                vault_id,
             )
-
-    if failed_marks:
-        logger.error(
-            "ALERT: %d reminder email(s) sent but reminder_sent_at mark failed — "
-            "duplicate emails likely on next cycle. order_event_ids=%s",
-            len(failed_marks),
-            failed_marks,
-        )
 
 
 async def run():
