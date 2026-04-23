@@ -330,17 +330,29 @@ def _db_update(user_addr: str, vault_id: int, fields: dict, context: str) -> Non
 
 
 def _db_update_by_id(order_event_id: str, fields: dict, context: str) -> None:
-    """Update a single order_events row by primary key. Logs on no-match or failure."""
+    """Update a single order_events row by primary key.
+
+    Raises on no-match so callers (e.g. dedup marking after an email was
+    already sent) treat it as a failure and can alert/retry instead of
+    silently skipping the mark.
+    """
     client = get_client()
     try:
         result = (
-            client.table("order_events").update(fields).eq("id", order_event_id).execute()
+            client.table("order_events")
+            .update(fields)
+            .eq("id", order_event_id)
+            .execute()
         )
-        if not result.data:
-            logger.warning("%s: matched no rows order_event_id=%s", context, order_event_id)
     except Exception:
-        logger.exception("%s: DB write failed order_event_id=%s", context, order_event_id)
+        logger.exception(
+            "%s: DB write failed order_event_id=%s", context, order_event_id
+        )
         raise
+    if not result.data:
+        raise RuntimeError(
+            f"{context}: matched no rows for order_event_id={order_event_id}"
+        )
 
 
 def _ensure_expiry_prices_set(expiries: set[int]) -> None:
@@ -601,10 +613,12 @@ def _prepare_settlement_email_batch(
         wallet = pos["user_address"]
         if not email_map.get(wallet):
             continue
-        vault_id = pos["vault_id"]
         if pos.get("result_sent_at"):
             logger.debug(
-                "Skipping result email for %s vault %d (already sent)", wallet, vault_id
+                "Skipping result email for %s vault %d (already sent, order_event_id=%s)",
+                wallet,
+                pos["vault_id"],
+                pos["id"],
             )
             continue
         by_wallet.setdefault(wallet, []).append(pos)
@@ -679,7 +693,15 @@ def _send_settlement_emails(
         logger.exception("Settlement result batch send failed")
         return
 
+    if len(results) != len(emails_to_send):
+        logger.error(
+            "Settlement batch results length mismatch: sent=%d got=%d",
+            len(emails_to_send),
+            len(results),
+        )
+
     now = datetime.now(timezone.utc).isoformat()
+    failed_marks: list[str] = []
     for i, refs in enumerate(position_refs):
         if i < len(results) and results[i].get("id"):
             for order_event_id in refs:
@@ -692,6 +714,20 @@ def _send_settlement_emails(
                         "Failed to mark result_sent_at for order_event_id=%s",
                         order_event_id,
                     )
+                    failed_marks.append(order_event_id)
+        else:
+            logger.warning(
+                "Settlement email send reported no id for refs=%s, will retry next cycle",
+                refs,
+            )
+
+    if failed_marks:
+        logger.error(
+            "ALERT: %d settlement email(s) sent but result_sent_at mark failed — "
+            "duplicate emails likely on next cycle. order_event_ids=%s",
+            len(failed_marks),
+            failed_marks,
+        )
 
 
 async def settle_once():

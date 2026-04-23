@@ -135,6 +135,14 @@ def check_once() -> None:
         logger.exception("Reminder batch send failed")
         return
 
+    if len(results) != len(emails_to_send):
+        logger.error(
+            "Reminder batch results length mismatch: sent=%d got=%d",
+            len(emails_to_send),
+            len(results),
+        )
+
+    failed_marks: list[str] = []
     for i, order_event_id in enumerate(position_refs):
         if i < len(results) and results[i].get("id"):
             try:
@@ -144,11 +152,20 @@ def check_once() -> None:
                     "Failed to mark reminder_sent_at for order_event_id=%s",
                     order_event_id,
                 )
+                failed_marks.append(order_event_id)
         else:
             logger.warning(
                 "Reminder email failed for order_event_id=%s, will retry",
                 order_event_id,
             )
+
+    if failed_marks:
+        logger.error(
+            "ALERT: %d reminder email(s) sent but reminder_sent_at mark failed — "
+            "duplicate emails likely on next cycle. order_event_ids=%s",
+            len(failed_marks),
+            failed_marks,
+        )
 
 
 async def run():

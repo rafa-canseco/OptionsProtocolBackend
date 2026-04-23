@@ -104,6 +104,75 @@ def test_check_once_sends_reminder():
         update_chain.eq.assert_called_once_with("id", pos["id"])
 
 
+def test_check_once_marks_each_id_when_multiple_positions():
+    """Two positions for same wallet → each reminder_sent_at mark uses its own id."""
+    pos1 = _make_position(user_address="0xabc123", id="evt-A", vault_id=1)
+    pos2 = _make_position(user_address="0xabc123", id="evt-B", vault_id=2)
+    email_row = _make_user_email("0xabc123")
+    mock_db = _mock_db([pos1, pos2], [email_row])
+
+    with (
+        patch("src.bots.notification_bot.get_client", return_value=mock_db),
+        patch("src.bots.notification_bot.send_batch") as mock_send,
+        patch("src.bots.notification_bot.build_reminder_email") as mock_build,
+    ):
+        mock_build.return_value = {
+            "to": "0xabc123@test.com",
+            "subject": "test",
+            "html": "<p>test</p>",
+        }
+        mock_send.return_value = [{"id": "sent-1"}, {"id": "sent-2"}]
+        check_once()
+        update_chain = mock_db._tables["order_events"].update.return_value
+        eq_calls = update_chain.eq.call_args_list
+        marked_ids = {call.args[1] for call in eq_calls}
+        assert marked_ids == {"evt-A", "evt-B"}
+
+
+def test_check_once_only_marks_successful_sends():
+    """Partial batch failure: only positions whose send returned an id get marked."""
+    pos1 = _make_position(user_address="0xabc123", id="evt-A", vault_id=1)
+    pos2 = _make_position(user_address="0xabc123", id="evt-B", vault_id=2)
+    email_row = _make_user_email("0xabc123")
+    mock_db = _mock_db([pos1, pos2], [email_row])
+
+    with (
+        patch("src.bots.notification_bot.get_client", return_value=mock_db),
+        patch("src.bots.notification_bot.send_batch") as mock_send,
+        patch("src.bots.notification_bot.build_reminder_email") as mock_build,
+    ):
+        mock_build.return_value = {
+            "to": "0xabc123@test.com",
+            "subject": "test",
+            "html": "<p>test</p>",
+        }
+        # First send ok, second missing id
+        mock_send.return_value = [{"id": "sent-1"}, {}]
+        check_once()
+        update_chain = mock_db._tables["order_events"].update.return_value
+        update_chain.eq.assert_called_once_with("id", "evt-A")
+
+
+def test_mark_reminder_sent_raises_on_zero_rows():
+    """_mark_reminder_sent must raise when the update matches no rows.
+
+    This is load-bearing: the caller must learn the mark did not persist so
+    the duplicate-send alert path fires instead of silently succeeding.
+    """
+    import pytest
+
+    from src.bots.notification_bot import _mark_reminder_sent
+
+    mock_db = _mock_db([], [])
+    # Materialize the order_events mock chain, then flip update data to empty
+    order_events = mock_db.table("order_events")
+    order_events.update.return_value.execute.return_value.data = []
+
+    with patch("src.bots.notification_bot.get_client", return_value=mock_db):
+        with pytest.raises(RuntimeError, match="matched no rows"):
+            _mark_reminder_sent("evt-missing")
+
+
 def test_check_once_skips_unsubscribed():
     pos = _make_position(user_address="0xabc123")
     # user has unsubscribed — _mock_db gets empty user_emails to simulate
