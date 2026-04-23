@@ -7,13 +7,14 @@ BatchSettler.incrementMakerNonce() to invalidate on-chain quotes
 signed by the operator, and deactivates ALL DB quotes (all MMs)
 as a server-side safety net.
 """
+
 import asyncio
 import logging
 import time
 
 from src.config import settings
 from src.db.database import get_client
-from src.pricing.assets import Asset
+from src.pricing.assets import get_base_assets
 from src.pricing.chainlink import get_asset_price
 from src.pricing.circuit_breaker import circuit_breaker
 from src.contracts.web3_client import (
@@ -50,11 +51,15 @@ def _has_active_non_expired_quotes() -> bool:
 
 
 def _deactivate_active_quotes() -> int:
+    """Deactivate Base-chain active quotes. Solana quotes are handled
+    by a separate circuit breaker and must not be touched here.
+    """
     client = get_client()
     result = (
         client.table("mm_quotes")
         .update({"is_active": False})
         .eq("is_active", True)
+        .eq("chain", "base")
         .execute()
     )
     return len(result.data) if result.data else 0
@@ -128,7 +133,7 @@ async def invalidate_quotes(asset: str = "all"):
 
 async def check_once():
     """Check all assets. If any trips, invalidate quotes."""
-    for asset in Asset:
+    for asset in get_base_assets():
         try:
             price, _ = get_asset_price(asset)
         except Exception:

@@ -21,7 +21,7 @@ from src.contracts.web3_client import (
     get_whitelist,
 )
 from src.db.database import get_client
-from src.pricing.assets import Asset, get_asset_config
+from src.pricing.assets import Asset, get_asset_config, get_base_assets
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
 from src.pricing.utils import strike_to_8_decimals
@@ -295,6 +295,7 @@ def _prune_near_expiry_otokens() -> None:
     result = (
         client.table("available_otokens")
         .select("id, expiry")
+        .eq("chain", "base")
         .lt("expiry", max_cutoff_ts)
         .execute()
     )
@@ -303,8 +304,7 @@ def _prune_near_expiry_otokens() -> None:
         r["id"]
         for r in rows
         if r.get("expiry") is not None
-        and r["expiry"]
-        <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
+        and r["expiry"] <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
     ]
     if prune_ids:
         client.table("available_otokens").delete().in_("id", prune_ids).execute()
@@ -353,6 +353,7 @@ def _upsert_available_otokens(
                 "expiry": spec.expiry_ts,
                 "is_put": is_put,
                 "collateral_asset": collateral,
+                "chain": "base",
             }
         )
 
@@ -394,7 +395,7 @@ async def publish_once():
 
     custom_expiries = _parse_custom_expiries()
 
-    for asset in Asset:
+    for asset in get_base_assets():
         try:
             spot, _ = get_asset_price(asset)
         except Exception:

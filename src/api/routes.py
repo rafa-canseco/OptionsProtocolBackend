@@ -10,15 +10,17 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from src.config import settings
+from src.config import settings, is_asset_tradable, is_asset_visible
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
-from src.pricing.assets import Asset
+from src.chains import Chain
+from src.chains.address import detect_chain, ETH_ADDRESS_RE, is_valid_solana_address
+from src.chains.explorer import tx_explorer_url
+from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.circuit_breaker import circuit_breaker
 
-ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -129,17 +131,27 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     cutoff = datetime.fromtimestamp(
         time.time() - _CAPACITY_STALE_SECONDS, tz=timezone.utc
     ).isoformat()
+    chain = get_chain_for_asset(asset).value
     client = get_client()
     result = (
         client.table("mm_capacity")
         .select("*")
         .eq("asset", asset.value)
+        .eq("chain", chain)
         .gte("reported_at", cutoff)
         .execute()
     )
     if result.data is None:
         raise RuntimeError("mm_capacity query returned None data")
     return result.data
+
+
+def _ensure_asset_visible(asset: Asset) -> None:
+    if not is_asset_visible(asset.value):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{asset.value.upper()} market data is not available in this environment",
+        )
 
 
 def _aggregate_capacity(rows: list[dict], asset: Asset = Asset.ETH) -> dict:
@@ -223,6 +235,7 @@ async def get_capacity(
 
     Capacity is considered stale if not reported within 120 seconds.
     """
+    _ensure_asset_visible(asset)
     try:
         rows = _fetch_capacity_rows(asset)
     except Exception:
@@ -230,6 +243,27 @@ async def get_capacity(
         raise HTTPException(502, "Capacity data unavailable")
 
     return _aggregate_capacity(rows, asset)
+
+
+def _fetch_valid_otoken_addresses(asset: Asset) -> set[str]:
+    """Return set of otoken_addresses in available_otokens for the given asset."""
+    try:
+        chain = get_chain_for_asset(asset).value
+        client = get_client()
+        result = (
+            client.table("available_otokens")
+            .select("otoken_address")
+            .eq("chain", chain)
+            .execute()
+        )
+        return {r["otoken_address"] for r in (result.data or [])}
+    except Exception:
+        logger.error(
+            "Could not fetch available_otokens for %s",
+            asset.value,
+            exc_info=True,
+        )
+        raise HTTPException(502, "Quote validation data unavailable")
 
 
 def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
@@ -243,12 +277,14 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
 
     now_ts = int(time.time())
     min_cutoff_ts = now_ts + settings.short_expiry_cutoff_hours * 3600
+    chain = get_chain_for_asset(asset).value
     client = get_client()
     result = (
         client.table("mm_quotes")
         .select("*")
         .eq("is_active", True)
         .eq("asset", asset.value)
+        .eq("chain", chain)
         .gt("deadline", now_ts + _MIN_QUOTE_TTL)
         .gt("expiry", min_cutoff_ts)
         .execute()
@@ -295,12 +331,14 @@ def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
     so callers can default position_count to 0 without surfacing the error.
     """
     now_ts = int(time.time())
+    chain = get_chain_for_asset(asset).value
     try:
         client = get_client()
         result = (
             client.table("order_events")
             .select("strike_price,is_put,expiry")
             .eq("asset", asset.value)
+            .eq("chain", chain)
             .or_("is_settled.eq.false,is_settled.is.null")
             .gt("expiry", now_ts)
             .execute()
@@ -334,16 +372,15 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
         strike = q.get("strike_price")
         expiry = q.get("expiry")
         is_put = q.get("is_put")
+        chain = q.get("chain", "base")
 
-        # Compute human-readable fields
+        # BatchSettler treats bid_price as USDC smallest units on every chain.
         premium_usd = bid_price_raw / (10**USDC_DECIMALS)
-        # Apply protocol fee (same as before: user sees net premium)
         fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
         net_premium = premium_usd * fee_mult
 
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
 
-        # Compute expiry_days (cosmetic) and expiry_date (stable)
         now_ts = int(time.time())
         expiry_days = max(1, math.ceil((expiry - now_ts) / 86400)) if expiry else 0
         expiry_date = (
@@ -352,7 +389,6 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             else None
         )
 
-        # TTL = seconds until deadline
         ttl = max(0, deadline - now_ts)
 
         from src.pricing.black_scholes import OptionType
@@ -365,9 +401,9 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             expiry_days=expiry_days,
             expiry_date=expiry_date,
             premium=net_premium,
-            delta=0,  # Not available from MM quotes
-            iv=0,  # Not available from MM quotes
-            spot=0,  # Will be enriched below if possible
+            delta=0,
+            iv=0,
+            spot=0,
             ttl=ttl,
             expires_at=float(deadline),
             available_amount=available_eth,
@@ -379,10 +415,31 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             quote_id=q["quote_id"],
             max_amount_raw=max_amount_raw,
             maker_nonce=q["maker_nonce"],
+            chain=chain,
         )
     except Exception:
-        logger.exception("Failed to convert quote to PriceResponse: %s", q.get("id"))
+        logger.exception(
+            "Failed to convert quote to PriceResponse: id=%s chain=%s",
+            q.get("id"),
+            q.get("chain", "unknown"),
+        )
         return None
+
+
+def _strip_trade_fields(pr: PriceResponse) -> PriceResponse:
+    """Drop execution-only fields for read-only assets. Returns a new copy."""
+    return pr.model_copy(
+        update={
+            "otoken_address": None,
+            "signature": None,
+            "mm_address": None,
+            "bid_price_raw": None,
+            "deadline": None,
+            "quote_id": None,
+            "max_amount_raw": None,
+            "maker_nonce": None,
+        }
+    )
 
 
 @router.get(
@@ -393,11 +450,19 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 async def get_spot(
     asset: Asset = Query(default=Asset.ETH, description="Underlying asset"),
 ):
-    """Return the live spot price from Chainlink for a given asset."""
-    from src.pricing.chainlink import get_asset_price
+    """Return the live spot price for a given asset (Chainlink or Pyth)."""
+    _ensure_asset_visible(asset)
+    chain = get_chain_for_asset(asset)
 
     try:
-        price, updated_at = get_asset_price(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
+
+            price, updated_at = get_spot_price(asset)
+        else:
+            from src.pricing.chainlink import get_asset_price
+
+            price, updated_at = get_asset_price(asset)
     except Exception:
         logger.exception("Failed to fetch %s spot price", asset.value)
         raise HTTPException(502, f"Could not fetch {asset.value.upper()} spot")
@@ -428,19 +493,50 @@ async def get_prices(
     Returns **503** only if the circuit breaker has paused pricing (>2 % move).
     Capacity status is served separately via ``GET /capacity``.
     """
-    if circuit_breaker.is_paused_for(asset.value):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
-        )
+    _ensure_asset_visible(asset)
+    tradable = is_asset_tradable(asset.value)
 
-    cache_key = asset.value
+    # Fetch spot early so we can self-heal a paused circuit breaker.
+    spot = 0.0
+    spot_ok = False
+    try:
+        chain = get_chain_for_asset(asset)
+        if chain == Chain.SOLANA:
+            from src.chains.solana.oracle import get_spot_price
+
+            spot, _ = get_spot_price(asset)
+        else:
+            from src.pricing.chainlink import get_asset_price
+
+            spot, _ = get_asset_price(asset)
+        spot_ok = True
+    except Exception:
+        logger.warning("Could not fetch spot price for enrichment", exc_info=True)
+
+    if circuit_breaker.is_paused_for(asset.value):
+        if spot_ok:
+            circuit_breaker.resume(spot, asset.value)
+            logger.info(
+                "Circuit breaker auto-resumed for %s at $%.2f",
+                asset.value,
+                spot,
+            )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
+            )
+
+    cache_key = f"{asset.value}:{'tradable' if tradable else 'readonly'}"
     now = time.monotonic()
     cached = _prices_cache.get(cache_key)
     cached_at = _prices_cached_at.get(cache_key, 0.0)
     if cached is not None and (now - cached_at) < _PRICES_TTL:
         logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
         return cached
+
+    if not spot_ok:
+        raise HTTPException(503, "Spot price unavailable")
 
     logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
@@ -454,24 +550,30 @@ async def get_prices(
         logger.info("No active quotes in mm_quotes for %s", cache_key)
         return []
 
+    # Filter quotes to only those with oTokens in available_otokens
+    valid_addrs = _fetch_valid_otoken_addresses(asset)
+    before = len(all_quotes)
+    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+    pruned = before - len(all_quotes)
+    if pruned:
+        logger.info(
+            "Filtered %d stale quotes (oToken not in available_otokens) for %s",
+            pruned,
+            cache_key,
+        )
+    if not all_quotes:
+        return []
+
     best_quotes = _best_quotes_by_otoken(all_quotes)
 
-    # Enrich with spot price if available (best effort)
-    spot = 0.0
-    try:
-        from src.pricing.chainlink import get_asset_price
-
-        spot, _ = get_asset_price(asset)
+    # Check circuit breaker with fresh spot
+    if spot_ok:
         if circuit_breaker.check(spot, asset.value):
             raise HTTPException(
                 status_code=503,
                 detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
         circuit_breaker.update_reference(spot, asset.value)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.warning("Could not fetch spot price for enrichment", exc_info=True)
 
     # Fetch position counts for social proof (best effort)
     position_counts: dict[tuple, int] = {}
@@ -489,6 +591,8 @@ async def get_prices(
         if pr is not None:
             if spot > 0:
                 pr.spot = spot
+            if not tradable:
+                pr = _strip_trade_fields(pr)
             idx = len(result)
             result.append(pr)
             is_put = pr.option_type == OptionType.PUT
@@ -621,28 +725,58 @@ def _compute_outcome(position: dict) -> str | None:
     return "Expired OTM — collateral returned"
 
 
+def _enrich_positions(positions: list[dict]) -> list[dict]:
+    """Add display fields and normalize premium field for positions."""
+    for pos in positions:
+        pos["outcome"] = _compute_outcome(pos)
+        if pos.get("net_premium") is not None:
+            pos["premium"] = pos["net_premium"]
+        url = tx_explorer_url(pos.get("tx_hash"), pos.get("chain", "base"))
+        pos["tx_url"] = url
+        pos["explorer_url"] = url
+        pos["settlement_tx_url"] = tx_explorer_url(
+            pos.get("settlement_tx_hash"),
+            pos.get("chain", "base"),
+        )
+        pos["delivery_tx_url"] = tx_explorer_url(
+            pos.get("delivery_tx_hash"),
+            pos.get("chain", "base"),
+        )
+    return positions
+
+
 @router.get(
     "/positions/{address}",
     tags=["Positions"],
     summary="Get positions for a wallet",
 )
 async def get_positions(address: str, request: Request):
-    """Return all option positions for the given Ethereum address.
+    """Return all option positions for the given wallet address.
 
-    Data comes from on-chain `OrderExecuted` events indexed into Supabase.
+    Accepts both EVM (0x hex) and Solana (base58) addresses.
+    Data comes from on-chain events indexed into Supabase.
     Each position includes strike, expiry, premium paid, settlement status,
     and a human-readable `outcome` field for settled positions.
     """
     _check_read_rate_limit(_get_client_ip(request))
-    if not ETH_ADDRESS_RE.match(address):
-        raise HTTPException(status_code=400, detail="Invalid Ethereum address")
+
+    try:
+        chain = detect_chain(address)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid address. Expected 0x hex (Base) or base58 (Solana).",
+        )
+
+    addr_normalized = address.lower() if chain == Chain.BASE else address
 
     try:
         client = get_client()
         result = (
             client.table("order_events")
             .select("*")
-            .eq("user_address", address.lower())
+            .eq("user_address", addr_normalized)
+            .eq("chain", chain.value)
             .order("indexed_at", desc=True)
             .execute()
         )
@@ -650,14 +784,7 @@ async def get_positions(address: str, request: Request):
         logger.exception(f"Failed to fetch positions for {address}")
         raise HTTPException(status_code=502, detail="Could not fetch positions")
 
-    positions = result.data or []
-    for pos in positions:
-        pos["outcome"] = _compute_outcome(pos)
-        # Frontend sees net_premium as "premium". Fall back to premium
-        # for old rows that predate the fee columns.
-        if pos.get("net_premium") is not None:
-            pos["premium"] = pos["net_premium"]
-    return positions
+    return _enrich_positions(result.data or [])
 
 
 class GroupPositionsRequest(BaseModel):
@@ -688,6 +815,11 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         raise HTTPException(400, "group_id must be a valid UUID")
 
     if not ETH_ADDRESS_RE.match(body.user_address):
+        if is_valid_solana_address(body.user_address):
+            raise HTTPException(
+                400,
+                "Position grouping is not yet supported for Solana",
+            )
         raise HTTPException(400, "Invalid user_address")
 
     for tx in body.tx_hashes:
@@ -726,3 +858,169 @@ async def group_positions(body: GroupPositionsRequest, request: Request):
         )
 
     return {"grouped": updated, "group_id": body.group_id}
+
+
+# ── Cross-chain endpoints ─────────────────────────────────────────
+
+
+@router.get(
+    "/positions",
+    tags=["Positions"],
+    summary="Get positions by Privy user ID (cross-chain)",
+)
+async def get_positions_by_user(
+    request: Request,
+    user_id: str = Query(..., description="Privy user ID"),
+    base_address: str | None = Query(None, description="User's Base wallet address"),
+    solana_address: str | None = Query(
+        None, description="User's Solana wallet address"
+    ),
+):
+    """Return positions across both chains for a Privy user.
+
+    The frontend passes the user's wallet addresses per chain
+    (from Privy). Returns a unified list with a `chain` field
+    on each position.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if not base_address and not solana_address:
+        raise HTTPException(
+            400, "At least one of base_address or solana_address is required"
+        )
+
+    client = get_client()
+    positions: list[dict] = []
+    errors: list[dict] = []
+
+    if base_address:
+        if not ETH_ADDRESS_RE.match(base_address):
+            raise HTTPException(400, "Invalid base_address")
+        try:
+            result = (
+                client.table("order_events")
+                .select("*")
+                .eq("user_address", base_address.lower())
+                .eq("chain", "base")
+                .order("indexed_at", desc=True)
+                .execute()
+            )
+            positions.extend(_enrich_positions(result.data or []))
+        except Exception:
+            logger.exception("Failed to fetch Base positions for %s", user_id)
+            errors.append({"chain": "base", "message": "Could not load Base positions"})
+
+    if solana_address:
+        if not is_valid_solana_address(solana_address):
+            raise HTTPException(400, "Invalid solana_address")
+        try:
+            result = (
+                client.table("order_events")
+                .select("*")
+                .eq("user_address", solana_address)
+                .eq("chain", "solana")
+                .order("indexed_at", desc=True)
+                .execute()
+            )
+            positions.extend(_enrich_positions(result.data or []))
+        except Exception:
+            logger.exception("Failed to fetch Solana positions for %s", user_id)
+            errors.append(
+                {
+                    "chain": "solana",
+                    "message": "Could not load Solana positions",
+                }
+            )
+
+    if not positions and errors:
+        raise HTTPException(502, "Could not fetch positions from any chain")
+
+    return {"positions": positions, "errors": errors}
+
+
+@router.get(
+    "/balances/{user_id}",
+    tags=["Positions"],
+    summary="Get cross-chain token balances for a user",
+)
+async def get_balances(
+    user_id: str,
+    request: Request,
+    base_address: str | None = Query(None, description="User's Base wallet address"),
+    solana_address: str | None = Query(
+        None, description="User's Solana wallet address"
+    ),
+):
+    """Read token balances on both chains for a Privy user.
+
+    Returns balances in raw token units. The frontend converts
+    to human-readable amounts using known decimals.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+
+    if not base_address and not solana_address:
+        raise HTTPException(
+            400, "At least one of base_address or solana_address is required"
+        )
+
+    balances: dict = {}
+    errors: list[dict] = []
+
+    if base_address:
+        if not ETH_ADDRESS_RE.match(base_address):
+            raise HTTPException(400, "Invalid base_address")
+        try:
+            from src.chains.base.client import get_balance, get_eth_balance
+
+            balances["base"] = {
+                "usdc": str(get_balance(base_address, settings.usdc_address)),
+                "weth": str(get_balance(base_address, settings.weth_address)),
+                "eth": str(get_eth_balance(base_address)),
+            }
+        except Exception:
+            logger.exception("Failed to read Base balances for %s", base_address)
+            errors.append(
+                {
+                    "chain": "base",
+                    "message": "Could not read Base balances",
+                }
+            )
+
+    if solana_address:
+        if not is_valid_solana_address(solana_address):
+            raise HTTPException(400, "Invalid solana_address")
+        try:
+            from src.chains.solana.client import (
+                get_balance as sol_get_balance,
+                get_sol_balance,
+            )
+
+            sol_balances: dict[str, str] = {
+                "sol": str(get_sol_balance(solana_address)),
+            }
+            if settings.solana_usdc_mint:
+                sol_balances["usdc"] = str(
+                    sol_get_balance(solana_address, settings.solana_usdc_mint)
+                )
+            if settings.solana_wsol_mint:
+                sol_balances["wsol"] = str(
+                    sol_get_balance(solana_address, settings.solana_wsol_mint)
+                )
+            if settings.solana_tslax_mint and is_asset_visible("tslax"):
+                sol_balances["tslax"] = str(
+                    sol_get_balance(solana_address, settings.solana_tslax_mint)
+                )
+            balances["solana"] = sol_balances
+        except Exception:
+            logger.exception("Failed to read Solana balances for %s", solana_address)
+            errors.append(
+                {
+                    "chain": "solana",
+                    "message": "Could not read Solana balances",
+                }
+            )
+
+    if not balances and errors:
+        raise HTTPException(502, "Could not read balances from any chain")
+
+    return {"balances": balances, "errors": errors}
