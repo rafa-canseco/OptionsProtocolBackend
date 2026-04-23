@@ -1,7 +1,11 @@
+import functools
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    app_env: str = "dev"
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
@@ -32,6 +36,13 @@ class Settings(BaseSettings):
 
     # Pricing defaults
     risk_free_rate: float = 0.05  # 5% annualized
+
+    # Asset/chain exposure controls.
+    # Visible = endpoints may return read-only market data.
+    # Tradable = backend may return execution data or submit trades.
+    visible_assets: str = "eth,btc,sol,tslax"
+    tradable_assets: Optional[str] = None
+    tradable_chains: Optional[str] = None
 
     # Bot intervals
     otoken_publish_interval_seconds: int = 300  # 5 minutes
@@ -79,8 +90,70 @@ class Settings(BaseSettings):
     # Whitelist (for whitelisting oTokens after creation)
     whitelist_address: str = ""
 
-    # Chain
+    # Base chain
     chain_id: int = 8453  # Base mainnet
+
+    # ── Solana ──
+    solana_rpc_url: str = ""
+    solana_wss_rpc_url: str = ""
+    solana_operator_keypair: str = ""  # base58 private key or path to JSON
+
+    # Solana program IDs
+    solana_batch_settler_program_id: str = ""
+    solana_controller_program_id: str = ""
+    solana_oracle_program_id: str = ""
+    solana_otoken_factory_program_id: str = ""
+    solana_margin_pool_program_id: str = ""
+    solana_whitelist_program_id: str = ""
+    solana_address_book_program_id: str = ""
+
+    # Solana token mints
+    solana_usdc_mint: str = ""
+    solana_wsol_mint: str = "So11111111111111111111111111111111111111112"
+    solana_tslax_mint: str = "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
+
+    # Pyth oracle
+    solana_pyth_receiver_program: str = ""
+
+    # Solana chain ID (for display only)
+    solana_cluster: str = "devnet"
+
+    # Solana runtime gates.
+    # API/read-only exposure is controlled by has_solana_config() plus route-level checks.
+    # Background bot runtime is controlled separately so production can stay read-only by default.
+    solana_bots_enabled: Optional[bool] = None
+    solana_circuit_breaker_bot_enabled: Optional[bool] = None
+    solana_event_indexer_enabled: Optional[bool] = None
+    solana_expiry_settler_enabled: Optional[bool] = None
+    solana_otoken_manager_enabled: Optional[bool] = None
+
+    # ── CCTP V2 (Cross-Chain Transfer Protocol) ──
+    # Attestation API — sandbox for testnet, production for mainnet
+    cctp_attestation_api_url: str = ""  # set by has_bridge_config default
+
+    # Base CCTP V2 contract addresses
+    cctp_base_message_transmitter: str = ""
+    cctp_base_token_messenger: str = ""
+    cctp_base_domain: int = 6
+
+    # Solana CCTP V2 program IDs (same mainnet/devnet)
+    cctp_solana_message_transmitter: str = (
+        "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC"
+    )
+    cctp_solana_token_messenger: str = "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe"
+    cctp_solana_domain: int = 5
+
+    # Solana USDC mint (mainnet)
+    cctp_solana_usdc_mint: str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+    # Relayer wallets (separate from operator — only for gas)
+    relayer_base_private_key: str = ""
+    relayer_solana_keypair: str = ""
+
+    # Relayer tuning
+    cctp_attestation_poll_interval: int = 3
+    cctp_attestation_timeout: int = 300
+    cctp_trade_max_retries: int = 3
 
     # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
     allowed_origins: str = "*"
@@ -107,3 +180,110 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+@functools.lru_cache(maxsize=None)
+def _parse_allowlist(raw: str) -> set[str]:
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _default_tradable_assets() -> str:
+    if settings.app_env.lower() == "production":
+        return "eth,btc"
+    return "eth,btc,sol,tslax"
+
+
+def _default_tradable_chains() -> str:
+    if settings.app_env.lower() == "production":
+        return "base"
+    return "base,solana"
+
+
+def get_tradable_assets_allowlist() -> set[str]:
+    return _parse_allowlist(settings.tradable_assets or _default_tradable_assets())
+
+
+def get_tradable_chains_allowlist() -> set[str]:
+    return _parse_allowlist(settings.tradable_chains or _default_tradable_chains())
+
+
+def is_asset_visible(asset: str) -> bool:
+    return asset.lower() in _parse_allowlist(settings.visible_assets)
+
+
+def is_asset_tradable(asset: str) -> bool:
+    return asset.lower() in get_tradable_assets_allowlist()
+
+
+def is_chain_tradable(chain: str) -> bool:
+    return chain.lower() in get_tradable_chains_allowlist()
+
+
+def get_cctp_attestation_url() -> str:
+    """Return the Circle attestation API URL, defaulting by beta_mode."""
+    if settings.cctp_attestation_api_url:
+        return settings.cctp_attestation_api_url
+    if settings.beta_mode:
+        return "https://iris-api-sandbox.circle.com"
+    return "https://iris-api.circle.com"
+
+
+def has_bridge_config() -> bool:
+    """True when CCTP relayer wallets + contracts are configured."""
+    return bool(
+        settings.cctp_base_message_transmitter
+        and settings.cctp_base_token_messenger
+        and (settings.relayer_base_private_key or settings.relayer_solana_keypair)
+    )
+
+
+def has_solana_config() -> bool:
+    """True when Solana RPC + operator + core programs are configured."""
+    return bool(
+        settings.solana_rpc_url
+        and settings.solana_operator_keypair
+        and settings.solana_batch_settler_program_id
+        and settings.solana_otoken_factory_program_id
+    )
+
+
+def _solana_bots_default_enabled() -> bool:
+    """Enable Solana runtime by default outside production."""
+    return settings.app_env.lower() != "production"
+
+
+def has_solana_runtime_enabled() -> bool:
+    """True when Solana background runtime is enabled for this environment."""
+    if settings.solana_bots_enabled is not None:
+        return settings.solana_bots_enabled
+    return _solana_bots_default_enabled()
+
+
+def is_solana_bot_enabled(bot_name: str) -> bool:
+    """Return whether an individual Solana bot should run."""
+    overrides = {
+        "circuit_breaker": settings.solana_circuit_breaker_bot_enabled,
+        "event_indexer": settings.solana_event_indexer_enabled,
+        "expiry_settler": settings.solana_expiry_settler_enabled,
+        "otoken_manager": settings.solana_otoken_manager_enabled,
+    }
+    if bot_name not in overrides:
+        raise ValueError(f"Unknown Solana bot: {bot_name}")
+
+    override = overrides[bot_name]
+    if override is not None:
+        return override
+    return has_solana_runtime_enabled()
+
+
+def has_enabled_solana_bots() -> bool:
+    """True when at least one Solana bot is enabled after applying overrides."""
+    return any(
+        is_solana_bot_enabled(bot_name)
+        for bot_name in (
+            "circuit_breaker",
+            "event_indexer",
+            "expiry_settler",
+            "otoken_manager",
+        )
+    )
