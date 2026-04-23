@@ -112,3 +112,20 @@ def test_otoken_specs_strikes_around_spot():
     # At least 5 base + extras from min_otm_per_side
     assert len(strikes) >= 5
     assert len(specs) == len(strikes) * 2  # each strike has call + put
+
+
+def test_generate_strikes_tslax_step_5():
+    """TSLAx uses $5 standard step and $2.50 daily step."""
+    strikes = generate_strikes(180.0, step=5.0, num_strikes=5, min_otm_per_side=0)
+    assert len(strikes) == 5
+    for i in range(1, len(strikes)):
+        assert strikes[i] - strikes[i - 1] == 5.0
+    assert 180.0 in strikes
+
+
+def test_generate_strikes_tslax_daily_step_fractional():
+    """Half-dollar step must round correctly, not collapse to 0."""
+    strikes = generate_strikes(182.25, step=2.5, num_strikes=5, min_otm_per_side=0)
+    assert len(strikes) == 5
+    diffs = {strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1)}
+    assert diffs == {2.5}

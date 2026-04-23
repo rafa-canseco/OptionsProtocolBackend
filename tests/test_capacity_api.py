@@ -61,6 +61,45 @@ class TestPostCapacity:
         assert row["mm_address"] == MM_ADDRESS.lower()
         assert row["capacity_eth"] == 10.5
         assert row["status"] == "active"
+        assert row["chain"] == "base"
+
+    def test_sol_capacity_derives_solana_chain(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"mm_address": MM_ADDRESS}]
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "sol",
+                "capacity_eth": 100.0,
+                "capacity_usd": 8500.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        row = mock_db.table.return_value.upsert.call_args[0][0]
+        assert row["asset"] == "sol"
+        assert row["chain"] == "solana"
+
+    def test_tslax_capacity_derives_solana_chain(self, auth_headers, mock_db):
+        mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
+            data=[{"mm_address": MM_ADDRESS}]
+        )
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "tslax",
+                "capacity_eth": 100.0,
+                "capacity_usd": 18000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        row = mock_db.table.return_value.upsert.call_args[0][0]
+        assert row["asset"] == "tslax"
+        assert row["chain"] == "solana"
 
     def test_accepts_internal_mm_fields(self, auth_headers, mock_db):
         mock_db.table.return_value.upsert.return_value.execute.return_value = MagicMock(
@@ -108,6 +147,45 @@ class TestPostCapacity:
         )
         assert resp.status_code == 422
 
+    def test_rejects_invalid_status_for_tslax(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "tslax",
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "bogus",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_negative_capacity_for_tslax(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "tslax",
+                "capacity_eth": -0.5,
+                "capacity_usd": 500.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_unknown_asset(self, auth_headers, mock_db):
+        resp = client.post(
+            "/mm/capacity",
+            json={
+                "asset": "doge",
+                "capacity_eth": 1.0,
+                "capacity_usd": 2000.0,
+                "status": "active",
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
     def test_db_failure_returns_502(self, auth_headers, mock_db):
         mock_db.table.return_value.upsert.return_value.execute.side_effect = Exception(
             "DB down"
@@ -125,8 +203,8 @@ class TestPostCapacity:
 
 
 def _capacity_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().gte().execute()"""
-    return mock_table.select.return_value.eq.return_value.gte.return_value.execute
+    """Wire up the mock chain: .select().eq().eq().gte().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute
 
 
 class TestGetCapacity:
@@ -347,20 +425,33 @@ class TestGetCapacityErrors:
 
 
 def _position_count_mock_chain(mock_table):
-    """Wire up the mock chain: .select().eq().or_().gt().execute()"""
-    return (
-        mock_table.select.return_value.eq.return_value.or_.return_value.gt.return_value.execute
-    )
+    """Wire up: .select().eq().eq().or_().gt().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.or_.return_value.gt.return_value.execute
 
 
 def _quotes_mock_chain(mock_table):
-    """Wire up the mm_quotes mock chain: .select().eq().eq().gt().gt().execute()"""
-    return (
-        mock_table.select.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
-    )
+    """Wire up: .select().eq().eq().eq().gt().gt().execute()"""
+    return mock_table.select.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.gt.return_value.execute
 
 
-def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> dict:
+def _available_otokens_mock_chain(mock_table):
+    """Wire up: .select().eq().execute()"""
+    return mock_table.select.return_value.eq.return_value.execute
+
+
+FAKE_OTOKEN_ADDR = "0x" + "a" * 40
+FAKE_SOL_OTOKEN_ADDR = "So11111111111111111111111111111111111111112"
+
+
+def _make_quote(
+    strike_usd: float,
+    is_put: bool,
+    expiry: int = 9999999999,
+    *,
+    asset: str = "eth",
+    chain: str = "base",
+    otoken_address: str = FAKE_OTOKEN_ADDR,
+) -> dict:
     """Build a minimal valid mm_quotes row for testing."""
     import time
 
@@ -371,14 +462,18 @@ def _make_quote(strike_usd: float, is_put: bool, expiry: int = 9999999999) -> di
         "strike_price": strike_usd,
         "expiry": expiry,
         "is_put": is_put,
-        "otoken_address": "0x" + "a" * 40,
+        "otoken_address": otoken_address,
         "signature": "0x" + "b" * 130,
         "mm_address": "0x" + "c" * 40,
         "quote_id": "1",
         "maker_nonce": 0,
-        "asset": "eth",
+        "asset": asset,
+        "chain": chain,
         "is_active": True,
     }
+
+
+_VALID_OTOKENS_RESULT = MagicMock(data=[{"otoken_address": FAKE_OTOKEN_ADDR}])
 
 
 class TestPositionCounts:
@@ -405,6 +500,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -413,13 +512,56 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
         items = resp.json()
         assert len(items) == 1
         assert items[0]["position_count"] == 0
+
+    def test_tslax_prices_use_solana_routing(self, mock_db):
+        """TSLAx prices read Solana quotes and enrich with Pyth spot."""
+        quote = _make_quote(
+            180.0,
+            False,
+            asset="tslax",
+            chain="solana",
+            otoken_address=FAKE_SOL_OTOKEN_ADDR,
+        )
+        quotes_result = MagicMock(data=[quote])
+        positions_result = MagicMock(data=[])
+        valid_otokens = MagicMock(data=[{"otoken_address": FAKE_SOL_OTOKEN_ADDR}])
+
+        def side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = quotes_result
+            elif table_name == "order_events":
+                _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(mock_table).return_value = valid_otokens
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+
+        with self._prices_cb_patch() as mock_cb:
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            self._clear_cache()
+            with patch(
+                "src.chains.solana.oracle.get_spot_price",
+                return_value=(180.25, 1_700_000_000),
+            ):
+                resp = client.get("/prices?asset=tslax")
+
+        assert resp.status_code == 200, resp.text
+        items = resp.json()
+        assert len(items) == 1
+        assert items[0]["chain"] == "solana"
+        assert items[0]["spot"] == 180.25
 
     def test_position_count_applies_multiplier(self, mock_db):
         """1 active position → position_count == ACTIVITY_MULTIPLIER (3)."""
@@ -439,6 +581,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -447,7 +593,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -465,7 +613,13 @@ class TestPositionCounts:
             if table_name == "mm_quotes":
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
-                _position_count_mock_chain(mock_table).side_effect = Exception("DB down")
+                _position_count_mock_chain(mock_table).side_effect = Exception(
+                    "DB down"
+                )
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -474,7 +628,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -497,6 +653,10 @@ class TestPositionCounts:
                 # Verify the query chain includes is_settled=False filter
                 chain = _position_count_mock_chain(mock_table)
                 chain.return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -505,7 +665,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -514,7 +676,9 @@ class TestPositionCounts:
 
         # Verify the order_events table was queried at all
         order_events_calls = [
-            call for call in mock_db.table.call_args_list if call[0][0] == "order_events"
+            call
+            for call in mock_db.table.call_args_list
+            if call[0][0] == "order_events"
         ]
         assert len(order_events_calls) >= 1
 
@@ -538,6 +702,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -546,13 +714,14 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
         items = resp.json()
         assert items[0]["position_count"] == 2 * routes_mod.ACTIVITY_MULTIPLIER
-
 
     def test_orphan_positions_roll_into_nearest_visible_expiry(self, mock_db):
         """Positions from a non-visible expiry roll into nearest visible expiry."""
@@ -571,6 +740,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -579,7 +752,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
@@ -601,6 +776,10 @@ class TestPositionCounts:
                 _quotes_mock_chain(mock_table).return_value = quotes_result
             elif table_name == "order_events":
                 _position_count_mock_chain(mock_table).return_value = positions_result
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
             return mock_table
 
         mock_db.table.side_effect = side_effect
@@ -609,7 +788,9 @@ class TestPositionCounts:
             mock_cb.is_paused_for.return_value = False
             mock_cb.check.return_value = False
             self._clear_cache()
-            with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            with patch(
+                "src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)
+            ):
                 resp = client.get("/prices")
 
         assert resp.status_code == 200
