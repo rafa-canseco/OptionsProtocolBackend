@@ -25,6 +25,7 @@ from src.contracts.web3_client import (
     get_operator_account,
     build_and_send_tx,
 )
+from src.chains import Chain
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.chainlink import get_asset_price_raw
 from src.notifications.email import (
@@ -369,6 +370,8 @@ def _ensure_expiry_prices_set(expiries: set[int]) -> None:
 
     for asset in Asset:
         cfg = get_asset_config(asset)
+        if cfg.chain != Chain.BASE:
+            continue
         underlying = Web3.to_checksum_address(cfg.underlying_address)
 
         try:

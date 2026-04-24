@@ -15,6 +15,7 @@ from src.bots.expiry_settler import (
     _beta_compute_max_collateral_put,
     _compute_contra_amount,
     _compute_min_amount_out,
+    _ensure_expiry_prices_set,
     _physical_redeem_with_retry,
     _post_settle_sweep,
     _reconcile_settled_on_chain,
@@ -674,3 +675,44 @@ class TestReconcileSettledOnChain:
 
         assert len(result) == 1
         assert result[0]["user_address"] == "0xunsettled"
+
+
+class TestEnsureExpiryPricesSetSkipsNonEvmAssets:
+    """Solana assets must be skipped: the EVM Oracle has no price feed for
+    them and Web3.to_checksum_address rejects their base58 mint addresses."""
+
+    def test_skips_solana_assets_without_calling_to_checksum(self):
+        from src.chains import Chain
+        from src.pricing.assets import Asset
+
+        seen_assets: list[Asset] = []
+
+        def fake_price_raw(asset):
+            seen_assets.append(asset)
+            return 230000000000, 8, 1777017500
+
+        mock_oracle = MagicMock()
+        finalized_call = MagicMock()
+        finalized_call.call.return_value = (0, False)
+        mock_oracle.functions.getExpiryPrice.return_value = finalized_call
+        set_call = MagicMock()
+        mock_oracle.functions.setExpiryPrice.return_value = set_call
+
+        with (
+            patch("src.bots.expiry_settler.get_oracle", return_value=mock_oracle),
+            patch("src.bots.expiry_settler.get_operator_account"),
+            patch(
+                "src.bots.expiry_settler.get_asset_price_raw",
+                side_effect=fake_price_raw,
+            ),
+            patch(
+                "src.bots.expiry_settler.build_and_send_tx", return_value="0xdeadbeef"
+            ),
+        ):
+            _ensure_expiry_prices_set({1777017600})
+
+        assert seen_assets, "expected at least one EVM asset iteration"
+        for a in seen_assets:
+            from src.pricing.assets import get_asset_config
+
+            assert get_asset_config(a).chain == Chain.BASE
