@@ -83,6 +83,22 @@ def _inject_unsubscribe_url(html: str, wallet_address: str) -> str:
     return html.replace("{unsubscribe_url}", url)
 
 
+def _normalize_batch_response(response: object) -> list[dict]:
+    """Return the per-email list from a resend.Batch.send response.
+
+    resend>=2.26 returns a TypedDict {"data": [...], "http_headers": {...}}.
+    Earlier versions returned a bare list. Accept both.
+    """
+    if isinstance(response, list):
+        return response
+    if isinstance(response, dict) and isinstance(response.get("data"), list):
+        return response["data"]
+    raise TypeError(
+        f"resend.Batch.send returned unexpected type "
+        f"{type(response).__name__}: {response!r}"
+    )
+
+
 def send_batch(emails: list[dict]) -> list[dict]:
     """Send a batch of emails via Resend.
 
@@ -97,6 +113,7 @@ def send_batch(emails: list[dict]) -> list[dict]:
         return []
 
     all_results: list[dict] = []
+    total_errors = 0
     for i in range(0, len(emails), 100):
         chunk = emails[i : i + 100]
         params_list: list[resend.Emails.SendParams] = [
@@ -109,15 +126,22 @@ def send_batch(emails: list[dict]) -> list[dict]:
             }
             for e in chunk
         ]
-        results = resend.Batch.send(params_list)
-        if not isinstance(results, list):
-            raise TypeError(
-                f"resend.Batch.send returned unexpected type "
-                f"{type(results).__name__}: {results!r}"
-            )
-        all_results.extend(results)
+        response = resend.Batch.send(params_list)
+        chunk_results = _normalize_batch_response(response)
+        all_results.extend(chunk_results)
+        if isinstance(response, dict):
+            errors = response.get("errors")
+            if isinstance(errors, list):
+                total_errors += len(errors)
 
-    logger.info("Batch email sent: %d emails", len(all_results))
+    if total_errors:
+        logger.warning(
+            "Batch email sent: %d emails, %d validation error(s)",
+            len(all_results),
+            total_errors,
+        )
+    else:
+        logger.info("Batch email sent: %d emails", len(all_results))
     return all_results
 
 

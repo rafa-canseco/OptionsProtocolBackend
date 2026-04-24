@@ -1,6 +1,8 @@
 import urllib.parse
 from unittest.mock import patch
 
+import pytest
+
 from src.notifications.email import (
     send_verification_email,
     send_batch,
@@ -110,6 +112,56 @@ def test_send_batch_calls_resend_batch():
         results = send_batch(emails)
         mock_resend.Batch.send.assert_called_once()
         assert len(results) == 2
+
+
+def test_send_batch_accepts_response_dict_shape():
+    """resend>=2.26 returns {'data': [...], 'http_headers': {...}}."""
+    emails = [
+        {"to": "a@b.com", "subject": "test", "html": "<p>hi</p>"},
+        {"to": "c@d.com", "subject": "test2", "html": "<p>hi2</p>"},
+    ]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {
+            "data": [{"id": "id1"}, {"id": "id2"}],
+            "http_headers": {
+                "x-resend-daily-quota": "0",
+                "x-resend-monthly-quota": "32",
+            },
+        }
+        results = send_batch(emails)
+        assert results == [{"id": "id1"}, {"id": "id2"}]
+
+
+def test_send_batch_chunks_and_accepts_mixed_shapes():
+    """Chunks past the first must not be aborted by a successful response."""
+    emails = [
+        {"to": f"u{i}@b.com", "subject": "s", "html": "<p>h</p>"} for i in range(150)
+    ]
+    with patch("src.notifications.email.resend") as mock_resend:
+        first_chunk = {"data": [{"id": f"id{i}"} for i in range(100)]}
+        second_chunk = {"data": [{"id": f"id{i}"} for i in range(100, 150)]}
+        mock_resend.Batch.send.side_effect = [first_chunk, second_chunk]
+        results = send_batch(emails)
+        assert mock_resend.Batch.send.call_count == 2
+        assert len(results) == 150
+        assert results[0] == {"id": "id0"}
+        assert results[-1] == {"id": "id149"}
+
+
+def test_send_batch_rejects_unexpected_shape():
+    emails = [{"to": "a@b.com", "subject": "s", "html": "<p>h</p>"}]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = 42
+        with pytest.raises(TypeError, match="unexpected type"):
+            send_batch(emails)
+
+
+def test_send_batch_rejects_dict_without_data_list():
+    emails = [{"to": "a@b.com", "subject": "s", "html": "<p>h</p>"}]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {"http_headers": {}}
+        with pytest.raises(TypeError, match="unexpected type"):
+            send_batch(emails)
 
 
 def test_unsubscribe_token_roundtrip():
