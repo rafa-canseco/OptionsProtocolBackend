@@ -87,16 +87,25 @@ def _normalize_batch_response(response: object) -> list[dict]:
     """Return the per-email list from a resend.Batch.send response.
 
     resend>=2.26 returns a TypedDict {"data": [...], "http_headers": {...}}.
-    Earlier versions returned a bare list. Accept both.
+    Earlier versions returned a bare list. Accept both, and validate that
+    every item is a dict so callers can safely call .get("id") downstream.
     """
     if isinstance(response, list):
-        return response
-    if isinstance(response, dict) and isinstance(response.get("data"), list):
-        return response["data"]
-    raise TypeError(
-        f"resend.Batch.send returned unexpected type "
-        f"{type(response).__name__}: {response!r}"
-    )
+        items = response
+    elif isinstance(response, dict) and isinstance(response.get("data"), list):
+        items = response["data"]
+    else:
+        raise TypeError(
+            f"resend.Batch.send returned unexpected type "
+            f"{type(response).__name__}: {response!r}"
+        )
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"resend.Batch.send returned a non-dict item at index {i}: "
+                f"{type(item).__name__}: {item!r}"
+            )
+    return items
 
 
 def send_batch(emails: list[dict]) -> list[dict]:
@@ -113,7 +122,7 @@ def send_batch(emails: list[dict]) -> list[dict]:
         return []
 
     all_results: list[dict] = []
-    total_errors = 0
+    all_errors: list = []
     for i in range(0, len(emails), 100):
         chunk = emails[i : i + 100]
         params_list: list[resend.Emails.SendParams] = [
@@ -132,13 +141,14 @@ def send_batch(emails: list[dict]) -> list[dict]:
         if isinstance(response, dict):
             errors = response.get("errors")
             if isinstance(errors, list):
-                total_errors += len(errors)
+                all_errors.extend(errors)
 
-    if total_errors:
+    if all_errors:
         logger.warning(
-            "Batch email sent: %d emails, %d validation error(s)",
+            "Batch email sent: %d emails, %d validation error(s): %r",
             len(all_results),
-            total_errors,
+            len(all_errors),
+            all_errors,
         )
     else:
         logger.info("Batch email sent: %d emails", len(all_results))

@@ -1,3 +1,4 @@
+import logging
 import urllib.parse
 from unittest.mock import patch
 
@@ -132,20 +133,51 @@ def test_send_batch_accepts_response_dict_shape():
         assert results == [{"id": "id1"}, {"id": "id2"}]
 
 
-def test_send_batch_chunks_and_accepts_mixed_shapes():
-    """Chunks past the first must not be aborted by a successful response."""
+def test_send_batch_chunks_mixing_legacy_list_and_response_dict():
+    """Two chunks, one returning a list (legacy) and one a dict (current)."""
     emails = [
         {"to": f"u{i}@b.com", "subject": "s", "html": "<p>h</p>"} for i in range(150)
     ]
     with patch("src.notifications.email.resend") as mock_resend:
-        first_chunk = {"data": [{"id": f"id{i}"} for i in range(100)]}
-        second_chunk = {"data": [{"id": f"id{i}"} for i in range(100, 150)]}
-        mock_resend.Batch.send.side_effect = [first_chunk, second_chunk]
+        legacy_chunk = [{"id": f"id{i}"} for i in range(100)]
+        current_chunk = {"data": [{"id": f"id{i}"} for i in range(100, 150)]}
+        mock_resend.Batch.send.side_effect = [legacy_chunk, current_chunk]
         results = send_batch(emails)
         assert mock_resend.Batch.send.call_count == 2
         assert len(results) == 150
         assert results[0] == {"id": "id0"}
         assert results[-1] == {"id": "id149"}
+
+
+def test_send_batch_accepts_empty_data_list():
+    """Empty data list is valid (no-op batch) and logs INFO, not WARNING."""
+    emails = [{"to": "a@b.com", "subject": "s", "html": "<p>h</p>"}]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {"data": []}
+        results = send_batch(emails)
+        assert results == []
+
+
+def test_send_batch_logs_validation_errors(caplog):
+    """Permissive-mode errors must surface in logs with their payload."""
+    emails = [
+        {"to": "a@b.com", "subject": "s", "html": "<p>h</p>"},
+        {"to": "bad", "subject": "s", "html": "<p>h</p>"},
+    ]
+    errors_payload = [{"index": 1, "message": "invalid email"}]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {
+            "data": [{"id": "id1"}],
+            "errors": errors_payload,
+        }
+        with caplog.at_level(logging.WARNING, logger="src.notifications.email"):
+            results = send_batch(emails)
+        assert results == [{"id": "id1"}]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        msg = warnings[0].getMessage()
+        assert "1 validation error(s)" in msg
+        assert "invalid email" in msg
 
 
 def test_send_batch_rejects_unexpected_shape():
@@ -161,6 +193,32 @@ def test_send_batch_rejects_dict_without_data_list():
     with patch("src.notifications.email.resend") as mock_resend:
         mock_resend.Batch.send.return_value = {"http_headers": {}}
         with pytest.raises(TypeError, match="unexpected type"):
+            send_batch(emails)
+
+
+@pytest.mark.parametrize(
+    "bad_data",
+    [None, "foo", {"id": "x"}, 42],
+    ids=["none", "string", "dict", "int"],
+)
+def test_send_batch_rejects_dict_with_non_list_data(bad_data):
+    """`data` present but not a list must still raise."""
+    emails = [{"to": "a@b.com", "subject": "s", "html": "<p>h</p>"}]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {"data": bad_data}
+        with pytest.raises(TypeError, match="unexpected type"):
+            send_batch(emails)
+
+
+def test_send_batch_rejects_non_dict_items_in_data():
+    """Items in `data` must be dicts so callers can safely call .get('id')."""
+    emails = [
+        {"to": "a@b.com", "subject": "s", "html": "<p>h</p>"},
+        {"to": "b@b.com", "subject": "s", "html": "<p>h</p>"},
+    ]
+    with patch("src.notifications.email.resend") as mock_resend:
+        mock_resend.Batch.send.return_value = {"data": [{"id": "id1"}, None]}
+        with pytest.raises(TypeError, match="non-dict item at index 1"):
             send_batch(emails)
 
 
