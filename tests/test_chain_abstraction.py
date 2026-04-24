@@ -95,20 +95,28 @@ class TestAssetConfig:
             get_asset_config("fake")  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_tslax_uses_iv_fallback(self, caplog):
+    async def test_tslax_uses_iv_fallback(self, caplog, monkeypatch):
         import logging
 
+        from src.pricing import iv_proxy
         from src.pricing.iv_proxy import get_proxy_iv
 
         cfg = get_asset_config(Asset.TSLAX)
         assert cfg.proxy_iv is not None
+
+        # Force the live Yahoo fetch to fail so we exercise the static
+        # proxy_iv fallback path that this test cares about.
+        async def _yahoo_down():
+            raise RuntimeError("simulated vendor outage")
+
+        monkeypatch.setattr(iv_proxy, "fetch_tsla_iv", _yahoo_down)
 
         with caplog.at_level(logging.WARNING, logger="src.pricing.iv_proxy"):
             iv = await get_proxy_iv(Asset.TSLAX)
 
         assert iv == cfg.proxy_iv
         assert 0.1 <= iv <= 2.0, "proxy IV must be a sane annualized value"
-        assert any("No Deribit" in r.message for r in caplog.records)
+        assert any("Yahoo TSLA IV fetch failed" in r.message for r in caplog.records)
 
     def test_tslax_raises_on_chainlink(self):
         cfg = get_asset_config(Asset.TSLAX)
@@ -129,7 +137,7 @@ class TestAssetConfig:
     @pytest.mark.asyncio
     async def test_get_iv_skips_deribit_for_tslax(self, monkeypatch):
         """get_iv(TSLAX) must not hit Deribit HTTP — it routes to the proxy."""
-        from src.pricing import deribit
+        from src.pricing import deribit, iv_proxy
 
         called = {"count": 0}
 
@@ -137,7 +145,12 @@ class TestAssetConfig:
             called["count"] += 1
             raise AssertionError("Deribit HTTP must not be called for TSLAX")
 
+        async def _yahoo_down():
+            raise RuntimeError("simulated vendor outage")
+
         monkeypatch.setattr(deribit._client, "get", _fake_get)
+        monkeypatch.setattr(iv_proxy, "fetch_tsla_iv", _yahoo_down)
+
         result = await deribit.get_iv(Asset.TSLAX)
         assert called["count"] == 0
         assert result.value == get_asset_config(Asset.TSLAX).proxy_iv

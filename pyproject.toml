@@ -17,6 +17,7 @@ dependencies = [
     "solana>=0.36.0",
     "anchorpy>=0.20.1",
     "solders>=0.24.0",
+    "yfinance>=0.2.50",
 ]
 
 [dependency-groups]
