@@ -793,6 +793,11 @@ async def settle_once():
     # Phase-2-pending positions feed directly into Phase 2 — both those that
     # were is_settled=True from a prior crashed cycle (phase2_recovery) and
     # those just observed as on-chain-settled by the reconcile pass.
+    #
+    # Dedup key (user_address, vault_id): vault_id is unique per
+    # (user, controller) and the controller is single-asset on Base today,
+    # so this is safe. If multi-controller / multi-chain is added later
+    # the key must include `chain` and/or the row id.
     phase2_only_seed: list[dict] = list(reconciled_already_settled)
     seen_keys = {(p["user_address"], p["vault_id"]) for p in phase2_only_seed}
     for pos in phase2_recovery:
