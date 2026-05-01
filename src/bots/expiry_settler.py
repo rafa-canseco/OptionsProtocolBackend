@@ -39,6 +39,13 @@ MAX_BATCH_SIZE = 50  # max vaults per tx to avoid gas limit
 BETA_SLIPPAGE_BPS = 1_000  # 10% buffer used in beta mode (no live DEX quote available)
 
 
+_SETTLE_FIELDS = (
+    "id, user_address, vault_id, otoken_address, expiry, amount, "
+    "strike_price, is_put, mm_address, asset, is_settled, "
+    "settlement_type, delivery_tx_hash, is_itm"
+)
+
+
 def get_expired_unsettled() -> list[dict]:
     """Get all unsettled positions with expired oTokens.
 
@@ -49,14 +56,40 @@ def get_expired_unsettled() -> list[dict]:
     now = int(datetime.now(timezone.utc).timestamp())
     result = (
         client.table("order_events")
-        .select(
-            "id, user_address, vault_id, otoken_address, expiry, amount, strike_price, is_put, mm_address, asset"
-        )
+        .select(_SETTLE_FIELDS)
         .or_("is_settled.eq.false,is_settled.is.null")
         .lte("expiry", now)
         .not_.is_("strike_price", "null")
         .not_.is_("is_put", "null")
         .not_.is_("amount", "null")
+        .execute()
+    )
+    return result.data or []
+
+
+def get_pending_phase2() -> list[dict]:
+    """Positions whose Phase 1 (cash settle) is done in DB but Phase 2
+    (physical delivery) is missing.
+
+    Recovers from crashes between Phase 1 and Phase 2 — without this, such
+    positions would never get their delivery because get_expired_unsettled
+    filters them out (is_settled is already True). Excludes positions that
+    are known OTM (no delivery needed) or already in a terminal failed state.
+    """
+    client = get_client()
+    now = int(datetime.now(timezone.utc).timestamp())
+    result = (
+        client.table("order_events")
+        .select(_SETTLE_FIELDS)
+        .eq("is_settled", True)
+        .is_("delivery_tx_hash", "null")
+        .lte("expiry", now)
+        .or_("is_itm.is.null,is_itm.eq.true")
+        .or_("settlement_type.is.null,settlement_type.eq.cash")
+        .not_.is_("strike_price", "null")
+        .not_.is_("is_put", "null")
+        .not_.is_("amount", "null")
+        .not_.is_("mm_address", "null")
         .execute()
     )
     return result.data or []
@@ -511,16 +544,22 @@ async def _physical_redeem_with_retry(
                 raise
 
 
-def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
+def _reconcile_settled_on_chain(
+    positions: list[dict],
+) -> tuple[list[dict], list[dict]]:
     """Check on-chain settlement state and reconcile DB for any mismatches.
 
-    Positions already settled on-chain but not marked in DB are updated
-    and removed from the returned list. This prevents re-settlement
-    attempts that would revert with VaultAlreadySettled.
+    Returns (unsettled_on_chain, already_settled_on_chain). Positions that
+    are already settled on-chain are marked is_settled=True in DB and
+    returned in the second list so the caller can skip Phase 1 (which
+    would revert with VaultAlreadySettled) but still feed them into
+    Phase 2 (physical delivery). Without this, an ITM vault whose Phase 1
+    landed but whose Phase 2 didn't (e.g. operator ran out of gas) would
+    be silently dropped from the queue and the delivery never executed.
     """
     controller = get_controller()
-    remaining = []
-    reconciled = 0
+    unsettled: list[dict] = []
+    already_settled: list[dict] = []
     db_failures = 0
 
     for pos in positions:
@@ -534,7 +573,7 @@ def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
                 pos["user_address"],
                 vault_id,
             )
-            remaining.append(pos)
+            unsettled.append(pos)
             continue
 
         if settled:
@@ -554,18 +593,18 @@ def _reconcile_settled_on_chain(positions: list[dict]) -> list[dict]:
                     vault_id,
                 )
                 db_failures += 1
-            reconciled += 1
+            already_settled.append(pos)
         else:
-            remaining.append(pos)
+            unsettled.append(pos)
 
-    if reconciled:
+    if already_settled:
         msg = "Reconciled %d positions (settled on-chain but not in DB)"
         if db_failures:
             msg += " — %d DB writes failed, will retry next cycle"
-            logger.warning(msg, reconciled, db_failures)
+            logger.warning(msg, len(already_settled), db_failures)
         else:
-            logger.warning(msg, reconciled)
-    return remaining
+            logger.warning(msg, len(already_settled))
+    return unsettled, already_settled
 
 
 def _format_position_for_email(
@@ -736,28 +775,55 @@ def _send_settlement_emails(
 async def settle_once():
     """Single settlement cycle: 2-phase (batch settle + physical delivery for ITM)."""
     positions = get_expired_unsettled()
-    if not positions:
+    phase2_recovery = get_pending_phase2()
+    if not positions and not phase2_recovery:
         logger.info("No expired positions to settle")
         return
 
     # --- Reconcile: check on-chain state for DB/chain mismatches ---
-    try:
-        positions = await asyncio.to_thread(_reconcile_settled_on_chain, positions)
-    except Exception:
-        logger.exception("Reconciliation failed, proceeding with all positions")
-    if not positions:
-        logger.info("All positions reconciled (already settled on-chain)")
+    reconciled_already_settled: list[dict] = []
+    if positions:
+        try:
+            positions, reconciled_already_settled = await asyncio.to_thread(
+                _reconcile_settled_on_chain, positions
+            )
+        except Exception:
+            logger.exception("Reconciliation failed, proceeding with all positions")
+
+    # Phase-2-pending positions feed directly into Phase 2 — both those that
+    # were is_settled=True from a prior crashed cycle (phase2_recovery) and
+    # those just observed as on-chain-settled by the reconcile pass.
+    phase2_only_seed: list[dict] = list(reconciled_already_settled)
+    seen_keys = {(p["user_address"], p["vault_id"]) for p in phase2_only_seed}
+    for pos in phase2_recovery:
+        key = (pos["user_address"], pos["vault_id"])
+        if key not in seen_keys:
+            phase2_only_seed.append(pos)
+            seen_keys.add(key)
+
+    if phase2_only_seed:
+        logger.warning(
+            "Phase 2 recovery: %d positions had Phase 1 settled on-chain but "
+            "no delivery — will run Phase 2 only",
+            len(phase2_only_seed),
+        )
+
+    if not positions and not phase2_only_seed:
+        logger.info("All positions reconciled (already settled and delivered)")
         return
 
     # --- Phase 0: set expiry prices on Oracle from Chainlink ---
+    # Include phase2-only positions: identify_itm needs their oracle prices too.
     expiries = {pos["expiry"] for pos in positions}
+    expiries.update(pos["expiry"] for pos in phase2_only_seed)
     await asyncio.to_thread(_ensure_expiry_prices_set, expiries)
 
     # --- Phase 1: batchSettleVaults (settles all expired vaults on-chain) ---
     settler = get_batch_settler()
     account = get_operator_account()
 
-    settled_positions: list[dict] = []
+    # Phase-2-only seed bypasses Phase 1 (already settled on-chain).
+    settled_positions: list[dict] = list(phase2_only_seed)
     phase1_failed = False
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
@@ -777,8 +843,7 @@ async def settle_once():
                 len(batch),
             )
             # Check which vaults are already settled on-chain
-            unsettled = _reconcile_settled_on_chain(batch)
-            already_settled = [p for p in batch if p not in unsettled]
+            unsettled, already_settled = _reconcile_settled_on_chain(batch)
             if already_settled:
                 settled_positions.extend(already_settled)
             if unsettled:
@@ -814,16 +879,20 @@ async def settle_once():
         logger.error("Phase 1: no batches settled successfully, aborting")
         return
 
+    new_settled = len(settled_positions) - len(phase2_only_seed)
     if phase1_failed:
         logger.warning(
-            f"Phase 1: partial success — {len(settled_positions)}/{len(positions)} "
-            f"vaults settled. Continuing with settled vaults only."
+            f"Phase 1: partial success — {new_settled}/{len(positions)} "
+            f"vaults settled this cycle. Continuing with settled vaults only."
         )
 
     # --- Wait for vaults to be fully settled before physical delivery ---
-    delay = settings.flash_loan_redeem_delay_seconds
-    logger.info(f"Waiting {delay}s before physical delivery phase")
-    await asyncio.sleep(delay)
+    # Only relevant for vaults JUST settled in this cycle. Phase-2-only
+    # recovery vaults were settled long ago and don't need this delay.
+    if new_settled > 0:
+        delay = settings.flash_loan_redeem_delay_seconds
+        logger.info(f"Waiting {delay}s before physical delivery phase")
+        await asyncio.sleep(delay)
 
     # --- Phase 2: physical delivery for ITM positions ---
     itm_positions, expiry_cache, skipped_keys = await asyncio.to_thread(

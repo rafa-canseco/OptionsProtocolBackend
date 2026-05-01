@@ -591,8 +591,10 @@ def _unsettled_position(user="0xuser", vault_id=1):
 
 
 class TestReconcileSettledOnChain:
-    def test_settled_on_chain_removed_from_list(self):
-        """Position settled on-chain is removed and DB updated."""
+    def test_settled_on_chain_returned_in_already_settled_bucket(self):
+        """Position settled on-chain is moved out of the unsettled list AND
+        returned in the second tuple entry so the caller can still feed it
+        into Phase 2 (physical delivery)."""
         pos = _unsettled_position()
         mock_controller = MagicMock()
         mock_controller.functions.vaultSettled.return_value.call.return_value = True
@@ -605,15 +607,16 @@ class TestReconcileSettledOnChain:
             patch("src.bots.expiry_settler._db_update") as mock_db,
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
-            result = _reconcile_settled_on_chain([pos])
+            unsettled, already_settled = _reconcile_settled_on_chain([pos])
 
-        assert result == []
+        assert unsettled == []
+        assert already_settled == [pos]
         mock_db.assert_called_once()
         call_fields = mock_db.call_args[0][2]
         assert call_fields["is_settled"] is True
 
     def test_unsettled_on_chain_kept_in_list(self):
-        """Position not settled on-chain stays in the list."""
+        """Position not settled on-chain stays in the unsettled list."""
         pos = _unsettled_position()
         mock_controller = MagicMock()
         mock_controller.functions.vaultSettled.return_value.call.return_value = False
@@ -626,13 +629,14 @@ class TestReconcileSettledOnChain:
             patch("src.bots.expiry_settler._db_update") as mock_db,
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
-            result = _reconcile_settled_on_chain([pos])
+            unsettled, already_settled = _reconcile_settled_on_chain([pos])
 
-        assert result == [pos]
+        assert unsettled == [pos]
+        assert already_settled == []
         mock_db.assert_not_called()
 
     def test_rpc_failure_assumes_unsettled(self):
-        """If vaultSettled call fails, position stays in list."""
+        """If vaultSettled call fails, position stays in unsettled list."""
         pos = _unsettled_position()
         mock_controller = MagicMock()
         mock_controller.functions.vaultSettled.return_value.call.side_effect = (
@@ -646,12 +650,13 @@ class TestReconcileSettledOnChain:
             patch("src.bots.expiry_settler.Web3") as mock_web3,
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
-            result = _reconcile_settled_on_chain([pos])
+            unsettled, already_settled = _reconcile_settled_on_chain([pos])
 
-        assert result == [pos]
+        assert unsettled == [pos]
+        assert already_settled == []
 
     def test_mixed_positions(self):
-        """Mix of settled and unsettled — only unsettled remain."""
+        """Mix of settled and unsettled — split correctly into both buckets."""
         settled_pos = _unsettled_position("0xsettled", 1)
         unsettled_pos = _unsettled_position("0xunsettled", 2)
         mock_controller = MagicMock()
@@ -671,10 +676,14 @@ class TestReconcileSettledOnChain:
             patch("src.bots.expiry_settler._db_update"),
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
-            result = _reconcile_settled_on_chain([settled_pos, unsettled_pos])
+            unsettled, already_settled = _reconcile_settled_on_chain(
+                [settled_pos, unsettled_pos]
+            )
 
-        assert len(result) == 1
-        assert result[0]["user_address"] == "0xunsettled"
+        assert len(unsettled) == 1
+        assert unsettled[0]["user_address"] == "0xunsettled"
+        assert len(already_settled) == 1
+        assert already_settled[0]["user_address"] == "0xsettled"
 
 
 class TestEnsureExpiryPricesSetSkipsNonEvmAssets:
