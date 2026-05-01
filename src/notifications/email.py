@@ -83,6 +83,31 @@ def _inject_unsubscribe_url(html: str, wallet_address: str) -> str:
     return html.replace("{unsubscribe_url}", url)
 
 
+def _normalize_batch_response(response: object) -> list[dict]:
+    """Return the per-email list from a resend.Batch.send response.
+
+    resend>=2.26 returns a TypedDict {"data": [...], "http_headers": {...}}.
+    Earlier versions returned a bare list. Accept both, and validate that
+    every item is a dict so callers can safely call .get("id") downstream.
+    """
+    if isinstance(response, list):
+        items = response
+    elif isinstance(response, dict) and isinstance(response.get("data"), list):
+        items = response["data"]
+    else:
+        raise TypeError(
+            f"resend.Batch.send returned unexpected type "
+            f"{type(response).__name__}: {response!r}"
+        )
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise TypeError(
+                f"resend.Batch.send returned a non-dict item at index {i}: "
+                f"{type(item).__name__}: {item!r}"
+            )
+    return items
+
+
 def send_batch(emails: list[dict]) -> list[dict]:
     """Send a batch of emails via Resend.
 
@@ -97,6 +122,7 @@ def send_batch(emails: list[dict]) -> list[dict]:
         return []
 
     all_results: list[dict] = []
+    all_errors: list = []
     for i in range(0, len(emails), 100):
         chunk = emails[i : i + 100]
         params_list: list[resend.Emails.SendParams] = [
@@ -109,15 +135,23 @@ def send_batch(emails: list[dict]) -> list[dict]:
             }
             for e in chunk
         ]
-        results = resend.Batch.send(params_list)
-        if not isinstance(results, list):
-            raise TypeError(
-                f"resend.Batch.send returned unexpected type "
-                f"{type(results).__name__}: {results!r}"
-            )
-        all_results.extend(results)
+        response = resend.Batch.send(params_list)
+        chunk_results = _normalize_batch_response(response)
+        all_results.extend(chunk_results)
+        if isinstance(response, dict):
+            errors = response.get("errors")
+            if isinstance(errors, list):
+                all_errors.extend(errors)
 
-    logger.info("Batch email sent: %d emails", len(all_results))
+    if all_errors:
+        logger.warning(
+            "Batch email sent: %d emails, %d validation error(s): %r",
+            len(all_results),
+            len(all_errors),
+            all_errors,
+        )
+    else:
+        logger.info("Batch email sent: %d emails", len(all_results))
     return all_results
 
 
