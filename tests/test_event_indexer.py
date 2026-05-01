@@ -43,9 +43,10 @@ def test_enrich_with_otoken_metadata_uses_available_otokens_cache():
         }
     ]
 
-    with patch("src.bots.event_indexer.get_client") as mock_db, patch(
-        "src.bots.event_indexer.get_otoken"
-    ) as mock_get_otoken:
+    with (
+        patch("src.bots.event_indexer.get_client") as mock_db,
+        patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
+    ):
         mock_db.return_value.table.return_value = table
         first = event_indexer._enrich_with_otoken_metadata(
             {"otoken_address": "0x1111111111111111111111111111111111111111"}
@@ -70,9 +71,10 @@ def test_enrich_with_otoken_metadata_falls_back_to_chain():
     otoken.functions.expiry.return_value.call.return_value = 1773993600
     otoken.functions.isPut.return_value.call.return_value = False
 
-    with patch("src.bots.event_indexer.get_client") as mock_db, patch(
-        "src.bots.event_indexer.get_otoken"
-    ) as mock_get_otoken:
+    with (
+        patch("src.bots.event_indexer.get_client") as mock_db,
+        patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
+    ):
         mock_db.return_value.table.return_value = table
         mock_get_otoken.return_value = otoken
         enriched = event_indexer._enrich_with_otoken_metadata(
@@ -99,9 +101,10 @@ def test_load_otoken_metadata_falls_back_to_chain_when_db_fields_null():
         event_indexer.settings.weth_address
     )
 
-    with patch("src.bots.event_indexer.get_client") as mock_db, patch(
-        "src.bots.event_indexer.get_otoken"
-    ) as mock_get_otoken:
+    with (
+        patch("src.bots.event_indexer.get_client") as mock_db,
+        patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
+    ):
         mock_db.return_value.table.return_value = table
         mock_get_otoken.return_value = otoken
         metadata = event_indexer._load_otoken_metadata(
@@ -148,9 +151,10 @@ def test_enrich_returns_none_when_metadata_unavailable():
     otoken = MagicMock()
     otoken.functions.strikePrice.return_value.call.side_effect = RuntimeError("RPC")
 
-    with patch("src.bots.event_indexer.get_client") as mock_db, patch(
-        "src.bots.event_indexer.get_otoken"
-    ) as mock_get_otoken:
+    with (
+        patch("src.bots.event_indexer.get_client") as mock_db,
+        patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
+    ):
         mock_db.return_value.table.return_value = table
         mock_get_otoken.return_value = otoken
         result = event_indexer._enrich_with_otoken_metadata(
@@ -217,10 +221,12 @@ def test_fetch_and_store_skips_events_with_failed_enrichment():
             return event_data
         return None
 
-    with patch(
-        "src.bots.event_indexer._enrich_with_otoken_metadata", side_effect=enrich
-    ), patch("src.bots.event_indexer._store_events", return_value=1) as mock_store, patch(
-        "src.bots.event_indexer._notify_mm"
+    with (
+        patch(
+            "src.bots.event_indexer._enrich_with_otoken_metadata", side_effect=enrich
+        ),
+        patch("src.bots.event_indexer._store_events", return_value=1) as mock_store,
+        patch("src.bots.event_indexer._notify_mm"),
     ):
         event_indexer._fetch_and_store_order_events(settler, 1, 2)
 
@@ -247,10 +253,12 @@ def test_fetch_and_store_returns_first_failed_block_and_stops():
         event_data["is_put"] = True
         return event_data
 
-    with patch(
-        "src.bots.event_indexer._enrich_with_otoken_metadata", side_effect=enrich
-    ), patch("src.bots.event_indexer._store_events", return_value=1) as mock_store, patch(
-        "src.bots.event_indexer._notify_mm"
+    with (
+        patch(
+            "src.bots.event_indexer._enrich_with_otoken_metadata", side_effect=enrich
+        ),
+        patch("src.bots.event_indexer._store_events", return_value=1) as mock_store,
+        patch("src.bots.event_indexer._notify_mm"),
     ):
         stored, first_failed = event_indexer._fetch_and_store_order_events(
             settler, 10, 14
@@ -284,11 +292,12 @@ def test_fetch_and_update_delivery_returns_first_failed_block_and_stops():
             "delivery_tx_hash": "0xgood",
         }
 
-    with patch(
-        "src.bots.event_indexer._build_delivery_event_data", side_effect=build
-    ), patch(
-        "src.bots.event_indexer._update_delivery_events", return_value=0
-    ) as mock_update:
+    with (
+        patch("src.bots.event_indexer._build_delivery_event_data", side_effect=build),
+        patch(
+            "src.bots.event_indexer._update_delivery_events", return_value=0
+        ) as mock_update,
+    ):
         updated, first_failed = event_indexer._fetch_and_update_delivery_events(
             settler, 20, 22
         )
@@ -304,18 +313,19 @@ def test_index_once_does_not_advance_past_failed_block():
     w3.eth.block_number = 100
     settler = MagicMock()
 
-    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
-        "src.bots.event_indexer.get_batch_settler", return_value=settler
-    ), patch(
-        "src.bots.event_indexer._get_last_indexed_block", return_value=49
-    ), patch(
-        "src.bots.event_indexer._set_last_indexed_block"
-    ) as mock_set, patch(
-        "src.bots.event_indexer._fetch_and_store_order_events",
-        return_value=(0, 75),
-    ), patch(
-        "src.bots.event_indexer._fetch_and_update_delivery_events",
-        return_value=(0, None),
+    with (
+        patch("src.bots.event_indexer.get_w3", return_value=w3),
+        patch("src.bots.event_indexer.get_batch_settler", return_value=settler),
+        patch("src.bots.event_indexer._get_last_indexed_block", return_value=49),
+        patch("src.bots.event_indexer._set_last_indexed_block") as mock_set,
+        patch(
+            "src.bots.event_indexer._fetch_and_store_order_events",
+            return_value=(0, 75),
+        ),
+        patch(
+            "src.bots.event_indexer._fetch_and_update_delivery_events",
+            return_value=(0, None),
+        ),
     ):
         import asyncio
 
@@ -335,18 +345,19 @@ def test_index_once_does_not_advance_when_first_block_fails():
     w3.eth.block_number = 100
     settler = MagicMock()
 
-    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
-        "src.bots.event_indexer.get_batch_settler", return_value=settler
-    ), patch(
-        "src.bots.event_indexer._get_last_indexed_block", return_value=49
-    ), patch(
-        "src.bots.event_indexer._set_last_indexed_block"
-    ) as mock_set, patch(
-        "src.bots.event_indexer._fetch_and_store_order_events",
-        return_value=(0, 50),
-    ), patch(
-        "src.bots.event_indexer._fetch_and_update_delivery_events",
-        return_value=(0, None),
+    with (
+        patch("src.bots.event_indexer.get_w3", return_value=w3),
+        patch("src.bots.event_indexer.get_batch_settler", return_value=settler),
+        patch("src.bots.event_indexer._get_last_indexed_block", return_value=49),
+        patch("src.bots.event_indexer._set_last_indexed_block") as mock_set,
+        patch(
+            "src.bots.event_indexer._fetch_and_store_order_events",
+            return_value=(0, 50),
+        ),
+        patch(
+            "src.bots.event_indexer._fetch_and_update_delivery_events",
+            return_value=(0, None),
+        ),
     ):
         import asyncio
 
@@ -368,18 +379,19 @@ def test_index_once_clears_pending_failure_when_catchup_succeeds():
     w3.eth.block_number = 100
     settler = MagicMock()
 
-    with patch("src.bots.event_indexer.get_w3", return_value=w3), patch(
-        "src.bots.event_indexer.get_batch_settler", return_value=settler
-    ), patch(
-        "src.bots.event_indexer._get_last_indexed_block", return_value=49
-    ), patch(
-        "src.bots.event_indexer._set_last_indexed_block"
-    ), patch(
-        "src.bots.event_indexer._fetch_and_store_order_events",
-        return_value=(5, None),
-    ), patch(
-        "src.bots.event_indexer._fetch_and_update_delivery_events",
-        return_value=(0, None),
+    with (
+        patch("src.bots.event_indexer.get_w3", return_value=w3),
+        patch("src.bots.event_indexer.get_batch_settler", return_value=settler),
+        patch("src.bots.event_indexer._get_last_indexed_block", return_value=49),
+        patch("src.bots.event_indexer._set_last_indexed_block"),
+        patch(
+            "src.bots.event_indexer._fetch_and_store_order_events",
+            return_value=(5, None),
+        ),
+        patch(
+            "src.bots.event_indexer._fetch_and_update_delivery_events",
+            return_value=(0, None),
+        ),
     ):
         import asyncio
 
@@ -400,22 +412,28 @@ def test_subscription_skip_does_not_advance_cursor_on_later_event():
     settler = MagicMock()
     settler.events.OrderExecuted.process_log.return_value = decoded
 
-    with patch(
-        "src.bots.event_indexer._build_order_event_data",
-        return_value={"tx_hash": "0x60", "block_number": 60, "otoken_address": "0x"},
-    ), patch(
-        "src.bots.event_indexer._enrich_with_otoken_metadata",
-        side_effect=lambda ev: {
-            **ev,
-            "strike_price": 1,
-            "expiry": 1,
-            "is_put": True,
-        },
-    ), patch(
-        "src.bots.event_indexer._store_events", return_value=1
-    ), patch("src.bots.event_indexer._notify_mm"), patch(
-        "src.bots.event_indexer._set_last_indexed_block"
-    ) as mock_set:
+    with (
+        patch(
+            "src.bots.event_indexer._build_order_event_data",
+            return_value={
+                "tx_hash": "0x60",
+                "block_number": 60,
+                "otoken_address": "0x",
+            },
+        ),
+        patch(
+            "src.bots.event_indexer._enrich_with_otoken_metadata",
+            side_effect=lambda ev: {
+                **ev,
+                "strike_price": 1,
+                "expiry": 1,
+                "is_put": True,
+            },
+        ),
+        patch("src.bots.event_indexer._store_events", return_value=1),
+        patch("src.bots.event_indexer._notify_mm"),
+        patch("src.bots.event_indexer._set_last_indexed_block") as mock_set,
+    ):
         event_indexer._process_order_subscription_log(settler, {"dummy": True})
 
     mock_set.assert_called_once_with(49)
@@ -429,12 +447,18 @@ def test_subscription_failure_records_pending_block():
     settler = MagicMock()
     settler.events.OrderExecuted.process_log.return_value = decoded
 
-    with patch(
-        "src.bots.event_indexer._build_order_event_data",
-        return_value={"tx_hash": "0x77", "block_number": 77, "otoken_address": "0x"},
-    ), patch(
-        "src.bots.event_indexer._enrich_with_otoken_metadata", return_value=None
-    ), patch("src.bots.event_indexer._set_last_indexed_block") as mock_set:
+    with (
+        patch(
+            "src.bots.event_indexer._build_order_event_data",
+            return_value={
+                "tx_hash": "0x77",
+                "block_number": 77,
+                "otoken_address": "0x",
+            },
+        ),
+        patch("src.bots.event_indexer._enrich_with_otoken_metadata", return_value=None),
+        patch("src.bots.event_indexer._set_last_indexed_block") as mock_set,
+    ):
         event_indexer._process_order_subscription_log(settler, {"dummy": True})
 
     assert event_indexer._pending_failure_block == 77
@@ -460,3 +484,228 @@ def test_otoken_metadata_cache_is_bounded():
         assert f"0x{4:040x}" in event_indexer._otoken_metadata_cache
     finally:
         event_indexer._OTOKEN_CACHE_MAX = original_max
+
+
+# ---------------------------------------------------------------------------
+# _update_delivery_events — one event must claim exactly one row
+# ---------------------------------------------------------------------------
+
+
+class _FakeTable:
+    """Minimal stub of the supabase chained-builder that records calls and
+    returns canned data per (table, op_chain) signature."""
+
+    def __init__(self, rows: list[dict]):
+        # Each row simulates an order_events row; 'id' is unique.
+        self.rows = list(rows)
+        self.updates: list[tuple[str, dict]] = []
+
+    def table(self, name):
+        assert name == "order_events"
+        return _Query(self)
+
+
+class _Query:
+    def __init__(self, parent: "_FakeTable"):
+        self._p = parent
+        self._filters: list[tuple[str, str, object]] = []
+        self._op = None
+        self._payload = None
+        self._order = None
+        self._limit = None
+
+    def select(self, _fields):
+        self._op = "select"
+        return self
+
+    def update(self, payload):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def eq(self, col, val):
+        self._filters.append(("eq", col, val))
+        return self
+
+    def is_(self, col, val):
+        self._filters.append(("is", col, val))
+        return self
+
+    def order(self, col):
+        self._order = col
+        return self
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def execute(self):
+        def matches(row):
+            for kind, col, val in self._filters:
+                if kind == "eq" and row.get(col) != val:
+                    return False
+                if kind == "is" and val == "null" and row.get(col) is not None:
+                    return False
+            return True
+
+        matched = [r for r in self._p.rows if matches(r)]
+        if self._order:
+            matched.sort(key=lambda r: r.get(self._order, 0))
+        if self._limit:
+            matched = matched[: self._limit]
+        if self._op == "update":
+            for r in matched:
+                self._p.updates.append((r["id"], dict(self._payload)))
+                r.update(self._payload)
+        return MagicMock(data=matched)
+
+
+def _delivery_event(user, otoken, tx, contra="100", asset="usdc"):
+    return {
+        "user_address": user,
+        "otoken_address": otoken,
+        "delivered_asset": asset,
+        "delivered_amount": contra,
+        "delivery_tx_hash": tx,
+    }
+
+
+def test_update_delivery_events_three_events_to_three_rows_no_overwrite():
+    """Three vaults of the same user on the same oToken: each PhysicalDelivery
+    event must claim a distinct row. Pre-fix this overwrote all three rows
+    with the last event's data.
+    """
+    rows = [
+        {
+            "id": "a",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 30,
+            "delivery_tx_hash": None,
+        },
+        {
+            "id": "b",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 31,
+            "delivery_tx_hash": None,
+        },
+        {
+            "id": "c",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 33,
+            "delivery_tx_hash": None,
+        },
+    ]
+    fake = _FakeTable(rows)
+    events = [
+        _delivery_event("0xu", "0xt", "0xtx30", contra="500"),
+        _delivery_event("0xu", "0xt", "0xtx31", contra="60"),
+        _delivery_event("0xu", "0xt", "0xtx33", contra="240"),
+    ]
+    with patch("src.bots.event_indexer.get_client", return_value=fake):
+        n = event_indexer._update_delivery_events(events)
+
+    assert n == 3
+    by_id = {r["id"]: r for r in fake.rows}
+    assert by_id["a"]["delivery_tx_hash"] == "0xtx30"
+    assert by_id["a"]["delivered_amount"] == "500"
+    assert by_id["b"]["delivery_tx_hash"] == "0xtx31"
+    assert by_id["b"]["delivered_amount"] == "60"
+    assert by_id["c"]["delivery_tx_hash"] == "0xtx33"
+    assert by_id["c"]["delivered_amount"] == "240"
+
+
+def test_update_delivery_events_idempotent_on_reindex():
+    """Reprocessing already-recorded events must not write again."""
+    rows = [
+        {
+            "id": "a",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 1,
+            "delivery_tx_hash": "0xtxA",
+            "delivered_amount": "100",
+        },
+    ]
+    fake = _FakeTable(rows)
+    events = [_delivery_event("0xu", "0xt", "0xtxA", contra="100")]
+    with patch("src.bots.event_indexer.get_client", return_value=fake):
+        n = event_indexer._update_delivery_events(events)
+
+    assert n == 0
+    assert fake.updates == []  # no writes
+
+
+def test_update_delivery_events_no_unmarked_row_logs_warning(caplog):
+    """If the bot already wrote per-vault hashes and the indexer sees a NEW
+    event whose tx isn't in DB and no NULL row remains, log a warning rather
+    than silently overwriting another vault's correct hash."""
+    rows = [
+        {
+            "id": "a",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 1,
+            "delivery_tx_hash": "0xtxA",
+        },
+    ]
+    fake = _FakeTable(rows)
+    events = [_delivery_event("0xu", "0xt", "0xtxOTHER", contra="100")]
+
+    import logging
+
+    with (
+        patch("src.bots.event_indexer.get_client", return_value=fake),
+        caplog.at_level(logging.WARNING, logger="src.bots.event_indexer"),
+    ):
+        n = event_indexer._update_delivery_events(events)
+
+    assert n == 0
+    assert fake.updates == []
+    assert any("matched no unmarked DB row" in r.getMessage() for r in caplog.records)
+
+
+def test_update_delivery_events_partial_pre_fill_claims_remaining():
+    """Bot wrote hashes for some vaults; the indexer must claim only the
+    remaining unmarked rows in vault_id order."""
+    rows = [
+        {
+            "id": "a",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 1,
+            "delivery_tx_hash": "0xtxBOT1",
+        },
+        {
+            "id": "b",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 2,
+            "delivery_tx_hash": None,
+        },
+        {
+            "id": "c",
+            "user_address": "0xu",
+            "otoken_address": "0xt",
+            "vault_id": 3,
+            "delivery_tx_hash": None,
+        },
+    ]
+    fake = _FakeTable(rows)
+    events = [
+        _delivery_event(
+            "0xu", "0xt", "0xtxBOT1", contra="10"
+        ),  # idempotent — already in DB
+        _delivery_event("0xu", "0xt", "0xtxFROM_INDEXER_2", contra="20"),
+        _delivery_event("0xu", "0xt", "0xtxFROM_INDEXER_3", contra="30"),
+    ]
+    with patch("src.bots.event_indexer.get_client", return_value=fake):
+        n = event_indexer._update_delivery_events(events)
+
+    assert n == 2
+    by_id = {r["id"]: r for r in fake.rows}
+    assert by_id["a"]["delivery_tx_hash"] == "0xtxBOT1"
+    assert by_id["b"]["delivery_tx_hash"] == "0xtxFROM_INDEXER_2"
+    assert by_id["c"]["delivery_tx_hash"] == "0xtxFROM_INDEXER_3"
