@@ -193,9 +193,15 @@ async def submit_quotes(
 
 def _verify_solana_sig(q: QuoteSubmission, label: str, errors: list[str]) -> bool:
     """Verify an ed25519 Solana quote signature. Returns True if valid."""
+    if not settings.solana_usdc_mint:
+        errors.append(
+            f"{label}: SOLANA_USDC_MINT not configured — cannot verify Solana quotes"
+        )
+        return False
     try:
         pubkey = SolPubkey.from_string(q.maker)
         otoken_bytes = bytes(SolPubkey.from_string(q.otoken_address))
+        premium_mint_bytes = bytes(SolPubkey.from_string(settings.solana_usdc_mint))
         msg = build_solana_quote_message(
             otoken_bytes,
             bid_price=q.bid_price,
@@ -203,6 +209,7 @@ def _verify_solana_sig(q: QuoteSubmission, label: str, errors: list[str]) -> boo
             quote_id=q.quote_id,
             max_amount=q.max_amount,
             maker_nonce=q.maker_nonce,
+            premium_mint=premium_mint_bytes,
         )
         sig_bytes = bytes(SolSignature.from_string(q.signature))
         if not verify_solana_quote(pubkey, msg, sig_bytes):
