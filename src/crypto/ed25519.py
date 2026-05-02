@@ -17,11 +17,15 @@ def build_solana_quote_message(
     quote_id: int,
     max_amount: int,
     maker_nonce: int,
+    premium_mint: bytes,
 ) -> bytes:
-    """Pack a 72-byte message matching the Solana BatchSettler layout.
+    """Pack a 104-byte message matching the Solana BatchSettler layout.
 
-    Layout: otoken_mint (32B) | bid_price (u64 LE) | deadline (i64 LE)
-            | quote_id (u64 LE) | max_amount (u64 LE) | maker_nonce (u64 LE)
+    Layout: otoken_mint (32B) | premium_mint (32B) | bid_price (u64 LE)
+            | deadline (i64 LE) | quote_id (u64 LE) | max_amount (u64 LE)
+            | maker_nonce (u64 LE)
+
+    Mirrors `solana/programs/batch_settler/src/lib.rs::build_quote_message`.
 
     Args:
         otoken_mint: 32-byte mint address.
@@ -30,17 +34,25 @@ def build_solana_quote_message(
         quote_id: Unique quote identifier.
         max_amount: Maximum fill amount.
         maker_nonce: Maker's on-chain nonce.
+        premium_mint: 32-byte mint address used for the premium leg
+            (USDC for every Solana option today).
 
     Raises:
-        ValueError: If otoken_mint is not exactly 32 bytes.
+        ValueError: If otoken_mint or premium_mint is not exactly 32 bytes.
     """
     if len(otoken_mint) != 32:
         raise ValueError(
             f"otoken_mint must be 32 bytes, got {len(otoken_mint)}. "
             "Pass the raw bytes of the Solana mint address."
         )
+    if len(premium_mint) != 32:
+        raise ValueError(
+            f"premium_mint must be 32 bytes, got {len(premium_mint)}. "
+            "Pass the raw bytes of the Solana mint address."
+        )
     return (
         otoken_mint
+        + premium_mint
         + struct.pack("<Q", bid_price)
         + struct.pack("<q", deadline)
         + struct.pack("<Q", quote_id)
