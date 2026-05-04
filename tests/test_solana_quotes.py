@@ -29,6 +29,12 @@ BASE_OTOKEN = "0x" + "b" * 40
 BASE_SIGNATURE = "0x" + "c" * 130
 
 
+def _premium_mint_bytes() -> bytes:
+    from src.config import settings
+
+    return bytes(SolPubkey.from_string(settings.solana_usdc_mint))
+
+
 def _sign_solana_quote(
     otoken_mint: str,
     *,
@@ -38,7 +44,7 @@ def _sign_solana_quote(
     max_amount: int,
     maker_nonce: int,
 ) -> str:
-    """Build a 72-byte Solana quote message, sign it, and return base58 signature."""
+    """Build a 104-byte Solana quote message, sign it, and return base58 signature."""
     otoken_bytes = bytes(SolPubkey.from_string(otoken_mint))
     msg = build_solana_quote_message(
         otoken_bytes,
@@ -47,6 +53,7 @@ def _sign_solana_quote(
         quote_id=quote_id,
         max_amount=max_amount,
         maker_nonce=maker_nonce,
+        premium_mint=_premium_mint_bytes(),
     )
     sig = SOL_KEYPAIR.sign_message(msg)
     return str(sig)
@@ -146,6 +153,7 @@ class TestSolanaQuoteSubmission:
             quote_id=1,
             max_amount=100_000_000,
             maker_nonce=0,
+            premium_mint=_premium_mint_bytes(),
         )
         bad_sig = str(other_kp.sign_message(msg))
 

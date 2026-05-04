@@ -189,8 +189,7 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict | None:
         return None
     if metadata is None:
         logger.error(
-            "oToken metadata returned None for %s. "
-            "Skipping storage until next rescan.",
+            "oToken metadata returned None for %s. Skipping storage until next rescan.",
             event_data["otoken_address"],
         )
         return None
@@ -273,15 +272,58 @@ def _store_events(events: list[dict]) -> int:
 def _update_delivery_events(delivery_events: list[dict]) -> int:
     """Update existing order_events rows with physical delivery data.
 
-    Matches on (user_address, otoken_address). If a user has multiple positions
-    for the same oToken, all will be updated — this is acceptable because all
-    positions on the same oToken share the same ITM/OTM outcome.
+    PhysicalDelivery events are emitted once per vault but the event itself
+    only carries (oToken, user, contraAmount, collateralUsed) — no vault_id.
+    A user with N vaults on the same oToken produces N events. Matching by
+    (user, otoken) and updating all matching rows would overwrite each row
+    N times with the last-seen event's tx and amount. Instead, claim one
+    row per event:
+
+      1. Idempotency: if a row already records this exact tx_hash, no-op.
+      2. Otherwise pick the oldest unmarked row for (user, otoken) and
+         write the event's data into that single row.
+
+    Ordering by vault_id ASC keeps assignment deterministic across re-indexes.
     """
     if not delivery_events:
         return 0
     client = get_client()
     updated = 0
     for ev in delivery_events:
+        already = (
+            client.table("order_events")
+            .select("id")
+            .eq("user_address", ev["user_address"])
+            .eq("otoken_address", ev["otoken_address"])
+            .eq("delivery_tx_hash", ev["delivery_tx_hash"])
+            .limit(1)
+            .execute()
+        )
+        if already.data:
+            continue
+
+        candidates = (
+            client.table("order_events")
+            .select("id")
+            .eq("user_address", ev["user_address"])
+            .eq("otoken_address", ev["otoken_address"])
+            .is_("delivery_tx_hash", "null")
+            .order("vault_id")
+            .limit(1)
+            .execute()
+        )
+        if not candidates.data:
+            logger.warning(
+                "Physical delivery event matched no unmarked DB row "
+                "(possibly already processed by the bot itself): "
+                "user=%s otoken=%s tx=%s",
+                ev["user_address"],
+                ev["otoken_address"],
+                ev["delivery_tx_hash"],
+            )
+            continue
+
+        row_id = candidates.data[0]["id"]
         result = (
             client.table("order_events")
             .update(
@@ -293,22 +335,11 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
                     "is_itm": True,
                 }
             )
-            .eq("user_address", ev["user_address"])
-            .eq(
-                "otoken_address",
-                ev["otoken_address"],
-            )
+            .eq("id", row_id)
             .execute()
         )
         if result.data:
             updated += len(result.data)
-        else:
-            logger.warning(
-                "Physical delivery event matched no DB row: user=%s otoken=%s tx=%s",
-                ev["user_address"],
-                ev["otoken_address"],
-                ev["delivery_tx_hash"],
-            )
     return updated
 
 
@@ -468,7 +499,9 @@ def _build_delivery_event_data(ev) -> dict | None:
         asset = metadata.get("asset", "eth")
         underlying = metadata.get(
             "underlying",
-            settings.wbtc_address.lower() if asset == "btc" else settings.weth_address.lower(),
+            settings.wbtc_address.lower()
+            if asset == "btc"
+            else settings.weth_address.lower(),
         )
     except Exception:
         logger.exception(
@@ -521,7 +554,9 @@ async def index_once():
             settler, from_block, to_block
         )
         delivered, delivery_fail = _fetch_and_update_delivery_events(
-            settler, from_block, to_block,
+            settler,
+            from_block,
+            to_block,
         )
 
         failures = [b for b in (order_fail, delivery_fail) if b is not None]
@@ -546,10 +581,7 @@ async def index_once():
                 )
             # Track the failure so any subscription events at ≥min_failed
             # don't silently advance past it.
-            if (
-                _pending_failure_block is None
-                or min_failed < _pending_failure_block
-            ):
+            if _pending_failure_block is None or min_failed < _pending_failure_block:
                 _pending_failure_block = min_failed
         else:
             _set_last_indexed_block(to_block)
