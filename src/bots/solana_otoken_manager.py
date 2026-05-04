@@ -209,35 +209,24 @@ def _build_create_otoken_info_ix(
     controller_config: Pubkey,
     otoken_info_pda: Pubkey,
     otoken_mint: Pubkey,
+    factory_otoken_pda: Pubkey,
+    collateral_mint: Pubkey,
     whitelisted_otoken_pda: Pubkey,
     whitelist_program: Pubkey,
+    factory_program: Pubkey,
     admin: Pubkey,
-    underlying: Pubkey,
-    strike_asset: Pubkey,
-    collateral_mint: Pubkey,
-    strike_price: int,
-    expiry: int,
-    is_put: bool,
-    collateral_decimals: int,
 ) -> Instruction:
     """Build controller.create_otoken_info instruction."""
-    data = (
-        _CREATE_OTOKEN_INFO_DISC
-        + bytes(otoken_mint)
-        + bytes(underlying)
-        + bytes(strike_asset)
-        + bytes(collateral_mint)
-        + struct.pack("<Q", strike_price)
-        + struct.pack("<q", expiry)
-        + bytes([int(is_put)])
-        + bytes([collateral_decimals])
-    )
+    data = _CREATE_OTOKEN_INFO_DISC
     accounts = [
         AccountMeta(controller_config, is_signer=False, is_writable=False),
         AccountMeta(otoken_info_pda, is_signer=False, is_writable=True),
         AccountMeta(otoken_mint, is_signer=False, is_writable=False),
+        AccountMeta(factory_otoken_pda, is_signer=False, is_writable=False),
+        AccountMeta(collateral_mint, is_signer=False, is_writable=False),
         AccountMeta(whitelisted_otoken_pda, is_signer=False, is_writable=False),
         AccountMeta(whitelist_program, is_signer=False, is_writable=False),
+        AccountMeta(factory_program, is_signer=False, is_writable=False),
         AccountMeta(admin, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
     ]
@@ -440,16 +429,12 @@ def _find_or_create_otoken(
         controller_config,
         otoken_info_pda,
         otoken_mint,
+        otoken_pda,
+        collateral,
         wl_otoken_pda,
         whitelist_program,
+        factory_program,
         operator.pubkey(),
-        underlying,
-        strike_asset,
-        collateral,
-        strike_price,
-        expiry,
-        is_put,
-        collateral_decimals,
     )
     try:
         _send_ix(ix, f"create_otoken_info {label}")
