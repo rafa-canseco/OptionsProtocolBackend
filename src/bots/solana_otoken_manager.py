@@ -25,6 +25,10 @@ from solders.transaction import (  # type: ignore[import-untyped]
     VersionedTransaction,
 )
 from spl.token.constants import TOKEN_PROGRAM_ID  # type: ignore[import-untyped]
+from spl.token.instructions import (  # type: ignore[import-untyped]
+    create_idempotent_associated_token_account,
+    get_associated_token_address,
+)
 
 from src.chains.solana.client import (
     build_and_send_solana_tx,
@@ -73,6 +77,11 @@ def _derive_factory_operator_config(factory_program: Pubkey) -> Pubkey:
 def _derive_controller_config(controller_program: Pubkey) -> Pubkey:
     """Derive controller_config PDA: [b"controller_config"]."""
     return Pubkey.find_program_address([b"controller_config"], controller_program)[0]
+
+
+def _derive_settler_config(batch_settler_program: Pubkey) -> Pubkey:
+    """Derive settler_config PDA: [b"settler_config"]."""
+    return Pubkey.find_program_address([b"settler_config"], batch_settler_program)[0]
 
 
 def _otoken_seeds(
@@ -269,6 +278,43 @@ def _send_ix(ix: Instruction, label: str) -> str:
     return sig
 
 
+def _ensure_settler_otoken_account(otoken_mint: Pubkey, label: str) -> None:
+    """Ensure the batch settler PDA has an initialized ATA for this oToken.
+
+    batch_settler::execute_order expects `settler_otoken_account` to be an
+    initialized SPL token account owned by the `settler_config` PDA. This is
+    protocol setup, not user setup, and must exist for every listed oToken.
+    """
+    batch_settler_program = Pubkey.from_string(
+        settings.solana_batch_settler_program_id
+    )
+    settler_config = _derive_settler_config(batch_settler_program)
+    settler_otoken_account = get_associated_token_address(
+        settler_config,
+        otoken_mint,
+        TOKEN_PROGRAM_ID,
+    )
+
+    if _account_exists(settler_otoken_account):
+        logger.debug("settler oToken ATA exists: %s", label)
+        return
+
+    operator = get_solana_operator()
+    logger.info(
+        "Creating settler oToken ATA: %s mint=%s ata=%s",
+        label,
+        otoken_mint,
+        settler_otoken_account,
+    )
+    ix = create_idempotent_associated_token_account(
+        payer=operator.pubkey(),
+        owner=settler_config,
+        mint=otoken_mint,
+        token_program_id=TOKEN_PROGRAM_ID,
+    )
+    _send_ix(ix, f"create_settler_otoken_ata {label}")
+
+
 def _build_close_otoken_info_ix(
     controller_program: Pubkey,
     controller_config: Pubkey,
@@ -442,6 +488,7 @@ def _find_or_create_otoken(
             # _verify closes the corrupted account. Now recreate below.
             pass
         else:
+            _ensure_settler_otoken_account(otoken_mint, label)
             return str(otoken_mint)
 
     # Create otoken_info (either fresh or after closing corrupted one)
@@ -464,6 +511,12 @@ def _find_or_create_otoken(
         _send_ix(ix, f"create_otoken_info {label}")
     except Exception:
         logger.exception("Failed to create otoken_info for %s", label)
+        return None
+
+    try:
+        _ensure_settler_otoken_account(otoken_mint, label)
+    except Exception:
+        logger.exception("Failed to create settler oToken ATA for %s", label)
         return None
 
     return str(otoken_mint)
