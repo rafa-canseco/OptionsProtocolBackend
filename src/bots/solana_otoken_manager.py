@@ -26,7 +26,11 @@ from solders.transaction import (  # type: ignore[import-untyped]
 )
 from spl.token.constants import TOKEN_PROGRAM_ID  # type: ignore[import-untyped]
 
-from src.chains.solana.client import get_solana_client, get_solana_operator
+from src.chains.solana.client import (
+    build_and_send_solana_tx,
+    get_solana_client,
+    get_solana_operator,
+)
 from src.chains.solana.oracle import get_spot_price
 from src.config import has_solana_config, settings
 from src.db.database import get_client
@@ -245,11 +249,9 @@ def _send_ix(ix: Instruction, label: str) -> str:
         recent_blockhash=blockhash,
     )
     tx = VersionedTransaction(msg, [operator])
-    resp = rpc.send_transaction(tx)
-    sig = resp.value
-    rpc.confirm_transaction(sig, sleep_seconds=0.5)
+    sig = build_and_send_solana_tx(tx)
     logger.info("%s tx=%s", label, sig)
-    return str(sig)
+    return sig
 
 
 def _build_close_otoken_info_ix(
