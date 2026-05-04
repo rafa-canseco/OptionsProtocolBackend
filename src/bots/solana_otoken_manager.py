@@ -65,6 +65,11 @@ def _derive_factory_config(factory_program: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"factory_config"], factory_program)[0]
 
 
+def _derive_factory_operator_config(factory_program: Pubkey) -> Pubkey:
+    """Derive factory_operator_config PDA: [b"factory_operator_config"]."""
+    return Pubkey.find_program_address([b"factory_operator_config"], factory_program)[0]
+
+
 def _derive_controller_config(controller_program: Pubkey) -> Pubkey:
     """Derive controller_config PDA: [b"controller_config"]."""
     return Pubkey.find_program_address([b"controller_config"], controller_program)[0]
@@ -134,6 +139,7 @@ def _derive_otoken_mint_pda(
 def _build_create_otoken_ix(
     factory_program: Pubkey,
     factory_config: Pubkey,
+    factory_operator_config: Pubkey,
     otoken_pda: Pubkey,
     otoken_mint_pda: Pubkey,
     controller_authority: Pubkey,
@@ -158,6 +164,7 @@ def _build_create_otoken_ix(
 
     accounts = [
         AccountMeta(factory_config, is_signer=False, is_writable=True),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
         AccountMeta(otoken_pda, is_signer=False, is_writable=True),
         AccountMeta(otoken_mint_pda, is_signer=False, is_writable=True),
         AccountMeta(controller_authority, is_signer=False, is_writable=False),
@@ -193,6 +200,9 @@ def _derive_otoken_info(controller_program: Pubkey, otoken_mint: Pubkey) -> Pubk
 def _build_whitelist_otoken_ix(
     whitelist_program: Pubkey,
     whitelist_config: Pubkey,
+    factory_otoken_pda: Pubkey,
+    factory_operator_config: Pubkey,
+    factory_program: Pubkey,
     whitelisted_otoken_pda: Pubkey,
     otoken_mint: Pubkey,
     caller: Pubkey,
@@ -202,6 +212,9 @@ def _build_whitelist_otoken_ix(
     accounts = [
         AccountMeta(whitelisted_otoken_pda, is_signer=False, is_writable=True),
         AccountMeta(whitelist_config, is_signer=False, is_writable=False),
+        AccountMeta(factory_otoken_pda, is_signer=False, is_writable=False),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
+        AccountMeta(factory_program, is_signer=False, is_writable=False),
         AccountMeta(caller, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
     ]
@@ -211,6 +224,7 @@ def _build_whitelist_otoken_ix(
 def _build_create_otoken_info_ix(
     controller_program: Pubkey,
     controller_config: Pubkey,
+    factory_operator_config: Pubkey,
     otoken_info_pda: Pubkey,
     otoken_mint: Pubkey,
     factory_otoken_pda: Pubkey,
@@ -231,6 +245,7 @@ def _build_create_otoken_info_ix(
         AccountMeta(whitelisted_otoken_pda, is_signer=False, is_writable=False),
         AccountMeta(whitelist_program, is_signer=False, is_writable=False),
         AccountMeta(factory_program, is_signer=False, is_writable=False),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
         AccountMeta(admin, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
     ]
@@ -351,6 +366,8 @@ def _find_or_create_otoken(
     Each step is skipped if the account already exists.
     Returns mint address.
     """
+    factory_operator_config = _derive_factory_operator_config(factory_program)
+
     otoken_pda = _derive_otoken_pda(
         factory_program,
         underlying,
@@ -377,6 +394,7 @@ def _find_or_create_otoken(
         ix = _build_create_otoken_ix(
             factory_program,
             factory_config,
+            factory_operator_config,
             otoken_pda,
             otoken_mint,
             _derive_controller_config(
@@ -403,6 +421,9 @@ def _find_or_create_otoken(
         ix = _build_whitelist_otoken_ix(
             whitelist_program,
             wl_config,
+            otoken_pda,
+            factory_operator_config,
+            factory_program,
             wl_otoken_pda,
             otoken_mint,
             operator.pubkey(),
@@ -429,6 +450,7 @@ def _find_or_create_otoken(
     ix = _build_create_otoken_info_ix(
         controller_prog,
         controller_config,
+        factory_operator_config,
         otoken_info_pda,
         otoken_mint,
         otoken_pda,
