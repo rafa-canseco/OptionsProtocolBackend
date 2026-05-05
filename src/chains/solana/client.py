@@ -1,11 +1,13 @@
 """Solana RPC client, keypair, and transaction utilities."""
 
+import base64
 import json
 import logging
 import struct
 import time
 from pathlib import Path
 
+import httpx
 from solana.rpc.api import Client as SolanaClient
 from solana.rpc.commitment import Confirmed
 from solders.keypair import Keypair  # type: ignore[import-untyped]
@@ -173,23 +175,56 @@ def build_and_send_solana_tx(tx: VersionedTransaction, timeout: int = 60) -> str
     Returns the transaction signature as a string.
     Raises RuntimeError if the tx fails to confirm within timeout seconds.
     """
-    client = get_solana_client()
+    if not settings.solana_rpc_url:
+        raise ValueError("SOLANA_RPC_URL is not configured")
+
+    def rpc_call(method: str, params: list) -> object:
+        resp = httpx.post(
+            settings.solana_rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        if "error" in payload:
+            raise RuntimeError(f"Solana RPC error ({method}): {payload['error']}")
+        return payload.get("result")
+
+    raw_tx = base64.b64encode(bytes(tx)).decode("ascii")
     try:
-        resp = client.send_transaction(tx)
+        sig = str(
+            rpc_call(
+                "sendTransaction",
+                [
+                    raw_tx,
+                    {
+                        "encoding": "base64",
+                        "preflightCommitment": "confirmed",
+                        "maxRetries": 3,
+                    },
+                ],
+            )
+        )
     except Exception as exc:
         raise RuntimeError("Failed to send Solana transaction") from exc
-
-    sig = str(resp.value)
 
     # Poll for confirmation with a bounded timeout
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            status = client.get_signature_statuses([resp.value])
-            if status.value and status.value[0] is not None:
-                if status.value[0].err:
+            status = rpc_call(
+                "getSignatureStatuses",
+                [[sig], {"searchTransactionHistory": True}],
+            )
+            value = (
+                status.get("value", [None])[0]
+                if isinstance(status, dict)
+                else None
+            )
+            if value is not None:
+                if value.get("err"):
                     raise RuntimeError(
-                        f"Transaction {sig} failed on-chain: {status.value[0].err}"
+                        f"Transaction {sig} failed on-chain: {value['err']}"
                     )
                 logger.info("Solana tx confirmed: %s", sig)
                 return sig

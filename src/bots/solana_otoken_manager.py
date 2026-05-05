@@ -25,8 +25,16 @@ from solders.transaction import (  # type: ignore[import-untyped]
     VersionedTransaction,
 )
 from spl.token.constants import TOKEN_PROGRAM_ID  # type: ignore[import-untyped]
+from spl.token.instructions import (  # type: ignore[import-untyped]
+    create_idempotent_associated_token_account,
+    get_associated_token_address,
+)
 
-from src.chains.solana.client import get_solana_client, get_solana_operator
+from src.chains.solana.client import (
+    build_and_send_solana_tx,
+    get_solana_client,
+    get_solana_operator,
+)
 from src.chains.solana.oracle import get_spot_price
 from src.config import has_solana_config, settings
 from src.db.database import get_client
@@ -61,9 +69,19 @@ def _derive_factory_config(factory_program: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([b"factory_config"], factory_program)[0]
 
 
+def _derive_factory_operator_config(factory_program: Pubkey) -> Pubkey:
+    """Derive factory_operator_config PDA: [b"factory_operator_config"]."""
+    return Pubkey.find_program_address([b"factory_operator_config"], factory_program)[0]
+
+
 def _derive_controller_config(controller_program: Pubkey) -> Pubkey:
     """Derive controller_config PDA: [b"controller_config"]."""
     return Pubkey.find_program_address([b"controller_config"], controller_program)[0]
+
+
+def _derive_settler_config(batch_settler_program: Pubkey) -> Pubkey:
+    """Derive settler_config PDA: [b"settler_config"]."""
+    return Pubkey.find_program_address([b"settler_config"], batch_settler_program)[0]
 
 
 def _otoken_seeds(
@@ -130,6 +148,7 @@ def _derive_otoken_mint_pda(
 def _build_create_otoken_ix(
     factory_program: Pubkey,
     factory_config: Pubkey,
+    factory_operator_config: Pubkey,
     otoken_pda: Pubkey,
     otoken_mint_pda: Pubkey,
     controller_authority: Pubkey,
@@ -154,6 +173,7 @@ def _build_create_otoken_ix(
 
     accounts = [
         AccountMeta(factory_config, is_signer=False, is_writable=True),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
         AccountMeta(otoken_pda, is_signer=False, is_writable=True),
         AccountMeta(otoken_mint_pda, is_signer=False, is_writable=True),
         AccountMeta(controller_authority, is_signer=False, is_writable=False),
@@ -189,6 +209,9 @@ def _derive_otoken_info(controller_program: Pubkey, otoken_mint: Pubkey) -> Pubk
 def _build_whitelist_otoken_ix(
     whitelist_program: Pubkey,
     whitelist_config: Pubkey,
+    factory_otoken_pda: Pubkey,
+    factory_operator_config: Pubkey,
+    factory_program: Pubkey,
     whitelisted_otoken_pda: Pubkey,
     otoken_mint: Pubkey,
     caller: Pubkey,
@@ -198,6 +221,9 @@ def _build_whitelist_otoken_ix(
     accounts = [
         AccountMeta(whitelisted_otoken_pda, is_signer=False, is_writable=True),
         AccountMeta(whitelist_config, is_signer=False, is_writable=False),
+        AccountMeta(factory_otoken_pda, is_signer=False, is_writable=False),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
+        AccountMeta(factory_program, is_signer=False, is_writable=False),
         AccountMeta(caller, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
     ]
@@ -207,37 +233,28 @@ def _build_whitelist_otoken_ix(
 def _build_create_otoken_info_ix(
     controller_program: Pubkey,
     controller_config: Pubkey,
+    factory_operator_config: Pubkey,
     otoken_info_pda: Pubkey,
     otoken_mint: Pubkey,
+    factory_otoken_pda: Pubkey,
+    collateral_mint: Pubkey,
     whitelisted_otoken_pda: Pubkey,
     whitelist_program: Pubkey,
+    factory_program: Pubkey,
     admin: Pubkey,
-    underlying: Pubkey,
-    strike_asset: Pubkey,
-    collateral_mint: Pubkey,
-    strike_price: int,
-    expiry: int,
-    is_put: bool,
-    collateral_decimals: int,
 ) -> Instruction:
     """Build controller.create_otoken_info instruction."""
-    data = (
-        _CREATE_OTOKEN_INFO_DISC
-        + bytes(otoken_mint)
-        + bytes(underlying)
-        + bytes(strike_asset)
-        + bytes(collateral_mint)
-        + struct.pack("<Q", strike_price)
-        + struct.pack("<q", expiry)
-        + bytes([int(is_put)])
-        + bytes([collateral_decimals])
-    )
+    data = _CREATE_OTOKEN_INFO_DISC
     accounts = [
         AccountMeta(controller_config, is_signer=False, is_writable=False),
         AccountMeta(otoken_info_pda, is_signer=False, is_writable=True),
         AccountMeta(otoken_mint, is_signer=False, is_writable=False),
+        AccountMeta(factory_otoken_pda, is_signer=False, is_writable=False),
+        AccountMeta(collateral_mint, is_signer=False, is_writable=False),
         AccountMeta(whitelisted_otoken_pda, is_signer=False, is_writable=False),
         AccountMeta(whitelist_program, is_signer=False, is_writable=False),
+        AccountMeta(factory_program, is_signer=False, is_writable=False),
+        AccountMeta(factory_operator_config, is_signer=False, is_writable=False),
         AccountMeta(admin, is_signer=True, is_writable=True),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
     ]
@@ -256,11 +273,46 @@ def _send_ix(ix: Instruction, label: str) -> str:
         recent_blockhash=blockhash,
     )
     tx = VersionedTransaction(msg, [operator])
-    resp = rpc.send_transaction(tx)
-    sig = resp.value
-    rpc.confirm_transaction(sig, sleep_seconds=0.5)
+    sig = build_and_send_solana_tx(tx)
     logger.info("%s tx=%s", label, sig)
-    return str(sig)
+    return sig
+
+
+def _ensure_settler_otoken_account(otoken_mint: Pubkey, label: str) -> None:
+    """Ensure the batch settler PDA has an initialized ATA for this oToken.
+
+    batch_settler::execute_order expects `settler_otoken_account` to be an
+    initialized SPL token account owned by the `settler_config` PDA. This is
+    protocol setup, not user setup, and must exist for every listed oToken.
+    """
+    batch_settler_program = Pubkey.from_string(
+        settings.solana_batch_settler_program_id
+    )
+    settler_config = _derive_settler_config(batch_settler_program)
+    settler_otoken_account = get_associated_token_address(
+        settler_config,
+        otoken_mint,
+        TOKEN_PROGRAM_ID,
+    )
+
+    if _account_exists(settler_otoken_account):
+        logger.debug("settler oToken ATA exists: %s", label)
+        return
+
+    operator = get_solana_operator()
+    logger.info(
+        "Creating settler oToken ATA: %s mint=%s ata=%s",
+        label,
+        otoken_mint,
+        settler_otoken_account,
+    )
+    ix = create_idempotent_associated_token_account(
+        payer=operator.pubkey(),
+        owner=settler_config,
+        mint=otoken_mint,
+        token_program_id=TOKEN_PROGRAM_ID,
+    )
+    _send_ix(ix, f"create_settler_otoken_ata {label}")
 
 
 def _build_close_otoken_info_ix(
@@ -360,6 +412,8 @@ def _find_or_create_otoken(
     Each step is skipped if the account already exists.
     Returns mint address.
     """
+    factory_operator_config = _derive_factory_operator_config(factory_program)
+
     otoken_pda = _derive_otoken_pda(
         factory_program,
         underlying,
@@ -386,6 +440,7 @@ def _find_or_create_otoken(
         ix = _build_create_otoken_ix(
             factory_program,
             factory_config,
+            factory_operator_config,
             otoken_pda,
             otoken_mint,
             _derive_controller_config(
@@ -412,6 +467,9 @@ def _find_or_create_otoken(
         ix = _build_whitelist_otoken_ix(
             whitelist_program,
             wl_config,
+            otoken_pda,
+            factory_operator_config,
+            factory_program,
             wl_otoken_pda,
             otoken_mint,
             operator.pubkey(),
@@ -430,6 +488,7 @@ def _find_or_create_otoken(
             # _verify closes the corrupted account. Now recreate below.
             pass
         else:
+            _ensure_settler_otoken_account(otoken_mint, label)
             return str(otoken_mint)
 
     # Create otoken_info (either fresh or after closing corrupted one)
@@ -438,23 +497,26 @@ def _find_or_create_otoken(
     ix = _build_create_otoken_info_ix(
         controller_prog,
         controller_config,
+        factory_operator_config,
         otoken_info_pda,
         otoken_mint,
+        otoken_pda,
+        collateral,
         wl_otoken_pda,
         whitelist_program,
+        factory_program,
         operator.pubkey(),
-        underlying,
-        strike_asset,
-        collateral,
-        strike_price,
-        expiry,
-        is_put,
-        collateral_decimals,
     )
     try:
         _send_ix(ix, f"create_otoken_info {label}")
     except Exception:
         logger.exception("Failed to create otoken_info for %s", label)
+        return None
+
+    try:
+        _ensure_settler_otoken_account(otoken_mint, label)
+    except Exception:
+        logger.exception("Failed to create settler oToken ATA for %s", label)
         return None
 
     return str(otoken_mint)
