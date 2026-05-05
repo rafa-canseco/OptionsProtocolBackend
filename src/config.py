@@ -112,6 +112,9 @@ class Settings(BaseSettings):
     solana_wsol_mint: str = "So11111111111111111111111111111111111111112"
     solana_tslax_mint: str = "H3sTci14zw4uVRNetdALKjv5KKHEab9M3rAJQ4BfhHaF"
 
+    # Solana swap routing for physical settlement
+    solana_jupiter_quote_api_url: str = "https://lite-api.jup.ag/swap/v1"
+
     # Pyth oracle
     solana_pyth_receiver_program: str = ""
 

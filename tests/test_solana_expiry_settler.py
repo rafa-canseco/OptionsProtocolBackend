@@ -4,6 +4,7 @@ import hashlib
 import struct
 
 import pytest
+from solders.instruction import AccountMeta  # type: ignore[import-untyped]
 from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from unittest.mock import MagicMock, patch
@@ -60,6 +61,12 @@ class TestDiscriminators:
 
         expected = hashlib.sha256(b"global:redeem_for_mm").digest()[:8]
         assert _REDEEM_FOR_MM_DISC == expected
+
+    def test_physical_redeem_discriminator(self):
+        from src.bots.solana_expiry_settler import _PHYSICAL_REDEEM_DISC
+
+        expected = hashlib.sha256(b"global:physical_redeem").digest()[:8]
+        assert _PHYSICAL_REDEEM_DISC == expected
 
 
 class TestGetExpiredUnsettledSolana:
@@ -235,6 +242,87 @@ class TestBuildRedeemForMmIx:
         assert decoded == amount
         # 13 accounts
         assert len(ix.accounts) == 13
+
+
+class TestBuildPhysicalRedeemIx:
+    """Verify physical_redeem instruction structure."""
+
+    @patch(f"{_MODULE}._read_settler_jupiter_program", return_value=Pubkey.new_unique())
+    @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
+    @patch(f"{_MODULE}.get_solana_operator")
+    @patch(f"{_MODULE}.settings")
+    def test_instruction_data_contains_amount_max_and_route(
+        self, mock_settings, mock_operator, mock_pool, mock_jup
+    ):
+        settler_id = Pubkey.new_unique()
+        controller_id = Pubkey.new_unique()
+        mock_settings.solana_batch_settler_program_id = str(settler_id)
+        mock_settings.solana_controller_program_id = str(controller_id)
+        mock_operator.return_value = Keypair()
+
+        from src.bots.solana_expiry_settler import (
+            _build_physical_redeem_ix,
+            _PHYSICAL_REDEEM_DISC,
+        )
+
+        collateral = Pubkey.new_unique()
+        underlying = Pubkey.new_unique()
+        otoken_info = {
+            "pda": Pubkey.new_unique(),
+            "underlying": underlying,
+            "strike_asset": Pubkey.new_unique(),
+            "collateral_mint": collateral,
+            "strike_price": 200000000000,
+            "is_put": True,
+            "expiry_price": 190000000000,
+        }
+        jup_ix = MagicMock()
+        jup_ix.data = b"route-data"
+        jup_ix.accounts = [AccountMeta(Pubkey.new_unique(), False, True)]
+
+        amount = 50000000
+        max_spent = 123456
+        ix = _build_physical_redeem_ix(
+            otoken_mint=Pubkey.new_unique(),
+            user=Pubkey.new_unique(),
+            mm_address=Pubkey.new_unique(),
+            vault_pda=Pubkey.new_unique(),
+            amount=amount,
+            max_collateral_spent=max_spent,
+            otoken_info=otoken_info,
+            jupiter_swap_ix=jup_ix,
+        )
+
+        raw = bytes(ix.data)
+        assert raw[:8] == _PHYSICAL_REDEEM_DISC
+        assert struct.unpack_from("<Q", raw, 8)[0] == amount
+        assert struct.unpack_from("<Q", raw, 16)[0] == max_spent
+        route_len = struct.unpack_from("<I", raw, 24)[0]
+        assert route_len == len(jup_ix.data)
+        assert raw[28:] == jup_ix.data
+        assert len(ix.accounts) == 24
+
+
+class TestSolanaPhysicalMath:
+    def test_put_contra_amount_uses_underlying_decimals(self):
+        from src.bots.solana_expiry_settler import _compute_solana_contra_amount
+
+        assert _compute_solana_contra_amount(
+            amount=25_000_000,
+            strike_price=88_00000000,
+            is_put=True,
+            contra_decimals=9,
+        ) == 250_000_000
+
+    def test_call_contra_amount_uses_usdc_decimals(self):
+        from src.bots.solana_expiry_settler import _compute_solana_contra_amount
+
+        assert _compute_solana_contra_amount(
+            amount=25_000_000,
+            strike_price=88_00000000,
+            is_put=False,
+            contra_decimals=6,
+        ) == 22_000_000
 
 
 class TestIdentifyItmPositions:
