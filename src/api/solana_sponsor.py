@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/solana", tags=["Solana"])
 
 MAX_SPONSORED_WRAP_LAMPORTS = 10 * 10**9
+SYSTEM_ACCOUNT_RENT_EXEMPT_LAMPORTS_FALLBACK = 890_880
+MAX_USER_RENT_TOP_UP_LAMPORTS = 1_000_000
 SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
 SYSTEM_TRANSFER_DISCRIMINATOR = bytes([2, 0, 0, 0])
 TOKEN_APPROVE_DISCRIMINATOR = 4
@@ -56,6 +58,19 @@ def _derive_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
 
 def _derive_pda(seed: bytes, program_id: Pubkey) -> Pubkey:
     return Pubkey.find_program_address([seed], program_id)[0]
+
+
+def _system_transfer_lamports(data: bytes) -> int:
+    if len(data) != 12 or not data.startswith(SYSTEM_TRANSFER_DISCRIMINATOR):
+        raise ValueError("unsupported system instruction in sponsored setup")
+    return int.from_bytes(data[4:12], "little")
+
+
+def _system_account_rent_exempt_lamports() -> int:
+    try:
+        return int(get_solana_client().get_minimum_balance_for_rent_exemption(0).value)
+    except Exception:
+        return SYSTEM_ACCOUNT_RENT_EXEMPT_LAMPORTS_FALLBACK
 
 
 class SponsoredSetupRequest(BaseModel):
@@ -151,6 +166,23 @@ def _build_sponsored_setup_tx(
         )
 
     if wrap_lamports > 0:
+        user_balance = int(rpc.get_balance(user).value)
+        if user_balance >= wrap_lamports:
+            rent_exempt_lamports = _system_account_rent_exempt_lamports()
+            remaining_lamports = user_balance - wrap_lamports
+            rent_top_up = max(0, rent_exempt_lamports - remaining_lamports)
+            if rent_top_up > 0:
+                if rent_top_up > MAX_USER_RENT_TOP_UP_LAMPORTS:
+                    raise ValueError("required rent top-up exceeds sponsored limit")
+                instructions.append(
+                    transfer(
+                        TransferParams(
+                            from_pubkey=operator.pubkey(),
+                            to_pubkey=user,
+                            lamports=rent_top_up,
+                        )
+                    )
+                )
         instructions.append(
             transfer(
                 TransferParams(
@@ -222,12 +254,20 @@ def _validate_sponsored_setup_tx(
         account_indexes = list(instruction.accounts)
 
         if program_id == SYSTEM_PROGRAM_ID:
-            if not data.startswith(SYSTEM_TRANSFER_DISCRIMINATOR):
-                raise ValueError("unsupported system instruction in sponsored setup")
-            if not account_indexes:
+            lamports = _system_transfer_lamports(data)
+            if len(account_indexes) < 2:
                 raise ValueError("system transfer missing source account")
-            if _account_key(tx, account_indexes[0]) != user:
-                raise ValueError("sponsored setup may only transfer lamports from user")
+            source = _account_key(tx, account_indexes[0])
+            destination = _account_key(tx, account_indexes[1])
+            if source == user:
+                continue
+            if (
+                source == operator
+                and destination == user
+                and 0 < lamports <= MAX_USER_RENT_TOP_UP_LAMPORTS
+            ):
+                continue
+            raise ValueError("unsupported system transfer in sponsored setup")
             continue
 
         if program_id == TOKEN_PROGRAM_ID:
