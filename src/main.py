@@ -13,6 +13,7 @@ from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
 from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
+from src.api.solana_sponsor import router as solana_sponsor_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
@@ -247,6 +248,7 @@ app.include_router(mm_ws_router)
 app.include_router(activity_router)
 app.include_router(leaderboard_router)
 app.include_router(notifications_router)
+app.include_router(solana_sponsor_router)
 app.include_router(yield_router)
 app.include_router(bridge_router)
 
