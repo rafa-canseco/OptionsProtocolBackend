@@ -11,7 +11,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from solders.keypair import Keypair  # type: ignore[import-untyped]
-from solders.message import MessageV0  # type: ignore[import-untyped]
+from solders.message import MessageV0, to_bytes_versioned  # type: ignore[import-untyped]
 from solders.null_signer import NullSigner  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.system_program import TransferParams, transfer  # type: ignore[import-untyped]
@@ -29,7 +29,11 @@ from spl.token.instructions import (  # type: ignore[import-untyped]
 )
 
 from src.chains.address import is_valid_solana_address
-from src.chains.solana.client import get_solana_client, get_solana_operator
+from src.chains.solana.client import (
+    build_and_send_solana_tx,
+    get_solana_client,
+    get_solana_operator,
+)
 from src.config import has_solana_config, settings
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/solana", tags=["Solana"])
 
 MAX_SPONSORED_WRAP_LAMPORTS = 10 * 10**9
+SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
+SYSTEM_TRANSFER_DISCRIMINATOR = bytes([2, 0, 0, 0])
+TOKEN_APPROVE_DISCRIMINATOR = 4
+TOKEN_SYNC_NATIVE_DISCRIMINATOR = 17
 
 
 def _derive_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
@@ -72,8 +80,24 @@ class SponsoredSetupRequest(BaseModel):
 
 
 class SponsoredSetupResponse(BaseModel):
-    transaction: str = Field(description="Base64 partially signed v0 transaction")
-    sponsor: str = Field(description="Operator pubkey that signed as fee payer")
+    transaction: str = Field(description="Base64 unsigned v0 transaction")
+    sponsor: str = Field(description="Operator pubkey set as fee payer")
+
+
+class CompleteSponsoredSetupRequest(BaseModel):
+    user: str = Field(description="User Solana wallet address")
+    transaction: str = Field(description="Base64 transaction signed by the user")
+
+    @field_validator("user")
+    @classmethod
+    def _valid_pubkey(cls, value: str) -> str:
+        if not is_valid_solana_address(value):
+            raise ValueError("invalid Solana address")
+        return value
+
+
+class CompleteSponsoredSetupResponse(BaseModel):
+    signature: str = Field(description="Broadcast transaction signature")
 
 
 def _build_sponsored_setup_tx(
@@ -165,7 +189,59 @@ def _build_sponsored_setup_tx(
         address_lookup_table_accounts=[],
         recent_blockhash=blockhash,
     )
-    return VersionedTransaction(msg, [operator, NullSigner(user)])
+    return VersionedTransaction(msg, [NullSigner(operator.pubkey()), NullSigner(user)])
+
+
+def _account_key(tx: VersionedTransaction, index: int) -> Pubkey:
+    keys = tx.message.account_keys
+    if index >= len(keys):
+        raise ValueError("transaction account index out of bounds")
+    return keys[index]
+
+
+def _validate_sponsored_setup_tx(
+    tx: VersionedTransaction,
+    operator: Pubkey,
+    user: Pubkey,
+) -> None:
+    message = tx.message
+    if message.address_table_lookups:
+        raise ValueError("address lookup tables are not allowed for sponsored setup")
+    if message.header.num_required_signatures < 2:
+        raise ValueError("sponsored setup requires sponsor and user signatures")
+    if _account_key(tx, 0) != operator:
+        raise ValueError("invalid sponsored setup fee payer")
+
+    signer_keys = set(message.account_keys[: message.header.num_required_signatures])
+    if user not in signer_keys:
+        raise ValueError("user is not a required transaction signer")
+
+    for instruction in message.instructions:
+        program_id = _account_key(tx, instruction.program_id_index)
+        data = bytes(instruction.data)
+        account_indexes = list(instruction.accounts)
+
+        if program_id == SYSTEM_PROGRAM_ID:
+            if not data.startswith(SYSTEM_TRANSFER_DISCRIMINATOR):
+                raise ValueError("unsupported system instruction in sponsored setup")
+            if not account_indexes:
+                raise ValueError("system transfer missing source account")
+            if _account_key(tx, account_indexes[0]) != user:
+                raise ValueError("sponsored setup may only transfer lamports from user")
+            continue
+
+        if program_id == TOKEN_PROGRAM_ID:
+            if not data or data[0] not in {
+                TOKEN_APPROVE_DISCRIMINATOR,
+                TOKEN_SYNC_NATIVE_DISCRIMINATOR,
+            }:
+                raise ValueError("unsupported token instruction in sponsored setup")
+            continue
+
+        if program_id == ASSOCIATED_TOKEN_PROGRAM_ID:
+            continue
+
+        raise ValueError(f"unsupported program in sponsored setup: {program_id}")
 
 
 @router.post(
@@ -196,3 +272,37 @@ async def sponsored_setup(body: SponsoredSetupRequest) -> SponsoredSetupResponse
         transaction=base64.b64encode(bytes(tx)).decode("ascii"),
         sponsor=str(operator.pubkey()),
     )
+
+
+@router.post(
+    "/sponsored-setup/complete",
+    response_model=CompleteSponsoredSetupResponse,
+    summary="Sponsor, broadcast, and confirm a user-signed Solana setup transaction",
+)
+async def complete_sponsored_setup(
+    body: CompleteSponsoredSetupRequest,
+) -> CompleteSponsoredSetupResponse:
+    if not has_solana_config():
+        raise HTTPException(503, "Solana sponsorship is not configured")
+
+    try:
+        operator = get_solana_operator()
+        user = Pubkey.from_string(body.user)
+        tx = VersionedTransaction.from_bytes(base64.b64decode(body.transaction))
+        _validate_sponsored_setup_tx(tx, operator.pubkey(), user)
+
+        signatures = list(tx.signatures)
+        signatures[0] = operator.sign_message(to_bytes_versioned(tx.message))
+        signed_tx = VersionedTransaction.populate(tx.message, signatures)
+        verify_results = signed_tx.verify_with_results()
+        if not all(verify_results):
+            raise ValueError("sponsored setup transaction has invalid signatures")
+
+        signature = build_and_send_solana_tx(signed_tx)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to complete sponsored Solana setup transaction")
+        raise HTTPException(500, "Failed to complete sponsored setup transaction") from exc
+
+    return CompleteSponsoredSetupResponse(signature=signature)
