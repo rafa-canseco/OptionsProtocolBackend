@@ -35,6 +35,9 @@ from spl.token.constants import (  # type: ignore[import-untyped]
     TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
 )
+from spl.token.instructions import (  # type: ignore[import-untyped]
+    create_idempotent_associated_token_account,
+)
 
 from src.chains.solana.client import (
     get_solana_client,
@@ -115,6 +118,28 @@ def _read_account_data(pubkey: Pubkey) -> bytes | None:
     if resp.value is None:
         return None
     return bytes(resp.value.data)
+
+
+def _account_exists(pubkey: Pubkey) -> bool:
+    """Return True when an account exists on-chain."""
+    return _read_account_data(pubkey) is not None
+
+
+def _ensure_ata_exists(owner: Pubkey, mint: Pubkey, label: str) -> Pubkey:
+    """Ensure owner has an ATA for mint and return its address."""
+    ata = _derive_ata(owner, mint)
+    if _account_exists(ata):
+        return ata
+
+    operator = get_solana_operator()
+    ix = create_idempotent_associated_token_account(
+        payer=operator.pubkey(),
+        owner=owner,
+        mint=mint,
+        token_program_id=TOKEN_PROGRAM_ID,
+    )
+    _send_ix(ix, f"create_ata({label})")
+    return ata
 
 
 def _find_pool_token_account(pool_vault_authority: Pubkey, mint: Pubkey) -> Pubkey:
@@ -507,6 +532,13 @@ def _settle_vaults(
             )
             continue
 
+        _ensure_ata_exists(
+            vault_data["beneficiary"],
+            vault_data["collateral_mint"],
+            f"beneficiary {str(vault_data['beneficiary'])[:8]} "
+            f"{str(vault_data['collateral_mint'])[:8]}",
+        )
+
         otoken_mint = Pubkey.from_string(otoken_addr)
         ix = _build_settle_vault_ix(
             vault_data["vault_pda"],
@@ -696,6 +728,24 @@ def _redeem_itm_positions(
 
         otoken_mint = Pubkey.from_string(otoken_addr)
         mm_pubkey = Pubkey.from_string(mm_addr)
+
+        settler_prog, _ = _get_program_ids()
+        settler_config = _derive_pda([b"settler_config"], settler_prog)
+        _ensure_ata_exists(
+            settler_config,
+            otoken_mint,
+            f"settler otoken {str(otoken_mint)[:8]}",
+        )
+        _ensure_ata_exists(
+            settler_config,
+            collateral_mint,
+            f"settler collateral {str(collateral_mint)[:8]}",
+        )
+        _ensure_ata_exists(
+            mm_pubkey,
+            collateral_mint,
+            f"mm collateral {str(mm_pubkey)[:8]} {str(collateral_mint)[:8]}",
+        )
 
         ix = _build_redeem_for_mm_ix(otoken_mint, mm_pubkey, amount, collateral_mint)
 
