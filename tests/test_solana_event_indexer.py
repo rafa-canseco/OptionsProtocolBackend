@@ -30,8 +30,8 @@ def test_parse_log_payloads_decodes_real_execute_order_payload():
         "amount": "175308641",
         "premium": "50134120",
         "gross_premium": "50134120",
-        "net_premium": "2005364",
-        "protocol_fee": "100022",
+        "net_premium": "48128756",
+        "protocol_fee": "2005364",
         "vault_id": 1,
         "collateral": "141999999",
     }

@@ -134,15 +134,19 @@ def _decode_execute_event(data_b64: str) -> dict | None:
     if len(raw) != 136 or raw[:8] != _EXECUTE_ORDER_DISC:
         return None
 
+    gross_premium = struct.unpack_from("<Q", raw, 112)[0]
+    protocol_fee = struct.unpack_from("<Q", raw, 120)[0]
+    net_premium = max(gross_premium - protocol_fee, 0)
+
     return {
         "user_address": str(Pubkey.from_bytes(raw[8:40])),
         "mm_address": str(Pubkey.from_bytes(raw[40:72])),
         "otoken_address": str(Pubkey.from_bytes(raw[72:104])),
         "amount": str(struct.unpack_from("<Q", raw, 104)[0]),
-        "premium": str(struct.unpack_from("<Q", raw, 112)[0]),
-        "gross_premium": str(struct.unpack_from("<Q", raw, 112)[0]),
-        "net_premium": str(struct.unpack_from("<Q", raw, 120)[0]),
-        "protocol_fee": str(struct.unpack_from("<Q", raw, 128)[0]),
+        "premium": str(gross_premium),
+        "gross_premium": str(gross_premium),
+        "net_premium": str(net_premium),
+        "protocol_fee": str(protocol_fee),
     }
 
 
