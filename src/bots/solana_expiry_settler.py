@@ -17,6 +17,7 @@ import hashlib
 import logging
 import struct
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from solana.exceptions import SolanaRpcException
@@ -145,6 +146,25 @@ def _normalize_pyth_price_to_8dec(asset: Asset) -> int:
             f"{price_8dec} (non-positive). Raw: {price_float}"
         )
     return price_8dec
+
+
+def _strike_price_to_8dec(strike_price: int | float | str) -> int:
+    """Normalize DB strike_price to the 8-decimal format used on-chain.
+
+    Solana rows may store strike_price as a human USD value (e.g. 88.0), while
+    older tests/rows use raw 8-decimal values. Expiry prices are always 8-dec.
+    """
+    try:
+        strike = Decimal(str(strike_price))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"Invalid strike_price: {strike_price}") from exc
+
+    if strike <= 0:
+        raise ValueError(f"Invalid strike_price: {strike_price}")
+
+    if strike < Decimal("1000000"):
+        return int(strike * Decimal("100000000"))
+    return int(strike)
 
 
 # ── DB queries ───────────────────────────────────────────────────
@@ -553,7 +573,15 @@ def _identify_itm_positions(
             )
             continue
 
-        strike = int(pos["strike_price"])
+        try:
+            strike = _strike_price_to_8dec(pos["strike_price"])
+        except ValueError:
+            logger.exception(
+                "Phase 2: invalid strike_price for %s/%s, skipping ITM check",
+                pos.get("user_address", "")[:12],
+                pos.get("vault_id"),
+            )
+            continue
         is_put = pos["is_put"]
         is_itm = (is_put and expiry_price < strike) or (
             not is_put and expiry_price > strike

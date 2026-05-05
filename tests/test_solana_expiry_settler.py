@@ -311,6 +311,40 @@ class TestIdentifyItmPositions:
     @patch(f"{_MODULE}.get_client")
     @patch(f"{_MODULE}._read_otoken_info_expiry_price")
     @patch(f"{_MODULE}.settings")
+    def test_call_otm_with_human_decimal_strike(
+        self, mock_settings, mock_read_price, mock_get_client
+    ):
+        mock_settings.solana_batch_settler_program_id = str(Pubkey.new_unique())
+        mock_settings.solana_controller_program_id = str(Pubkey.new_unique())
+        mock_get_client.return_value = _mock_db()
+        mock_read_price.return_value = 8600000000  # $86 in 8 decimals
+
+        from src.bots.solana_expiry_settler import _identify_itm_positions
+
+        pos = _make_position(strike_price=88.0, is_put=False)
+        itm, cache = _identify_itm_positions([pos])
+        assert len(itm) == 0
+
+    @patch(f"{_MODULE}.get_client")
+    @patch(f"{_MODULE}._read_otoken_info_expiry_price")
+    @patch(f"{_MODULE}.settings")
+    def test_put_otm_with_human_decimal_strike(
+        self, mock_settings, mock_read_price, mock_get_client
+    ):
+        mock_settings.solana_batch_settler_program_id = str(Pubkey.new_unique())
+        mock_settings.solana_controller_program_id = str(Pubkey.new_unique())
+        mock_get_client.return_value = _mock_db()
+        mock_read_price.return_value = 8600000000  # $86 in 8 decimals
+
+        from src.bots.solana_expiry_settler import _identify_itm_positions
+
+        pos = _make_position(strike_price=84.0, is_put=True)
+        itm, cache = _identify_itm_positions([pos])
+        assert len(itm) == 0
+
+    @patch(f"{_MODULE}.get_client")
+    @patch(f"{_MODULE}._read_otoken_info_expiry_price")
+    @patch(f"{_MODULE}.settings")
     def test_price_equals_strike_is_otm(
         self, mock_settings, mock_read_price, mock_get_client
     ):
