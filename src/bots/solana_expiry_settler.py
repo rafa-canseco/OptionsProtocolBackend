@@ -13,6 +13,7 @@ DB marking happens per-vault in Phase 1 and per-position in Phase 2.
 """
 
 import asyncio
+import base64
 import hashlib
 import logging
 import struct
@@ -22,6 +23,10 @@ from decimal import Decimal, InvalidOperation
 import httpx
 from solana.exceptions import SolanaRpcException
 from solana.rpc.commitment import Confirmed
+from solders.address_lookup_table_account import (  # type: ignore[import-untyped]
+    AddressLookupTable,
+    AddressLookupTableAccount,
+)
 from solders.instruction import (  # type: ignore[import-untyped]
     AccountMeta,
     Instruction,
@@ -55,14 +60,20 @@ logger = logging.getLogger(__name__)
 _SET_EXPIRY_PRICE_DISC = hashlib.sha256(b"global:set_expiry_price").digest()[:8]
 _SETTLE_VAULT_DISC = hashlib.sha256(b"global:settle_vault").digest()[:8]
 _REDEEM_FOR_MM_DISC = hashlib.sha256(b"global:redeem_for_mm").digest()[:8]
+_PHYSICAL_REDEEM_DISC = hashlib.sha256(b"global:physical_redeem").digest()[:8]
 
 # On-chain account byte offsets
 _OTOKEN_INFO_EXPIRY_PRICE_OFFSET = (
     154  # disc(8)+4*pubkey(128)+u64(8)+i64(8)+bool(1)+u8(1)
 )
+_OTOKEN_INFO_UNDERLYING_OFFSET = 40
+_OTOKEN_INFO_STRIKE_ASSET_OFFSET = 72
+_OTOKEN_INFO_COLLATERAL_OFFSET = 104
 _OTOKEN_INFO_STRIKE_OFFSET = 136
 _OTOKEN_INFO_EXPIRY_OFFSET = 144
 _OTOKEN_INFO_IS_PUT_OFFSET = 152
+_MINT_DECIMALS_OFFSET = 44
+_SETTLER_CONFIG_JUPITER_OFFSET = 115
 _VAULT_SETTLED_OFFSET = (
     128  # disc(8)+pubkey(32)+u64(8)+pubkey(32)+u64(8)+pubkey(32)+u64(8)
 )
@@ -101,10 +112,24 @@ def _derive_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
 
 def _send_ix(ix: Instruction, label: str) -> str:
     """Build, sign, send and confirm a single instruction."""
+    return _send_ixs([ix], label)
+
+
+def _send_ixs(
+    ixs: list[Instruction],
+    label: str,
+    address_lookup_tables: list[AddressLookupTableAccount] | None = None,
+) -> str:
+    """Build, sign, send and confirm one transaction with one or more ixs."""
     operator = get_solana_operator()
     rpc = get_solana_client()
     blockhash = rpc.get_latest_blockhash(commitment=Confirmed).value.blockhash
-    msg = MessageV0.try_compile(operator.pubkey(), [ix], [], blockhash)
+    msg = MessageV0.try_compile(
+        operator.pubkey(),
+        ixs,
+        address_lookup_tables or [],
+        blockhash,
+    )
     tx = VersionedTransaction(msg, [operator])
     sig = build_and_send_solana_tx(tx)
     logger.info("%s tx=%s", label, sig)
@@ -118,6 +143,14 @@ def _read_account_data(pubkey: Pubkey) -> bytes | None:
     if resp.value is None:
         return None
     return bytes(resp.value.data)
+
+
+def _read_address_lookup_table(pubkey: Pubkey) -> AddressLookupTableAccount:
+    data = _read_account_data(pubkey)
+    if data is None:
+        raise RuntimeError(f"Address lookup table not found: {pubkey}")
+    table = AddressLookupTable.deserialize(data)
+    return AddressLookupTableAccount(pubkey, table.addresses)
 
 
 def _account_exists(pubkey: Pubkey) -> bool:
@@ -681,6 +714,174 @@ def _build_redeem_for_mm_ix(
     )
 
 
+def _jupiter_api_url(path: str) -> str:
+    return f"{settings.solana_jupiter_quote_api_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _fetch_jupiter_quote(
+    input_mint: Pubkey,
+    output_mint: Pubkey,
+    amount: int,
+    swap_mode: str,
+) -> dict:
+    slippage_bps = int(settings.swap_slippage_tolerance * 10_000)
+    params = {
+        "inputMint": str(input_mint),
+        "outputMint": str(output_mint),
+        "amount": str(amount),
+        "swapMode": swap_mode,
+        "slippageBps": str(slippage_bps),
+        "restrictIntermediateTokens": "true",
+        "instructionVersion": "V2",
+    }
+    with httpx.Client(timeout=20) as client:
+        resp = client.get(_jupiter_api_url("/quote"), params=params)
+        resp.raise_for_status()
+        quote = resp.json()
+    if "error" in quote:
+        raise RuntimeError(f"Jupiter quote error: {quote['error']}")
+    return quote
+
+
+def _fetch_jupiter_swap_instructions(
+    quote: dict,
+    user_public_key: Pubkey,
+    destination_token_account: Pubkey,
+) -> dict:
+    operator = get_solana_operator()
+    body = {
+        "quoteResponse": quote,
+        "userPublicKey": str(user_public_key),
+        "payer": str(operator.pubkey()),
+        "destinationTokenAccount": str(destination_token_account),
+        "wrapAndUnwrapSol": False,
+        "useSharedAccounts": False,
+        "asLegacyTransaction": False,
+        "dynamicComputeUnitLimit": True,
+        "skipUserAccountsRpcCalls": False,
+    }
+    with httpx.Client(timeout=20) as client:
+        resp = client.post(_jupiter_api_url("/swap-instructions"), json=body)
+        resp.raise_for_status()
+        payload = resp.json()
+    if "error" in payload:
+        raise RuntimeError(f"Jupiter swap-instructions error: {payload['error']}")
+    swap_ix = payload.get("swapInstruction")
+    if not swap_ix:
+        raise RuntimeError("Jupiter response missing swapInstruction")
+    return payload
+
+
+def _decode_jupiter_instruction(raw_ix: dict) -> Instruction:
+    accounts = [
+        AccountMeta(
+            Pubkey.from_string(acct["pubkey"]),
+            bool(acct.get("isSigner", False)),
+            bool(acct.get("isWritable", False)),
+        )
+        for acct in raw_ix.get("accounts", [])
+    ]
+    data = base64.b64decode(raw_ix["data"])
+    return Instruction(
+        program_id=Pubkey.from_string(raw_ix["programId"]),
+        accounts=accounts,
+        data=data,
+    )
+
+
+def _decode_jupiter_pre_instructions(payload: dict) -> list[Instruction]:
+    raw_ixs = (
+        payload.get("computeBudgetInstructions", [])
+        + payload.get("setupInstructions", [])
+        + payload.get("otherInstructions", [])
+    )
+    return [
+        _decode_jupiter_instruction(ix)
+        for ix in raw_ixs
+    ]
+
+
+def _decode_jupiter_alts(payload: dict) -> list[AddressLookupTableAccount]:
+    return [
+        _read_address_lookup_table(Pubkey.from_string(addr))
+        for addr in payload.get("addressLookupTableAddresses", [])
+    ]
+
+
+def _build_physical_redeem_ix(
+    *,
+    otoken_mint: Pubkey,
+    user: Pubkey,
+    mm_address: Pubkey,
+    vault_pda: Pubkey,
+    amount: int,
+    max_collateral_spent: int,
+    otoken_info: dict,
+    jupiter_swap_ix: Instruction,
+) -> Instruction:
+    """Build batch_settler.physical_redeem with Jupiter CPI remaining accounts."""
+    settler_prog, controller_prog = _get_program_ids()
+    operator = get_solana_operator()
+
+    settler_config = _derive_pda([b"settler_config"], settler_prog)
+    maker_otoken_balance = _derive_pda(
+        [b"mm_balance", bytes(mm_address), bytes(otoken_mint)],
+        settler_prog,
+    )
+    controller_config = _derive_pda([b"controller_config"], controller_prog)
+    collateral_mint = otoken_info["collateral_mint"]
+    is_put = otoken_info["is_put"]
+    contra_mint = otoken_info["underlying"] if is_put else otoken_info["strike_asset"]
+    vault_mm = _derive_pda([b"vault_mm", bytes(vault_pda)], settler_prog)
+    pool_vault_authority = _derive_pda(
+        [b"pool_vault_auth", bytes(collateral_mint)], controller_prog
+    )
+    pool_token_account = _find_pool_token_account(pool_vault_authority, collateral_mint)
+    if pool_token_account is None:
+        raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
+    surplus_mint = collateral_mint if is_put else contra_mint
+    jupiter_program = _read_settler_jupiter_program()
+
+    data = (
+        _PHYSICAL_REDEEM_DISC
+        + struct.pack("<Q", amount)
+        + struct.pack("<Q", max_collateral_spent)
+        + struct.pack("<I", len(jupiter_swap_ix.data))
+        + bytes(jupiter_swap_ix.data)
+    )
+
+    return Instruction(
+        program_id=settler_prog,
+        accounts=[
+            AccountMeta(settler_config, False, False),
+            AccountMeta(operator.pubkey(), True, False),
+            AccountMeta(maker_otoken_balance, False, True),
+            AccountMeta(controller_config, False, False),
+            AccountMeta(otoken_info["pda"], False, False),
+            AccountMeta(otoken_mint, False, True),
+            AccountMeta(collateral_mint, False, False),
+            AccountMeta(_derive_ata(settler_config, otoken_mint), False, True),
+            AccountMeta(_derive_ata(settler_config, collateral_mint), False, True),
+            AccountMeta(contra_mint, False, False),
+            AccountMeta(_derive_ata(settler_config, contra_mint), False, True),
+            AccountMeta(user, False, False),
+            AccountMeta(vault_pda, False, False),
+            AccountMeta(vault_mm, False, True),
+            AccountMeta(_derive_ata(user, contra_mint), False, True),
+            AccountMeta(_derive_ata(mm_address, surplus_mint), False, True),
+            AccountMeta(pool_token_account, False, True),
+            AccountMeta(pool_vault_authority, False, False),
+            AccountMeta(jupiter_program, False, False),
+            AccountMeta(controller_prog, False, False),
+            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+        ]
+        + list(jupiter_swap_ix.accounts),
+        data=data,
+    )
+
+
 def _get_collateral_mint_for_otoken(
     otoken_addr: str,
 ) -> Pubkey | None:
@@ -695,11 +896,98 @@ def _get_collateral_mint_for_otoken(
     return Pubkey.from_bytes(data[104:136])
 
 
+def _read_mint_decimals(mint: Pubkey) -> int:
+    data = _read_account_data(mint)
+    if data is None or len(data) <= _MINT_DECIMALS_OFFSET:
+        raise RuntimeError(f"Cannot read mint decimals for {mint}")
+    return data[_MINT_DECIMALS_OFFSET]
+
+
+def _read_settler_jupiter_program() -> Pubkey:
+    settler_prog, _ = _get_program_ids()
+    settler_config = _derive_pda([b"settler_config"], settler_prog)
+    data = _read_account_data(settler_config)
+    end = _SETTLER_CONFIG_JUPITER_OFFSET + 32
+    if data is None or len(data) < end:
+        raise RuntimeError("Cannot read settler_config.jupiter_program")
+    return Pubkey.from_bytes(data[_SETTLER_CONFIG_JUPITER_OFFSET:end])
+
+
+def _read_otoken_info(otoken_addr: str) -> dict | None:
+    """Read OTokenInfo fields needed for physical settlement."""
+    _, controller = _get_program_ids()
+    otoken_mint = Pubkey.from_string(otoken_addr)
+    otoken_info_pda = _derive_pda([b"otoken_info", bytes(otoken_mint)], controller)
+    data = _read_account_data(otoken_info_pda)
+    if data is None or len(data) < _OTOKEN_INFO_EXPIRY_PRICE_OFFSET + 8:
+        return None
+    return {
+        "pda": otoken_info_pda,
+        "underlying": Pubkey.from_bytes(
+            data[_OTOKEN_INFO_UNDERLYING_OFFSET : _OTOKEN_INFO_UNDERLYING_OFFSET + 32]
+        ),
+        "strike_asset": Pubkey.from_bytes(
+            data[
+                _OTOKEN_INFO_STRIKE_ASSET_OFFSET : _OTOKEN_INFO_STRIKE_ASSET_OFFSET
+                + 32
+            ]
+        ),
+        "collateral_mint": Pubkey.from_bytes(
+            data[_OTOKEN_INFO_COLLATERAL_OFFSET : _OTOKEN_INFO_COLLATERAL_OFFSET + 32]
+        ),
+        "strike_price": struct.unpack_from("<Q", data, _OTOKEN_INFO_STRIKE_OFFSET)[0],
+        "is_put": bool(data[_OTOKEN_INFO_IS_PUT_OFFSET]),
+        "expiry_price": struct.unpack_from(
+            "<Q",
+            data,
+            _OTOKEN_INFO_EXPIRY_PRICE_OFFSET,
+        )[0],
+    }
+
+
+def _compute_solana_contra_amount(
+    amount: int,
+    strike_price: int,
+    is_put: bool,
+    contra_decimals: int,
+) -> int:
+    """Mirror batch_settler::compute_contra_amount for DB marks and quotes."""
+    if amount <= 0:
+        raise ValueError("amount must be positive")
+    if strike_price <= 0:
+        raise ValueError("strike_price must be positive")
+    if is_put:
+        if contra_decimals < 8 or contra_decimals > 18:
+            raise ValueError(f"unsupported PUT contra decimals: {contra_decimals}")
+        result = amount * (10 ** (contra_decimals - 8))
+    else:
+        if contra_decimals < 6 or contra_decimals > 16:
+            raise ValueError(f"unsupported CALL contra decimals: {contra_decimals}")
+        result = (amount * strike_price) // (10 ** (16 - contra_decimals))
+    if result <= 0:
+        raise ValueError("contra amount computed to zero")
+    return result
+
+
+def _compute_solana_collateral_amount(
+    amount: int,
+    strike_price: int,
+    is_put: bool,
+    collateral_decimals: int,
+) -> int:
+    """Estimate full collateral redeemed by the controller."""
+    if is_put:
+        return (amount * strike_price) // (10 ** (16 - collateral_decimals))
+    if collateral_decimals < 8:
+        raise ValueError(f"unsupported CALL collateral decimals: {collateral_decimals}")
+    return amount * (10 ** (collateral_decimals - 8))
+
+
 def _redeem_itm_positions(
     itm_positions: list[dict],
     price_cache: dict[str, int],
 ) -> None:
-    """Phase 2: redeem custodied oTokens for MM on ITM positions."""
+    """Phase 2: physically deliver contra-asset for ITM positions."""
     for pos in itm_positions:
         user_addr = pos["user_address"]
         vault_id = int(pos["vault_id"])
@@ -717,17 +1005,34 @@ def _redeem_itm_positions(
             _mark_itm_failed(user_addr, vault_id, expiry_price)
             continue
 
-        collateral_mint = _get_collateral_mint_for_otoken(otoken_addr)
-        if collateral_mint is None:
+        otoken_info = _read_otoken_info(otoken_addr)
+        if otoken_info is None:
             logger.error(
-                "Phase 2: cannot read collateral_mint for %s, marking failed.",
+                "Phase 2: cannot read OTokenInfo for %s, marking failed.",
                 otoken_addr[:12],
             )
             _mark_itm_failed(user_addr, vault_id, expiry_price)
             continue
 
+        vault_data = _read_vault_data(vault_id)
+        if vault_data is None:
+            logger.error(
+                "Phase 2: vault PDA not found for %s/%d, marking failed.",
+                user_addr[:12],
+                vault_id,
+            )
+            _mark_itm_failed(user_addr, vault_id, expiry_price)
+            continue
+
         otoken_mint = Pubkey.from_string(otoken_addr)
+        user_pubkey = Pubkey.from_string(user_addr)
         mm_pubkey = Pubkey.from_string(mm_addr)
+        collateral_mint = otoken_info["collateral_mint"]
+        contra_mint = (
+            otoken_info["underlying"]
+            if otoken_info["is_put"]
+            else otoken_info["strike_asset"]
+        )
 
         settler_prog, _ = _get_program_ids()
         settler_config = _derive_pda([b"settler_config"], settler_prog)
@@ -742,22 +1047,109 @@ def _redeem_itm_positions(
             f"settler collateral {str(collateral_mint)[:8]}",
         )
         _ensure_ata_exists(
+            settler_config,
+            contra_mint,
+            f"settler contra {str(contra_mint)[:8]}",
+        )
+        _ensure_ata_exists(
+            user_pubkey,
+            contra_mint,
+            f"user contra {str(user_pubkey)[:8]} {str(contra_mint)[:8]}",
+        )
+        surplus_mint = collateral_mint if otoken_info["is_put"] else contra_mint
+        _ensure_ata_exists(
             mm_pubkey,
-            collateral_mint,
-            f"mm collateral {str(mm_pubkey)[:8]} {str(collateral_mint)[:8]}",
+            surplus_mint,
+            f"mm surplus {str(mm_pubkey)[:8]} {str(surplus_mint)[:8]}",
         )
 
-        ix = _build_redeem_for_mm_ix(otoken_mint, mm_pubkey, amount, collateral_mint)
-
         try:
-            sig = _send_ix(
-                ix,
-                f"redeem_for_mm({user_addr[:12]}/{vault_id})",
+            contra_decimals = _read_mint_decimals(contra_mint)
+            collateral_decimals = _read_mint_decimals(collateral_mint)
+            contra_amount = _compute_solana_contra_amount(
+                amount,
+                int(otoken_info["strike_price"]),
+                bool(otoken_info["is_put"]),
+                contra_decimals,
             )
-            _mark_itm_redeemed(user_addr, vault_id, sig, expiry_price)
+            collateral_amount = _compute_solana_collateral_amount(
+                amount,
+                int(otoken_info["strike_price"]),
+                bool(otoken_info["is_put"]),
+                collateral_decimals,
+            )
+
+            if otoken_info["is_put"]:
+                quote = _fetch_jupiter_quote(
+                    collateral_mint,
+                    contra_mint,
+                    contra_amount,
+                    "ExactOut",
+                )
+                max_collateral_spent = int(quote["otherAmountThreshold"])
+                destination = _derive_ata(user_pubkey, contra_mint)
+            else:
+                quote = _fetch_jupiter_quote(
+                    collateral_mint,
+                    contra_mint,
+                    collateral_amount,
+                    "ExactIn",
+                )
+                quoted_out = int(quote.get("outAmount", "0"))
+                if quoted_out < contra_amount:
+                    raise RuntimeError(
+                        "Jupiter CALL quote below required contra amount: "
+                        f"out={quoted_out} required={contra_amount}"
+                    )
+                max_collateral_spent = collateral_amount
+                destination = _derive_ata(settler_config, contra_mint)
+
+            jup_payload = _fetch_jupiter_swap_instructions(
+                quote,
+                settler_config,
+                destination,
+            )
+            pre_ixs = _decode_jupiter_pre_instructions(jup_payload)
+            jup_swap_ix = _decode_jupiter_instruction(jup_payload["swapInstruction"])
+            alts = _decode_jupiter_alts(jup_payload)
+            ix = _build_physical_redeem_ix(
+                otoken_mint=otoken_mint,
+                user=user_pubkey,
+                mm_address=mm_pubkey,
+                vault_pda=vault_data["vault_pda"],
+                amount=amount,
+                max_collateral_spent=max_collateral_spent,
+                otoken_info=otoken_info,
+                jupiter_swap_ix=jup_swap_ix,
+            )
         except Exception:
             logger.exception(
-                "Phase 2: redeem_for_mm failed for %s/%d",
+                "Phase 2: failed to build physical_redeem for %s/%d",
+                user_addr[:12],
+                vault_id,
+            )
+            _mark_itm_failed(user_addr, vault_id, expiry_price)
+            continue
+
+        try:
+            sig = _send_ixs(
+                pre_ixs + [ix],
+                f"physical_redeem({user_addr[:12]}/{vault_id})",
+                alts,
+            )
+            _mark_itm_redeemed(user_addr, vault_id, sig, expiry_price)
+            _db_update(
+                user_addr,
+                vault_id,
+                {
+                    "delivered_asset": str(contra_mint),
+                    "delivered_amount": str(contra_amount),
+                },
+                "mark_physical_delivery_amount",
+            )
+        except Exception:
+            logger.exception(
+                "Phase 2: physical_redeem failed for %s/%d",
                 user_addr[:12],
                 vault_id,
             )
