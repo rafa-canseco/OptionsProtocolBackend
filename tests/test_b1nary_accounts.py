@@ -212,6 +212,49 @@ def test_link_message_returns_409_when_wallet_belongs_to_another_account(fake_db
     assert response.json()["detail"] == "Wallet already belongs to another b1nary account"
 
 
+def test_link_trusted_wallet_allows_smart_without_signature(fake_db):
+    account_id = _create_account(fake_db)
+    address = "0x4444444444444444444444444444444444444444"
+
+    response = client.post(
+        f"/b1nary-accounts/{account_id}/wallets/trusted",
+        json={
+            "privy_user_id": "privy-a",
+            "chain": "base",
+            "address": address,
+            "wallet_type": "smart",
+            "role": "trading",
+            "wallet_client_type": "privy",
+        },
+    )
+
+    assert response.status_code == 200
+    wallet = response.json()["wallet"]
+    assert wallet["address_normalized"] == address
+    assert wallet["wallet_type"] == "smart"
+    assert wallet["verified_at"] is not None
+    assert wallet["verification_message"] is None
+    assert wallet["verification_signature"] is None
+
+
+def test_link_trusted_wallet_rejects_external(fake_db):
+    account_id = _create_account(fake_db)
+
+    response = client.post(
+        f"/b1nary-accounts/{account_id}/wallets/trusted",
+        json={
+            "privy_user_id": "privy-a",
+            "chain": "base",
+            "address": "0x5555555555555555555555555555555555555555",
+            "wallet_type": "external",
+            "role": "trading",
+            "wallet_client_type": "rabby",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_positions_by_privy_user_only_uses_verified_trading_wallets(fake_db):
     account_id = _create_account(fake_db)
     fake_db.tables["b1nary_wallets"].extend(
