@@ -50,6 +50,63 @@ def _put_position(amount_raw: int = 100_000_000, strike: int = 250_000_000_000) 
     }
 
 
+class _QueryRecorder:
+    def __init__(self):
+        self.calls = []
+        self.not_ = self
+        self.data = []
+
+    def table(self, *args):
+        self.calls.append(("table", args))
+        return self
+
+    def select(self, *args):
+        self.calls.append(("select", args))
+        return self
+
+    def eq(self, *args):
+        self.calls.append(("eq", args))
+        return self
+
+    def is_(self, *args):
+        self.calls.append(("is_", args))
+        return self
+
+    def or_(self, *args):
+        self.calls.append(("or_", args))
+        return self
+
+    def lte(self, *args):
+        self.calls.append(("lte", args))
+        return self
+
+    def execute(self):
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Base settlement DB queries
+# ---------------------------------------------------------------------------
+
+
+class TestBaseSettlementQueries:
+    def test_get_expired_unsettled_filters_base_chain(self):
+        db = _QueryRecorder()
+
+        with patch("src.bots.expiry_settler.get_client", return_value=db):
+            settler_module.get_expired_unsettled()
+
+        assert ("eq", ("chain", "base")) in db.calls
+
+    def test_get_pending_phase2_filters_base_chain(self):
+        db = _QueryRecorder()
+
+        with patch("src.bots.expiry_settler.get_client", return_value=db):
+            settler_module.get_pending_phase2()
+
+        assert ("eq", ("chain", "base")) in db.calls
+
+
 # ---------------------------------------------------------------------------
 # _compute_contra_amount
 # ---------------------------------------------------------------------------

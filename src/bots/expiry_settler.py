@@ -57,6 +57,7 @@ def get_expired_unsettled() -> list[dict]:
     result = (
         client.table("order_events")
         .select(_SETTLE_FIELDS)
+        .eq("chain", Chain.BASE.value)
         .or_("is_settled.eq.false,is_settled.is.null")
         .lte("expiry", now)
         .not_.is_("strike_price", "null")
@@ -81,6 +82,7 @@ def get_pending_phase2() -> list[dict]:
     result = (
         client.table("order_events")
         .select(_SETTLE_FIELDS)
+        .eq("chain", Chain.BASE.value)
         .eq("is_settled", True)
         .is_("delivery_tx_hash", "null")
         .lte("expiry", now)
