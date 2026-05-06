@@ -82,6 +82,7 @@ _VAULT_SETTLED_OFFSET = (
 _VAULT_OWNER_OFFSET = 8
 _VAULT_COLLATERAL_MINT_OFFSET = 48  # disc(8)+pubkey(32)+u64(8)
 _VAULT_BENEFICIARY_OFFSET = 129  # after settled bool
+_VAULT_MIN_READ_LEN = _VAULT_BENEFICIARY_OFFSET + 32
 
 # Map asset string to Asset enum for Pyth lookups
 _ASSET_MAP: dict[str, Asset] = {
@@ -659,7 +660,7 @@ def _read_vault_data(vault_id: int) -> dict | None:
         controller,
     )
     data = _read_account_data(vault_pda)
-    if data is None or len(data) < 163:
+    if data is None or len(data) < _VAULT_MIN_READ_LEN:
         return None
     collateral_mint = Pubkey.from_bytes(
         data[_VAULT_COLLATERAL_MINT_OFFSET : _VAULT_COLLATERAL_MINT_OFFSET + 32]
