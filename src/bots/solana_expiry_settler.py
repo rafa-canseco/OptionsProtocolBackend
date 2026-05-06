@@ -29,10 +29,6 @@ from solders.address_lookup_table_account import (  # type: ignore[import-untype
     AddressLookupTable,
     AddressLookupTableAccount,
 )
-from solders.compute_budget import (  # type: ignore[import-untyped]
-    set_compute_unit_limit,
-    set_compute_unit_price,
-)
 from solders.instruction import (  # type: ignore[import-untyped]
     AccountMeta,
     Instruction,
@@ -115,8 +111,6 @@ _PYTH_KECCAK160_HASH_SIZE = 20
 _PYTH_PRICE_FEED_MESSAGE_VARIANT = 0
 _PYTH_REDUCED_GUARDIAN_SIGNATURES = 5
 _PYTH_VAA_SIGNATURE_SIZE = 66
-_PYTH_POST_UPDATE_ATOMIC_COMPUTE_UNITS = 170_000
-_PYTH_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 100_000
 _PYTH_HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest"
 
 
@@ -526,11 +520,7 @@ def _post_fresh_pyth_price_update(asset: Asset) -> tuple[Pubkey, int]:
         price_update_account=price_update_keypair.pubkey(),
     )
     _send_ixs(
-        [
-            set_compute_unit_price(_PYTH_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS),
-            set_compute_unit_limit(_PYTH_POST_UPDATE_ATOMIC_COMPUTE_UNITS),
-            ix,
-        ],
+        [ix],
         f"pyth_post_update_atomic({asset.value})",
         extra_signers=[price_update_keypair],
     )
