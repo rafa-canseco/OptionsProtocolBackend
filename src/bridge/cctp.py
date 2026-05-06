@@ -1,7 +1,10 @@
 """CCTP V2 client — attestation polling and receiveMessage execution."""
 
 import asyncio
+import base64
+import json
 import logging
+from pathlib import Path
 
 import httpx
 from web3 import Web3
@@ -25,12 +28,222 @@ RECEIVE_MESSAGE_ABI = [
 ]
 
 
+TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
+
+
 def get_domain_for_chain(chain: Chain) -> int:
     if chain == Chain.BASE:
         return settings.cctp_base_domain
     if chain == Chain.SOLANA:
         return settings.cctp_solana_domain
     raise ValueError(f"No CCTP domain for chain {chain.value}")
+
+
+def _load_relayer_solana_keypair():
+    from solders.keypair import Keypair
+
+    if not settings.relayer_solana_keypair:
+        raise ValueError(
+            "relayer_solana_keypair not configured. Set RELAYER_SOLANA_KEYPAIR env var."
+        )
+
+    raw = settings.relayer_solana_keypair
+    path = Path(raw)
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+            return Keypair.from_bytes(bytes(data))
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Failed to load relayer Solana keypair from {path}"
+            ) from exc
+
+    try:
+        return Keypair.from_base58_string(raw)
+    except Exception as exc:
+        raise ValueError("Failed to parse RELAYER_SOLANA_KEYPAIR as base58") from exc
+
+
+def _evm_address_to_bytes32_pubkey(address: str):
+    from solders.pubkey import Pubkey
+
+    hex_addr = address[2:] if address.startswith("0x") else address
+    if len(hex_addr) != 40:
+        raise ValueError("EVM recipient must be a 20-byte address")
+    return Pubkey.from_bytes(bytes(12) + bytes.fromhex(hex_addr))
+
+
+def build_solana_cctp_burn_transaction(
+    *,
+    owner: str,
+    destination_domain: int,
+    mint_recipient: str,
+    amount: int,
+    max_fee: int = 0,
+    min_finality_threshold: int = 2000,
+    destination_caller: str | None = None,
+) -> dict:
+    """Build a Solana CCTP deposit_for_burn tx pre-signed by backend.
+
+    The returned transaction still requires the user's owner signature.
+    Backend signs as fee/rent payer and signs the Circle MessageSent event
+    account so users do not need SOL.
+    """
+    from hashlib import sha256
+
+    from solana.rpc.commitment import Confirmed
+    from solders.instruction import AccountMeta, Instruction
+    from solders.keypair import Keypair
+    from solders.message import MessageV0
+    from solders.null_signer import NullSigner
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction
+
+    from src.chains.solana.client import get_solana_client
+
+    if amount <= 0:
+        raise ValueError("amount must be greater than zero")
+    if max_fee < 0:
+        raise ValueError("max_fee cannot be negative")
+    if amount <= max_fee:
+        raise ValueError("amount must be greater than max_fee")
+
+    relayer = _load_relayer_solana_keypair()
+    owner_pk = Pubkey.from_string(owner)
+    message_sent_event = Keypair()
+
+    token_messenger = Pubkey.from_string(settings.cctp_solana_token_messenger)
+    msg_transmitter = Pubkey.from_string(settings.cctp_solana_message_transmitter)
+    usdc_mint = Pubkey.from_string(settings.cctp_solana_usdc_mint)
+    token_program = Pubkey.from_string(TOKEN_PROGRAM_ID)
+    associated_token_program = Pubkey.from_string(ASSOCIATED_TOKEN_PROGRAM_ID)
+    system_program = Pubkey.from_string(SYSTEM_PROGRAM_ID)
+
+    mint_recipient_pk = _evm_address_to_bytes32_pubkey(mint_recipient)
+    if destination_caller:
+        destination_caller_pk = _evm_address_to_bytes32_pubkey(destination_caller)
+    else:
+        destination_caller_pk = Pubkey.default()
+
+    burn_token_account, _ = Pubkey.find_program_address(
+        [bytes(owner_pk), bytes(token_program), bytes(usdc_mint)],
+        associated_token_program,
+    )
+    sender_authority_pda, _ = Pubkey.find_program_address(
+        [b"sender_authority"], token_messenger
+    )
+    denylist_pda, _ = Pubkey.find_program_address(
+        [b"denylist_account", bytes(owner_pk)], token_messenger
+    )
+    message_transmitter, _ = Pubkey.find_program_address(
+        [b"message_transmitter"], msg_transmitter
+    )
+    token_messenger_pda, _ = Pubkey.find_program_address(
+        [b"token_messenger"], token_messenger
+    )
+    remote_token_messenger, _ = Pubkey.find_program_address(
+        [b"remote_token_messenger", str(destination_domain).encode()],
+        token_messenger,
+    )
+    token_minter, _ = Pubkey.find_program_address([b"token_minter"], token_messenger)
+    local_token, _ = Pubkey.find_program_address(
+        [b"local_token", bytes(usdc_mint)], token_messenger
+    )
+    event_authority, _ = Pubkey.find_program_address(
+        [b"__event_authority"], token_messenger
+    )
+    mt_event_authority, _ = Pubkey.find_program_address(
+        [b"__event_authority"], msg_transmitter
+    )
+
+    ix_data = b"".join(
+        [
+            sha256(b"global:deposit_for_burn").digest()[:8],
+            amount.to_bytes(8, "little"),
+            destination_domain.to_bytes(4, "little"),
+            bytes(mint_recipient_pk),
+            bytes(destination_caller_pk),
+            max_fee.to_bytes(8, "little"),
+            min_finality_threshold.to_bytes(4, "little"),
+        ]
+    )
+
+    accounts = [
+        AccountMeta(owner_pk, is_signer=True, is_writable=True),
+        AccountMeta(relayer.pubkey(), is_signer=True, is_writable=True),
+        AccountMeta(sender_authority_pda, is_signer=False, is_writable=False),
+        AccountMeta(burn_token_account, is_signer=False, is_writable=True),
+        AccountMeta(denylist_pda, is_signer=False, is_writable=False),
+        AccountMeta(message_transmitter, is_signer=False, is_writable=True),
+        AccountMeta(token_messenger_pda, is_signer=False, is_writable=False),
+        AccountMeta(remote_token_messenger, is_signer=False, is_writable=False),
+        AccountMeta(token_minter, is_signer=False, is_writable=False),
+        AccountMeta(local_token, is_signer=False, is_writable=True),
+        AccountMeta(usdc_mint, is_signer=False, is_writable=True),
+        AccountMeta(message_sent_event.pubkey(), is_signer=True, is_writable=True),
+        AccountMeta(msg_transmitter, is_signer=False, is_writable=False),
+        AccountMeta(token_messenger, is_signer=False, is_writable=False),
+        AccountMeta(token_program, is_signer=False, is_writable=False),
+        AccountMeta(system_program, is_signer=False, is_writable=False),
+        AccountMeta(event_authority, is_signer=False, is_writable=False),
+        AccountMeta(token_messenger, is_signer=False, is_writable=False),
+        AccountMeta(mt_event_authority, is_signer=False, is_writable=False),
+        AccountMeta(msg_transmitter, is_signer=False, is_writable=False),
+    ]
+
+    ix = Instruction(token_messenger, ix_data, accounts)
+    client = get_solana_client()
+    blockhash = client.get_latest_blockhash(commitment=Confirmed).value.blockhash
+    msg = MessageV0.try_compile(relayer.pubkey(), [ix], [], blockhash)
+    tx = VersionedTransaction(
+        msg,
+        [relayer, NullSigner(owner_pk), message_sent_event],
+    )
+
+    return {
+        "transaction_base64": base64.b64encode(bytes(tx)).decode("ascii"),
+        "message_sent_event_data": str(message_sent_event.pubkey()),
+        "fee_payer": str(relayer.pubkey()),
+        "owner": str(owner_pk),
+        "burn_token_account": str(burn_token_account),
+    }
+
+
+def submit_solana_cctp_burn_transaction(signed_tx_base64: str) -> str:
+    """Submit a fully signed Solana CCTP burn transaction."""
+    from solana.rpc.commitment import Confirmed
+    from solders.transaction import VersionedTransaction
+
+    from src.chains.solana.client import get_solana_client
+
+    try:
+        tx = VersionedTransaction.from_bytes(base64.b64decode(signed_tx_base64))
+    except Exception as exc:
+        raise ValueError("Invalid signed_transaction_base64") from exc
+
+    signer_results = tx.verify_with_results()
+    if not signer_results or not all(signer_results):
+        raise ValueError("Solana CCTP burn transaction is missing required signatures")
+
+    client = get_solana_client()
+    try:
+        resp = client.send_transaction(tx)
+    except Exception as exc:
+        raise RuntimeError("Failed to send Solana CCTP burn tx") from exc
+
+    sig = str(resp.value)
+    try:
+        client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+    except Exception as exc:
+        logger.error("Solana CCTP burn sent but unconfirmed: %s", sig)
+        raise RuntimeError(
+            f"Solana CCTP burn tx {sig} sent but confirmation failed"
+        ) from exc
+
+    logger.info("Solana CCTP burn confirmed: %s", sig)
+    return sig
 
 
 async def poll_attestation(

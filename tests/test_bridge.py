@@ -321,6 +321,140 @@ class TestBridgeAndTradeEndpoint:
         mock_enqueue.assert_called_once_with("new-job-id")
 
 
+class TestSolanaCCTPBurnEndpoints:
+    def test_prepare_returns_partial_transaction(self, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        prepared = {
+            "transaction_base64": "AQID",
+            "message_sent_event_data": SOL_ADDR,
+            "fee_payer": SOL_ADDR,
+            "owner": SOL_ADDR,
+            "burn_token_account": SOL_ADDR,
+        }
+
+        with patch(
+            "src.bridge.routes.build_solana_cctp_burn_transaction",
+            return_value=prepared,
+        ) as mock_build:
+            resp = client.post(
+                "/api/bridge/solana-cctp-burn/prepare",
+                json={
+                    "owner": SOL_ADDR,
+                    "dest_chain": "base",
+                    "mint_recipient": BASE_ADDR,
+                    "burn_amount": "1000000",
+                    "max_fee": "0",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["transaction_base64"] == "AQID"
+        assert body["source_chain"] == "solana"
+        assert body["dest_chain"] == "base"
+        assert body["source_domain"] == 5
+        assert body["destination_domain"] == 6
+        mock_build.assert_called_once()
+
+    def test_prepare_rejects_non_base_destination(self, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+
+        resp = client.post(
+            "/api/bridge/solana-cctp-burn/prepare",
+            json={
+                "owner": SOL_ADDR,
+                "dest_chain": "solana",
+                "mint_recipient": BASE_ADDR,
+                "burn_amount": "1000000",
+            },
+        )
+
+        assert resp.status_code == 400
+
+    def test_submit_broadcasts_and_creates_bridge_job(self, mock_db, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_db.table.return_value.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": "new-job-id"}]
+        )
+
+        with (
+            patch(
+                "src.bridge.routes.submit_solana_cctp_burn_transaction",
+                return_value=SOL_SIG,
+            ) as mock_submit,
+            patch("src.bridge.routes.enqueue_job") as mock_enqueue,
+        ):
+            resp = client.post(
+                "/api/bridge/solana-cctp-burn/submit",
+                json={
+                    "signed_transaction_base64": "AQID",
+                    "dest_chain": "base",
+                    "user_id": "did:privy:test",
+                    "mint_recipient": BASE_ADDR,
+                    "burn_amount": "1000000",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["burn_tx_hash"] == SOL_SIG
+        assert body["job_id"] == "new-job-id"
+        mock_submit.assert_called_once_with("AQID")
+        mock_enqueue.assert_called_once_with("new-job-id")
+
+
+class TestSolanaCCTPBurnBuilder:
+    def test_build_partial_burn_tx_preserves_owner_signature_slot(self, monkeypatch):
+        import base64
+
+        from solders.hash import Hash
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solders.transaction import VersionedTransaction
+
+        from src.bridge.cctp import build_solana_cctp_burn_transaction
+
+        relayer = Keypair()
+        owner = Keypair().pubkey()
+        mock_client = MagicMock()
+        mock_client.get_latest_blockhash.return_value.value.blockhash = Hash.default()
+
+        monkeypatch.setattr(
+            "src.bridge.cctp.settings.relayer_solana_keypair",
+            str(relayer),
+        )
+        monkeypatch.setattr(
+            "src.bridge.cctp.settings.cctp_solana_usdc_mint",
+            str(Pubkey.new_unique()),
+        )
+        monkeypatch.setattr(
+            "src.chains.solana.client.get_solana_client",
+            lambda: mock_client,
+        )
+
+        prepared = build_solana_cctp_burn_transaction(
+            owner=str(owner),
+            destination_domain=6,
+            mint_recipient=BASE_ADDR,
+            amount=1_000_000,
+        )
+
+        tx = VersionedTransaction.from_bytes(
+            base64.b64decode(prepared["transaction_base64"])
+        )
+        signer_results = tx.verify_with_results()
+        owner_index = list(tx.message.account_keys).index(owner)
+        event_index = list(tx.message.account_keys).index(
+            Pubkey.from_string(prepared["message_sent_event_data"])
+        )
+        assert tx.message.account_keys[0] == relayer.pubkey()
+        assert signer_results[owner_index] is False
+        assert signer_results[event_index] is True
+
+
 class TestBridgeStatusEndpoint:
     def test_returns_job(self, mock_db):
         mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
