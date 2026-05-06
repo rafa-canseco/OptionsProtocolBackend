@@ -21,6 +21,7 @@ from src.bridge.models import (
     SolanaCCTPBurnSubmitRequest,
 )
 from src.bridge.relayer import enqueue_job
+from src.bridge.solana_trade import cosign_sponsored_solana_trade_tx
 from src.chains import Chain
 from src.chains.address import ETH_ADDRESS_RE, is_valid_solana_address
 from src.config import is_chain_tradable, settings
@@ -63,8 +64,25 @@ def _validate_bridge_chains(source_chain: str, dest_chain: str) -> None:
             )
 
 
+def _normalize_signed_trade_tx_or_raise(
+    dest_chain: BridgeChain, signed_trade_tx: str | None
+) -> str | None:
+    if dest_chain != BridgeChain.SOLANA or not signed_trade_tx:
+        return signed_trade_tx
+    try:
+        return cosign_sponsored_solana_trade_tx(signed_trade_tx)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to validate sponsored Solana trade tx")
+        raise HTTPException(502, "Could not validate Solana trade transaction") from exc
+
+
 def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
     client = get_client()
+    signed_trade_tx = _normalize_signed_trade_tx_or_raise(
+        body.dest_chain, body.signed_trade_tx
+    )
 
     # Dedup by burn_tx_hash
     try:
@@ -126,7 +144,7 @@ def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
         "burn_amount": body.burn_amount,
         "mint_recipient": body.mint_recipient,
         "quote_id": body.quote_id,
-        "signed_trade_tx": body.signed_trade_tx,
+        "signed_trade_tx": signed_trade_tx,
     }
 
     try:
@@ -147,11 +165,14 @@ def _finalize_bridge_reservation_or_raise(
     reserved: dict, body: BridgeAndTradeRequest
 ) -> str:
     client = get_client()
+    signed_trade_tx = _normalize_signed_trade_tx_or_raise(
+        body.dest_chain, body.signed_trade_tx
+    )
     fields = {
         "burn_tx_hash": body.burn_tx_hash,
         "burn_amount": body.burn_amount,
         "mint_recipient": body.mint_recipient,
-        "signed_trade_tx": body.signed_trade_tx,
+        "signed_trade_tx": signed_trade_tx,
         "error_message": None,
     }
     try:
@@ -184,6 +205,9 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
     if not is_valid_solana_address(body.mint_recipient):
         raise HTTPException(400, "mint_recipient must be a Solana address")
     _validate_solana_cctp_mint_recipient_or_raise(body.mint_recipient)
+    signed_trade_tx = _normalize_signed_trade_tx_or_raise(
+        body.dest_chain, body.signed_trade_tx
+    )
 
     client = get_client()
     try:
@@ -213,7 +237,7 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
         "burn_amount": body.burn_amount,
         "mint_recipient": body.mint_recipient,
         "quote_id": body.quote_id,
-        "signed_trade_tx": body.signed_trade_tx,
+        "signed_trade_tx": signed_trade_tx,
     }
 
     try:
