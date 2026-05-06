@@ -12,6 +12,7 @@ from src.bridge.cctp import (
 )
 from src.bridge.models import (
     BridgeAndTradeRequest,
+    BridgeChain,
     BridgeJobState,
     BridgeJobStatus,
     SolanaCCTPBurnPrepareRequest,
@@ -153,6 +154,82 @@ def _ensure_quote_unused_or_raise(quote_id: str | None) -> None:
         )
 
 
+def _create_solana_burn_reservation_or_raise(body: SolanaCCTPBurnSubmitRequest) -> str:
+    """Reserve a Solana burn intent before broadcasting the signed tx.
+
+    The Solana burn is irreversible once broadcast. Reserving by quote_id first
+    prevents frontend/network retries from submitting multiple signed burn txs
+    for the same trade intent.
+    """
+    if not body.quote_id:
+        raise HTTPException(
+            400,
+            "quote_id is required for Solana CCTP burn submit idempotency",
+        )
+
+    row = {
+        "user_id": body.user_id,
+        "source_chain": BridgeChain.SOLANA.value,
+        "dest_chain": body.dest_chain.value,
+        "status": BridgeJobState.PENDING,
+        "burn_tx_hash": f"pending:{body.quote_id}",
+        "burn_amount": body.burn_amount,
+        "mint_recipient": body.mint_recipient,
+        "quote_id": body.quote_id,
+        "signed_trade_tx": body.signed_trade_tx,
+    }
+
+    client = get_client()
+    try:
+        result = client.table("bridge_jobs").insert(row).execute()
+    except Exception:
+        logger.exception("Failed to reserve Solana CCTP burn for quote %s", body.quote_id)
+        raise HTTPException(
+            409,
+            f"Bridge job already exists or could not be reserved for quote {body.quote_id}",
+        )
+
+    if not result.data:
+        raise HTTPException(502, "Bridge job reservation returned no data")
+
+    return result.data[0]["id"]
+
+
+def _mark_bridge_job_failed(job_id: str, error_message: str) -> None:
+    client = get_client()
+    try:
+        (
+            client.table("bridge_jobs")
+            .update(
+                {
+                    "status": BridgeJobState.FAILED.value,
+                    "error_message": error_message[:500],
+                }
+            )
+            .eq("id", job_id)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to mark bridge job %s failed", job_id)
+
+
+def _finalize_solana_burn_reservation_or_raise(job_id: str, burn_tx_hash: str) -> None:
+    client = get_client()
+    try:
+        result = (
+            client.table("bridge_jobs")
+            .update({"burn_tx_hash": burn_tx_hash, "status": BridgeJobState.PENDING.value})
+            .eq("id", job_id)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to finalize Solana CCTP burn job %s", job_id)
+        raise HTTPException(502, "Could not finalize bridge job")
+
+    if not result.data:
+        raise HTTPException(502, "Bridge job finalize returned no data")
+
+
 @router.post(
     "/bridge-and-trade",
     summary="Create a bridge + trade job",
@@ -245,29 +322,23 @@ async def submit_solana_cctp_burn(body: SolanaCCTPBurnSubmitRequest):
     _validate_bridge_chains("solana", body.dest_chain.value)
     if not ETH_ADDRESS_RE.match(body.mint_recipient):
         raise HTTPException(400, "mint_recipient must be a Base/EVM address")
-    _ensure_quote_unused_or_raise(body.quote_id)
+
+    job_id = _create_solana_burn_reservation_or_raise(body)
 
     try:
         burn_tx_hash = submit_solana_cctp_burn_transaction(
             body.signed_transaction_base64
         )
     except ValueError as exc:
+        _mark_bridge_job_failed(job_id, str(exc))
         raise HTTPException(400, str(exc))
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to submit Solana CCTP burn")
+        _mark_bridge_job_failed(job_id, f"{type(exc).__name__}: {exc}")
         raise HTTPException(502, "Could not submit Solana CCTP burn")
 
-    bridge_body = BridgeAndTradeRequest(
-        burn_tx_hash=burn_tx_hash,
-        source_chain="solana",
-        dest_chain=body.dest_chain,
-        user_id=body.user_id,
-        mint_recipient=body.mint_recipient,
-        burn_amount=body.burn_amount,
-        quote_id=body.quote_id,
-        signed_trade_tx=body.signed_trade_tx,
-    )
-    job_id = _create_bridge_job_or_raise(bridge_body)
+    _finalize_solana_burn_reservation_or_raise(job_id, burn_tx_hash)
+    enqueue_job(job_id)
 
     return {"burn_tx_hash": burn_tx_hash, "job_id": job_id, "status": "pending"}
 

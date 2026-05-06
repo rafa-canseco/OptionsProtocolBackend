@@ -27,6 +27,8 @@ RECEIVE_MESSAGE_ABI = [
     },
 ]
 
+BASE_MAINNET_MESSAGE_TRANSMITTER_V2 = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+
 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
@@ -332,22 +334,30 @@ def receive_message_base(
 
     from src.contracts.web3_client import get_w3, _sign_send_and_confirm
 
-    if not settings.relayer_base_private_key:
+    relayer_private_key = (
+        settings.relayer_base_private_key or settings.operator_private_key
+    )
+    if not relayer_private_key:
         raise ValueError(
-            "relayer_base_private_key not configured. "
-            "Set RELAYER_BASE_PRIVATE_KEY env var."
+            "relayer_base_private_key not configured and operator_private_key "
+            "fallback is unavailable. Set RELAYER_BASE_PRIVATE_KEY or "
+            "OPERATOR_PRIVATE_KEY env var."
         )
-    if not settings.cctp_base_message_transmitter:
+
+    message_transmitter = settings.cctp_base_message_transmitter
+    if not message_transmitter and settings.chain_id == 8453:
+        message_transmitter = BASE_MAINNET_MESSAGE_TRANSMITTER_V2
+    if not message_transmitter:
         raise ValueError(
             "cctp_base_message_transmitter not configured. "
             "Set CCTP_BASE_MESSAGE_TRANSMITTER env var."
         )
 
     w3 = get_w3()
-    account = Account.from_key(settings.relayer_base_private_key)
+    account = Account.from_key(relayer_private_key)
 
     contract = w3.eth.contract(
-        address=Web3.to_checksum_address(settings.cctp_base_message_transmitter),
+        address=Web3.to_checksum_address(message_transmitter),
         abi=RECEIVE_MESSAGE_ABI,
     )
 

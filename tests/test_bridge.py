@@ -23,7 +23,24 @@ class TestBridgeConfig:
     def test_has_bridge_config_false_by_default(self):
         from src.config import has_bridge_config
 
-        assert has_bridge_config() is False
+        with patch("src.config.settings") as mock_settings:
+            mock_settings.cctp_base_message_transmitter = ""
+            mock_settings.chain_id = 8453
+            mock_settings.relayer_base_private_key = ""
+            mock_settings.operator_private_key = ""
+            mock_settings.relayer_solana_keypair = ""
+            assert has_bridge_config() is False
+
+    def test_has_bridge_config_uses_operator_key_for_base_mainnet(self):
+        from src.config import has_bridge_config
+
+        with patch("src.config.settings") as mock_settings:
+            mock_settings.cctp_base_message_transmitter = ""
+            mock_settings.chain_id = 8453
+            mock_settings.relayer_base_private_key = ""
+            mock_settings.operator_private_key = "0x" + "1" * 64
+            mock_settings.relayer_solana_keypair = ""
+            assert has_bridge_config() is True
 
     def test_production_defaults_fail_closed_for_solana_trading(self):
         from src.config import is_asset_tradable, is_chain_tradable
@@ -373,10 +390,10 @@ class TestSolanaCCTPBurnEndpoints:
 
     def test_submit_broadcasts_and_creates_bridge_job(self, mock_db, monkeypatch):
         monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
-        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[]
-        )
         mock_db.table.return_value.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": "new-job-id"}]
+        )
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
             data=[{"id": "new-job-id"}]
         )
 
@@ -395,6 +412,7 @@ class TestSolanaCCTPBurnEndpoints:
                     "user_id": "did:privy:test",
                     "mint_recipient": BASE_ADDR,
                     "burn_amount": "1000000",
+                    "quote_id": "q-solana-1",
                 },
             )
 
@@ -404,6 +422,47 @@ class TestSolanaCCTPBurnEndpoints:
         assert body["job_id"] == "new-job-id"
         mock_submit.assert_called_once_with("AQID")
         mock_enqueue.assert_called_once_with("new-job-id")
+
+    def test_submit_requires_quote_id(self, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+
+        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+            resp = client.post(
+                "/api/bridge/solana-cctp-burn/submit",
+                json={
+                    "signed_transaction_base64": "AQID",
+                    "dest_chain": "base",
+                    "user_id": "did:privy:test",
+                    "mint_recipient": BASE_ADDR,
+                    "burn_amount": "1000000",
+                },
+            )
+
+        assert resp.status_code == 400
+        assert "quote_id is required" in resp.text
+        mock_submit.assert_not_called()
+
+    def test_submit_duplicate_quote_does_not_broadcast(self, mock_db, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        mock_db.table.return_value.insert.return_value.execute.side_effect = Exception(
+            "duplicate key"
+        )
+
+        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+            resp = client.post(
+                "/api/bridge/solana-cctp-burn/submit",
+                json={
+                    "signed_transaction_base64": "AQID",
+                    "dest_chain": "base",
+                    "user_id": "did:privy:test",
+                    "mint_recipient": BASE_ADDR,
+                    "burn_amount": "1000000",
+                    "quote_id": "q-solana-1",
+                },
+            )
+
+        assert resp.status_code == 409
+        mock_submit.assert_not_called()
 
 
 class TestSolanaCCTPBurnBuilder:
