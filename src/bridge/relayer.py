@@ -11,6 +11,7 @@ from src.bridge.cctp import (
     receive_message_solana,
 )
 from src.bridge.models import BridgeChain, BridgeJobState
+from src.bridge.solana_trade import cosign_sponsored_solana_trade_tx
 from src.chains import Chain
 from src.config import settings
 from src.db.database import get_client
@@ -274,7 +275,8 @@ def _submit_trade_solana(signed_tx_base64: str) -> str:
     from src.chains.solana.client import get_solana_client
 
     client = get_solana_client()
-    tx_bytes = base64.b64decode(signed_tx_base64)
+    sponsored_tx_base64 = cosign_sponsored_solana_trade_tx(signed_tx_base64)
+    tx_bytes = base64.b64decode(sponsored_tx_base64)
     tx = VersionedTransaction.from_bytes(tx_bytes)
 
     resp = client.send_transaction(tx)

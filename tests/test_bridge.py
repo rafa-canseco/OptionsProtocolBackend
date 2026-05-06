@@ -321,6 +321,10 @@ class TestBridgeAndTradeEndpoint:
         with (
             patch("src.bridge.routes.enqueue_job") as mock_enqueue,
             patch("src.bridge.routes._validate_solana_cctp_mint_recipient_or_raise"),
+            patch(
+                "src.bridge.routes._normalize_signed_trade_tx_or_raise",
+                return_value="cosigned-tx",
+            ),
         ):
             resp = client.post(
                 "/api/bridge-and-trade/reserve",
@@ -339,6 +343,8 @@ class TestBridgeAndTradeEndpoint:
         body = resp.json()
         assert body["job_id"] == "reserved-job-id"
         assert body["status"] == "reserved"
+        inserted = mock_db.table.return_value.insert.call_args.args[0]
+        assert inserted["signed_trade_tx"] == "cosigned-tx"
         mock_enqueue.assert_not_called()
 
     def test_reserve_is_scoped_to_base_to_solana(self, mock_db):
@@ -387,7 +393,13 @@ class TestBridgeAndTradeEndpoint:
             data=[{"id": "reserved-job-id"}]
         )
 
-        with patch("src.bridge.routes.enqueue_job") as mock_enqueue:
+        with (
+            patch("src.bridge.routes.enqueue_job") as mock_enqueue,
+            patch(
+                "src.bridge.routes._normalize_signed_trade_tx_or_raise",
+                return_value="cosigned-tx",
+            ),
+        ):
             resp = client.post(
                 "/api/bridge-and-trade",
                 json={
@@ -404,6 +416,8 @@ class TestBridgeAndTradeEndpoint:
 
         assert resp.status_code == 200
         assert resp.json()["job_id"] == "reserved-job-id"
+        updated = mock_db.table.return_value.update.call_args.args[0]
+        assert updated["signed_trade_tx"] == "cosigned-tx"
         mock_enqueue.assert_called_once_with("reserved-job-id")
 
     def test_creates_job_and_returns_id(self, mock_db):
@@ -637,6 +651,83 @@ class TestSolanaCCTPBurnBuilder:
         assert tx.message.account_keys[0] == relayer.pubkey()
         assert signer_results[owner_index] is False
         assert signer_results[event_index] is True
+
+
+class TestSponsoredSolanaTrade:
+    def test_cosigns_operator_fee_payer_trade(self, monkeypatch):
+        import base64
+
+        from solders.hash import Hash
+        from solders.keypair import Keypair
+        from solders.message import MessageV0, to_bytes_versioned
+        from solders.signature import Signature
+        from solders.system_program import TransferParams, transfer
+        from solders.transaction import VersionedTransaction
+
+        from src.bridge.solana_trade import cosign_sponsored_solana_trade_tx
+
+        operator = Keypair()
+        user = Keypair()
+        recipient = Keypair()
+        ix = transfer(
+            TransferParams(
+                from_pubkey=user.pubkey(),
+                to_pubkey=recipient.pubkey(),
+                lamports=1,
+            )
+        )
+        msg = MessageV0.try_compile(operator.pubkey(), [ix], [], Hash.default())
+        user_signature = user.sign_message(to_bytes_versioned(msg))
+        partial_tx = VersionedTransaction.populate(
+            msg, [Signature.default(), user_signature]
+        )
+
+        monkeypatch.setattr(
+            "src.bridge.solana_trade.get_solana_operator",
+            lambda: operator,
+        )
+
+        cosigned_base64 = cosign_sponsored_solana_trade_tx(
+            base64.b64encode(bytes(partial_tx)).decode("ascii")
+        )
+        cosigned_tx = VersionedTransaction.from_bytes(base64.b64decode(cosigned_base64))
+
+        assert cosigned_tx.message.account_keys[0] == operator.pubkey()
+        assert cosigned_tx.verify_with_results() == [True, True]
+
+    def test_rejects_user_fee_payer_trade(self, monkeypatch):
+        import base64
+
+        from solders.hash import Hash
+        from solders.keypair import Keypair
+        from solders.message import MessageV0
+        from solders.system_program import TransferParams, transfer
+        from solders.transaction import VersionedTransaction
+
+        from src.bridge.solana_trade import cosign_sponsored_solana_trade_tx
+
+        operator = Keypair()
+        user = Keypair()
+        recipient = Keypair()
+        ix = transfer(
+            TransferParams(
+                from_pubkey=user.pubkey(),
+                to_pubkey=recipient.pubkey(),
+                lamports=1,
+            )
+        )
+        msg = MessageV0.try_compile(user.pubkey(), [ix], [], Hash.default())
+        user_paid_tx = VersionedTransaction(msg, [user])
+
+        monkeypatch.setattr(
+            "src.bridge.solana_trade.get_solana_operator",
+            lambda: operator,
+        )
+
+        with pytest.raises(ValueError, match="fee payer must be the operator"):
+            cosign_sponsored_solana_trade_tx(
+                base64.b64encode(bytes(user_paid_tx)).decode("ascii")
+            )
 
 
 class TestBridgeStatusEndpoint:
