@@ -5,12 +5,22 @@ import re
 
 from fastapi import APIRouter, HTTPException
 
+from src.bridge.cctp import (
+    build_solana_cctp_burn_transaction,
+    get_domain_for_chain,
+    submit_solana_cctp_burn_transaction,
+)
 from src.bridge.models import (
     BridgeAndTradeRequest,
     BridgeJobState,
     BridgeJobStatus,
+    SolanaCCTPBurnPrepareRequest,
+    SolanaCCTPBurnPrepareResponse,
+    SolanaCCTPBurnSubmitRequest,
 )
 from src.bridge.relayer import enqueue_job
+from src.chains import Chain
+from src.chains.address import ETH_ADDRESS_RE, is_valid_solana_address
 from src.config import is_chain_tradable, settings
 from src.db.database import get_client
 
@@ -39,29 +49,18 @@ def _validate_tx_hash(tx_hash: str, chain: str) -> None:
             )
 
 
-@router.post(
-    "/bridge-and-trade",
-    summary="Create a bridge + trade job",
-)
-async def bridge_and_trade(body: BridgeAndTradeRequest):
-    """Initiate a CCTP V2 bridge and optional trade execution.
-
-    The frontend signs the burn tx and (optionally) the trade tx
-    via Privy. This endpoint orchestrates: attestation polling,
-    receiveMessage (mints USDC), and trade tx submission.
-    """
-    if body.source_chain == body.dest_chain:
+def _validate_bridge_chains(source_chain: str, dest_chain: str) -> None:
+    if source_chain == dest_chain:
         raise HTTPException(400, "source_chain and dest_chain must differ")
-
-    for chain in (body.source_chain.value, body.dest_chain.value):
+    for chain in (source_chain, dest_chain):
         if not is_chain_tradable(chain):
             raise HTTPException(
                 403,
                 f"Trading is disabled for {chain} in {settings.app_env}",
             )
 
-    _validate_tx_hash(body.burn_tx_hash, body.source_chain.value)
 
+def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
     client = get_client()
 
     # Dedup by burn_tx_hash
@@ -127,8 +126,150 @@ async def bridge_and_trade(body: BridgeAndTradeRequest):
 
     job_id = result.data[0]["id"]
     enqueue_job(job_id)
+    return job_id
+
+
+def _ensure_quote_unused_or_raise(quote_id: str | None) -> None:
+    if not quote_id:
+        return
+
+    client = get_client()
+    try:
+        existing_quote = (
+            client.table("bridge_jobs")
+            .select("id, status")
+            .eq("quote_id", quote_id)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to check for duplicate quote before burn")
+        raise HTTPException(502, "Could not check for duplicate quote")
+    if existing_quote.data:
+        raise HTTPException(
+            409,
+            f"Bridge job already exists for quote "
+            f"{quote_id} "
+            f"(job {existing_quote.data[0]['id']})",
+        )
+
+
+@router.post(
+    "/bridge-and-trade",
+    summary="Create a bridge + trade job",
+)
+async def bridge_and_trade(body: BridgeAndTradeRequest):
+    """Initiate a CCTP V2 bridge and optional trade execution.
+
+    The frontend signs the burn tx and (optionally) the trade tx
+    via Privy. This endpoint orchestrates: attestation polling,
+    receiveMessage (mints USDC), and trade tx submission.
+    """
+    _validate_bridge_chains(body.source_chain.value, body.dest_chain.value)
+    _validate_tx_hash(body.burn_tx_hash, body.source_chain.value)
+
+    job_id = _create_bridge_job_or_raise(body)
 
     return {"job_id": job_id, "status": "pending"}
+
+
+@router.post(
+    "/bridge/solana-cctp-burn/prepare",
+    response_model=SolanaCCTPBurnPrepareResponse,
+    summary="Prepare a sponsored Solana CCTP burn transaction",
+)
+async def prepare_solana_cctp_burn(body: SolanaCCTPBurnPrepareRequest):
+    """Build a Solana CCTP burn tx that backend pays and partially signs.
+
+    The frontend must add the user's owner signature without Privy sponsorship,
+    then submit the fully signed transaction to the companion submit endpoint.
+    """
+    if body.dest_chain.value != "base":
+        raise HTTPException(
+            400,
+            "Solana CCTP burn prepare currently supports dest_chain=base",
+        )
+    _validate_bridge_chains("solana", body.dest_chain.value)
+    if not is_valid_solana_address(body.owner):
+        raise HTTPException(400, "Invalid Solana owner address")
+    if not ETH_ADDRESS_RE.match(body.mint_recipient):
+        raise HTTPException(400, "mint_recipient must be a Base/EVM address")
+    if body.destination_caller and not ETH_ADDRESS_RE.match(body.destination_caller):
+        raise HTTPException(400, "destination_caller must be a Base/EVM address")
+
+    try:
+        amount = int(body.burn_amount)
+        max_fee = int(body.max_fee)
+    except ValueError:
+        raise HTTPException(400, "burn_amount and max_fee must be integer strings")
+
+    dest_domain = get_domain_for_chain(Chain(body.dest_chain.value))
+    try:
+        prepared = build_solana_cctp_burn_transaction(
+            owner=body.owner,
+            destination_domain=dest_domain,
+            mint_recipient=body.mint_recipient,
+            amount=amount,
+            max_fee=max_fee,
+            min_finality_threshold=body.min_finality_threshold,
+            destination_caller=body.destination_caller,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        logger.exception("Failed to prepare Solana CCTP burn")
+        raise HTTPException(502, "Could not prepare Solana CCTP burn")
+
+    return {
+        **prepared,
+        "source_chain": "solana",
+        "dest_chain": body.dest_chain.value,
+        "source_domain": get_domain_for_chain(Chain.SOLANA),
+        "destination_domain": dest_domain,
+        "burn_amount": str(amount),
+        "max_fee": str(max_fee),
+        "min_finality_threshold": body.min_finality_threshold,
+    }
+
+
+@router.post(
+    "/bridge/solana-cctp-burn/submit",
+    summary="Submit a sponsored Solana CCTP burn transaction",
+)
+async def submit_solana_cctp_burn(body: SolanaCCTPBurnSubmitRequest):
+    """Broadcast a user-signed prepared Solana burn and enqueue bridge relaying."""
+    if body.dest_chain.value != "base":
+        raise HTTPException(
+            400,
+            "Solana CCTP burn submit currently supports dest_chain=base",
+        )
+    _validate_bridge_chains("solana", body.dest_chain.value)
+    if not ETH_ADDRESS_RE.match(body.mint_recipient):
+        raise HTTPException(400, "mint_recipient must be a Base/EVM address")
+    _ensure_quote_unused_or_raise(body.quote_id)
+
+    try:
+        burn_tx_hash = submit_solana_cctp_burn_transaction(
+            body.signed_transaction_base64
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception:
+        logger.exception("Failed to submit Solana CCTP burn")
+        raise HTTPException(502, "Could not submit Solana CCTP burn")
+
+    bridge_body = BridgeAndTradeRequest(
+        burn_tx_hash=burn_tx_hash,
+        source_chain="solana",
+        dest_chain=body.dest_chain,
+        user_id=body.user_id,
+        mint_recipient=body.mint_recipient,
+        burn_amount=body.burn_amount,
+        quote_id=body.quote_id,
+        signed_trade_tx=body.signed_trade_tx,
+    )
+    job_id = _create_bridge_job_or_raise(bridge_body)
+
+    return {"burn_tx_hash": burn_tx_hash, "job_id": job_id, "status": "pending"}
 
 
 @router.get(
