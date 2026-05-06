@@ -49,6 +49,15 @@ class LinkWalletRequest(BaseModel):
     verification_signature: str = Field(..., min_length=1, max_length=1000)
 
 
+class TrustedWalletRequest(BaseModel):
+    privy_user_id: str = Field(..., min_length=1, max_length=255)
+    chain: WalletChain
+    address: str = Field(..., min_length=1, max_length=128)
+    wallet_type: Literal["smart", "embedded"]
+    role: WalletRole = "trading"
+    wallet_client_type: str | None = Field(None, max_length=64)
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -405,6 +414,68 @@ async def link_wallet(
     except Exception:
         logger.exception("Failed to link wallet")
         raise HTTPException(502, "Could not link wallet")
+
+    return {"wallet": wallet_result.data[0]}
+
+
+@router.post(
+    "/b1nary-accounts/{account_id}/wallets/trusted",
+    summary="Link a Privy-trusted wallet without an extra wallet signature",
+)
+async def link_trusted_wallet(
+    account_id: str,
+    body: TrustedWalletRequest,
+    request: Request,
+):
+    """Link a wallet that Privy already controls for this frontend session.
+
+    This MVP path is intentionally limited to Privy smart/embedded wallets.
+    External wallets must keep using the signed `/wallets` flow.
+    """
+    _check_read_rate_limit(_get_client_ip(request))
+    address_normalized = _normalize_wallet_address(body.chain, body.address)
+    client = get_client()
+
+    try:
+        _fetch_account(client, account_id)
+        existing_wallet = (
+            client.table("b1nary_wallets")
+            .select("account_id")
+            .eq("chain", body.chain)
+            .eq("address_normalized", address_normalized)
+            .execute()
+        )
+        if existing_wallet.data and existing_wallet.data[0]["account_id"] != account_id:
+            raise HTTPException(409, "Wallet already belongs to another b1nary account")
+
+        verified_at = _now().isoformat()
+        wallet_result = (
+            client.table("b1nary_wallets")
+            .upsert(
+                {
+                    "account_id": account_id,
+                    "privy_user_id": body.privy_user_id,
+                    "chain": body.chain,
+                    "address": body.address,
+                    "address_normalized": address_normalized,
+                    "wallet_type": body.wallet_type,
+                    "role": body.role,
+                    "wallet_client_type": body.wallet_client_type,
+                    "verification_message": None,
+                    "verification_signature": None,
+                    "verified_at": verified_at,
+                },
+                on_conflict="chain,address_normalized",
+            )
+            .execute()
+        )
+        if not wallet_result.data:
+            raise HTTPException(502, "Could not link trusted wallet")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to link trusted wallet")
+        raise HTTPException(502, "Could not link trusted wallet")
 
     return {"wallet": wallet_result.data[0]}
 
