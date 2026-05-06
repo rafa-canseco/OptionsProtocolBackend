@@ -1057,6 +1057,11 @@ def _build_physical_redeem_ix(
         + bytes(jupiter_swap_ix.data)
     )
 
+    jupiter_remaining_accounts = [
+        AccountMeta(account.pubkey, False, account.is_writable)
+        for account in jupiter_swap_ix.accounts
+    ]
+
     return Instruction(
         program_id=settler_prog,
         accounts=[
@@ -1084,7 +1089,7 @@ def _build_physical_redeem_ix(
             AccountMeta(TOKEN_PROGRAM_ID, False, False),
             AccountMeta(TOKEN_PROGRAM_ID, False, False),
         ]
-        + list(jupiter_swap_ix.accounts),
+        + jupiter_remaining_accounts,
         data=data,
     )
 
