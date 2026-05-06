@@ -310,6 +310,99 @@ class TestBridgeAndTradeEndpoint:
         )
         assert resp.status_code == 409
 
+    def test_reserves_base_to_solana_bridge_job(self, mock_db):
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_db.table.return_value.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": "reserved-job-id"}]
+        )
+
+        with patch("src.bridge.routes.enqueue_job") as mock_enqueue:
+            resp = client.post(
+                "/api/bridge-and-trade/reserve",
+                json={
+                    "source_chain": "base",
+                    "dest_chain": "solana",
+                    "user_id": "test",
+                    "mint_recipient": SOL_ADDR,
+                    "burn_amount": "1000000",
+                    "quote_id": "q-123",
+                    "signed_trade_tx": "AQID",
+                },
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["job_id"] == "reserved-job-id"
+        assert body["status"] == "reserved"
+        mock_enqueue.assert_not_called()
+
+    def test_reserve_is_scoped_to_base_to_solana(self, mock_db):
+        resp = client.post(
+            "/api/bridge-and-trade/reserve",
+            json={
+                "source_chain": "solana",
+                "dest_chain": "base",
+                "user_id": "test",
+                "mint_recipient": BASE_ADDR,
+                "burn_amount": "1000000",
+                "quote_id": "q-123",
+            },
+        )
+
+        assert resp.status_code == 400
+        assert "source_chain=base and dest_chain=solana" in resp.text
+
+    def test_finalizes_reserved_bridge_job(self, mock_db):
+        call_count = [0]
+
+        def select_side_effect(*args, **kwargs):
+            mock_eq = MagicMock()
+            call_count[0] += 1
+            if call_count[0] == 1:
+                mock_eq.execute.return_value = MagicMock(data=[])
+            else:
+                mock_eq.execute.return_value = MagicMock(
+                    data=[
+                        {
+                            "id": "reserved-job-id",
+                            "status": "pending",
+                            "source_chain": "base",
+                            "dest_chain": "solana",
+                            "user_id": "test",
+                            "burn_tx_hash": "pending:q-123",
+                        }
+                    ]
+                )
+            return mock_eq
+
+        mock_db.table.return_value.select.return_value.eq.side_effect = (
+            select_side_effect
+        )
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "reserved-job-id"}]
+        )
+
+        with patch("src.bridge.routes.enqueue_job") as mock_enqueue:
+            resp = client.post(
+                "/api/bridge-and-trade",
+                json={
+                    "burn_tx_hash": BURN_TX,
+                    "source_chain": "base",
+                    "dest_chain": "solana",
+                    "user_id": "test",
+                    "mint_recipient": SOL_ADDR,
+                    "burn_amount": "1000000",
+                    "quote_id": "q-123",
+                    "signed_trade_tx": "AQID",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["job_id"] == "reserved-job-id"
+        mock_enqueue.assert_called_once_with("reserved-job-id")
+
     def test_creates_job_and_returns_id(self, mock_db):
         mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
             data=[]
