@@ -183,6 +183,7 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
         )
     if not is_valid_solana_address(body.mint_recipient):
         raise HTTPException(400, "mint_recipient must be a Solana address")
+    _validate_solana_cctp_mint_recipient_or_raise(body.mint_recipient)
 
     client = get_client()
     try:
@@ -228,6 +229,45 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
         raise HTTPException(502, "Bridge job reservation returned no data")
 
     return result.data[0]["id"]
+
+
+def _validate_solana_cctp_mint_recipient_or_raise(address: str) -> None:
+    """Validate Base→Solana CCTP recipient is a USDC token account.
+
+    Circle's Solana TokenMessenger receives into a token account, not the
+    owner's wallet address. Accepting an owner wallet strands the message:
+    Circle attests it, but Solana receive_message rejects it because the
+    recipient account is not owned by the SPL Token program.
+    """
+    from solders.pubkey import Pubkey
+
+    from src.chains.solana.client import get_solana_client
+
+    try:
+        account = get_solana_client().get_account_info(Pubkey.from_string(address)).value
+    except Exception:
+        logger.exception("Failed to validate Solana CCTP mint recipient %s", address)
+        raise HTTPException(502, "Could not validate Solana mint recipient")
+
+    if account is None:
+        raise HTTPException(
+            400,
+            "mint_recipient must be an existing Solana USDC token account",
+        )
+
+    token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    if str(account.owner) != token_program:
+        raise HTTPException(
+            400,
+            "mint_recipient must be a Solana USDC token account, not wallet owner",
+        )
+
+    data = bytes(account.data)
+    if len(data) < 64:
+        raise HTTPException(400, "mint_recipient is not a valid token account")
+    mint = str(Pubkey.from_bytes(data[:32]))
+    if mint != settings.cctp_solana_usdc_mint:
+        raise HTTPException(400, "mint_recipient token account must be USDC")
 
 
 def _ensure_quote_unused_or_raise(quote_id: str | None) -> None:

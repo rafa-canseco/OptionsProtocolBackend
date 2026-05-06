@@ -318,7 +318,10 @@ class TestBridgeAndTradeEndpoint:
             data=[{"id": "reserved-job-id"}]
         )
 
-        with patch("src.bridge.routes.enqueue_job") as mock_enqueue:
+        with (
+            patch("src.bridge.routes.enqueue_job") as mock_enqueue,
+            patch("src.bridge.routes._validate_solana_cctp_mint_recipient_or_raise"),
+        ):
             resp = client.post(
                 "/api/bridge-and-trade/reserve",
                 json={
