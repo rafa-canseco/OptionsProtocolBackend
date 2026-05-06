@@ -319,7 +319,8 @@ class TestBuildPhysicalRedeemIx:
         }
         jup_ix = MagicMock()
         jup_ix.data = b"route-data"
-        jup_ix.accounts = [AccountMeta(Pubkey.new_unique(), False, True)]
+        jupiter_authority = Pubkey.new_unique()
+        jup_ix.accounts = [AccountMeta(jupiter_authority, True, True)]
 
         amount = 50000000
         max_spent = 123456
@@ -342,6 +343,7 @@ class TestBuildPhysicalRedeemIx:
         assert route_len == len(jup_ix.data)
         assert raw[28:] == jup_ix.data
         assert len(ix.accounts) == 24
+        assert ix.accounts[-1] == AccountMeta(jupiter_authority, False, True)
 
 
 class TestSolanaPhysicalMath:
