@@ -453,13 +453,15 @@ def receive_message_solana(
         attestation_hex[2:] if attestation_hex.startswith("0x") else attestation_hex
     )
 
-    # Parse nonce and source domain from message bytes
-    # CCTP message format: version(4) + sourceDomain(4) + destDomain(4)
-    # + nonce(8) + sender(32) + recipient(32) + destCaller(32) + body(...)
-    nonce = int.from_bytes(message_bytes[12:20], "big")
+    # Parse CCTP V2 message header.
+    # Format: version(4) + sourceDomain(4) + destDomain(4) + nonce(32)
+    # + sender(32) + recipient(32) + destCaller(32)
+    # + minFinality(4) + finalityExecuted(4) + body(...)
+    nonce_bytes = message_bytes[12:44]
     source_domain = int.from_bytes(message_bytes[4:8], "big")
-    # Recipient in message body (offset: 4+4+4+8+32 = 52, 32 bytes)
-    mint_recipient_bytes = message_bytes[84:116]
+    message_body = message_bytes[148:]
+    burn_token_bytes = message_body[4:36]
+    mint_recipient_bytes = message_body[36:68]
 
     # Derive PDAs
     TOKEN_PROGRAM = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
@@ -479,8 +481,7 @@ def receive_message_solana(
     used_nonce, _ = Pubkey.find_program_address(
         [
             b"used_nonce",
-            bytes(Pubkey.from_string(str(source_domain))),
-            nonce.to_bytes(8, "little"),
+            nonce_bytes,
         ],
         msg_transmitter,
     )
@@ -490,7 +491,7 @@ def receive_message_solana(
     remote_tm, _ = Pubkey.find_program_address(
         [
             b"remote_token_messenger",
-            source_domain.to_bytes(4, "big"),
+            str(source_domain).encode(),
         ],
         token_messenger,
     )
@@ -501,8 +502,8 @@ def receive_message_solana(
     token_pair, _ = Pubkey.find_program_address(
         [
             b"token_pair",
-            source_domain.to_bytes(4, "big"),
-            mint_recipient_bytes,
+            str(source_domain).encode(),
+            burn_token_bytes,
         ],
         token_messenger,
     )
@@ -510,15 +511,23 @@ def receive_message_solana(
         [b"custody", bytes(usdc_mint)], token_messenger
     )
 
-    # Recipient's USDC ATA
-    recipient_pk = Pubkey.from_bytes(mint_recipient_bytes)
-    user_ata, _ = Pubkey.find_program_address(
-        [bytes(recipient_pk), bytes(TOKEN_PROGRAM), bytes(usdc_mint)],
+    client = get_solana_client()
+    recipient_token_account = Pubkey.from_bytes(mint_recipient_bytes)
+    tm_account = client.get_account_info(tm_config).value
+    if not tm_account:
+        raise RuntimeError("TokenMessenger account not found")
+    # Anchor discriminator + 3 pubkeys + u32 + u8.
+    fee_recipient = Pubkey.from_bytes(tm_account.data[109:141])
+    fee_recipient_ata, _ = Pubkey.find_program_address(
+        [bytes(fee_recipient), bytes(TOKEN_PROGRAM), bytes(usdc_mint)],
         ASSOCIATED_TOKEN_PROGRAM,
     )
 
     event_authority, _ = Pubkey.find_program_address(
         [b"__event_authority"], token_messenger
+    )
+    mt_event_authority, _ = Pubkey.find_program_address(
+        [b"__event_authority"], msg_transmitter
     )
 
     # Build receive_message instruction
@@ -539,13 +548,16 @@ def receive_message_solana(
         AccountMeta(used_nonce, is_signer=False, is_writable=True),
         AccountMeta(token_messenger, is_signer=False, is_writable=False),
         AccountMeta(SYSTEM_PROGRAM, is_signer=False, is_writable=False),
+        AccountMeta(mt_event_authority, is_signer=False, is_writable=False),
+        AccountMeta(msg_transmitter, is_signer=False, is_writable=False),
         # Remaining accounts for TokenMessengerMinter CPI
         AccountMeta(tm_config, is_signer=False, is_writable=False),
         AccountMeta(remote_tm, is_signer=False, is_writable=False),
         AccountMeta(token_minter, is_signer=False, is_writable=False),
         AccountMeta(local_token, is_signer=False, is_writable=True),
         AccountMeta(token_pair, is_signer=False, is_writable=False),
-        AccountMeta(user_ata, is_signer=False, is_writable=True),
+        AccountMeta(fee_recipient_ata, is_signer=False, is_writable=True),
+        AccountMeta(recipient_token_account, is_signer=False, is_writable=True),
         AccountMeta(custody, is_signer=False, is_writable=True),
         AccountMeta(TOKEN_PROGRAM, is_signer=False, is_writable=False),
         AccountMeta(event_authority, is_signer=False, is_writable=False),
@@ -554,7 +566,6 @@ def receive_message_solana(
 
     ix = Instruction(msg_transmitter, bytes(ix_data), accounts)
 
-    client = get_solana_client()
     recent_blockhash = client.get_latest_blockhash(commitment=Confirmed).value.blockhash
 
     msg = MessageV0.try_compile(relayer.pubkey(), [ix], [], recent_blockhash)
