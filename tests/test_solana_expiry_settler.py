@@ -512,6 +512,36 @@ class TestIdentifyItmPositions:
         itm, _ = _identify_itm_positions([put_pos, call_pos])
         assert len(itm) == 0
 
+    @patch(f"{_MODULE}._read_oracle_expiry_price", return_value=39800000000)
+    @patch(f"{_MODULE}._read_otoken_info")
+    @patch(f"{_MODULE}.get_client")
+    @patch(f"{_MODULE}._read_otoken_info_expiry_price", return_value=0)
+    @patch(f"{_MODULE}.settings")
+    def test_uses_oracle_price_when_controller_price_missing(
+        self,
+        mock_settings,
+        mock_read_controller_price,
+        mock_get_client,
+        mock_read_info,
+        mock_read_oracle_price,
+    ):
+        from src.bots.solana_expiry_settler import _identify_itm_positions
+
+        mock_settings.solana_batch_settler_program_id = str(Pubkey.new_unique())
+        mock_settings.solana_controller_program_id = str(Pubkey.new_unique())
+        mock_get_client.return_value = _mock_db()
+        mock_read_info.return_value = {
+            "underlying": Pubkey.new_unique(),
+            "expiry": 1700000000,
+        }
+
+        pos = _make_position(strike_price=385.0, is_put=True)
+        itm, cache = _identify_itm_positions([pos])
+
+        assert itm == []
+        assert cache[pos["otoken_address"]] == 39800000000
+        mock_read_oracle_price.assert_called_once()
+
 
 def _make_pyth_accumulator(feed_id: str, guardian_signatures: int = 6) -> bytes:
     vaa = bytearray(6 + guardian_signatures * 66 + 12)

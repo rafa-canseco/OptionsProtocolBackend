@@ -1184,6 +1184,13 @@ def _identify_itm_positions(
         if otoken_addr not in price_cache:
             otoken_mint = Pubkey.from_string(otoken_addr)
             ep = _read_otoken_info_expiry_price(otoken_mint)
+            if ep == 0:
+                info = _read_otoken_info(otoken_addr)
+                if info is not None:
+                    ep = _read_oracle_expiry_price(
+                        info["underlying"],
+                        int(info["expiry"]),
+                    )
             price_cache[otoken_addr] = ep
 
         expiry_price = price_cache[otoken_addr]
