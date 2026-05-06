@@ -46,6 +46,21 @@ class BridgeAndTradeRequest(BaseModel):
     )
 
 
+class BridgeJobReserveRequest(BaseModel):
+    source_chain: BridgeChain
+    dest_chain: BridgeChain
+    user_id: str = Field(..., description="Privy user ID")
+    mint_recipient: str = Field(
+        ..., description="Destination wallet address to receive USDC"
+    )
+    burn_amount: str = Field(..., description="Expected USDC amount to burn")
+    quote_id: str = Field(..., description="Quote ID to reserve before burn")
+    signed_trade_tx: str | None = Field(
+        None,
+        description="Pre-signed destination trade transaction. None = bridge only.",
+    )
+
+
 class SolanaCCTPBurnPrepareRequest(BaseModel):
     owner: str = Field(..., description="Solana wallet that owns the USDC ATA")
     dest_chain: BridgeChain = Field(

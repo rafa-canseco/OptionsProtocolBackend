@@ -13,6 +13,7 @@ from src.bridge.cctp import (
 from src.bridge.models import (
     BridgeAndTradeRequest,
     BridgeChain,
+    BridgeJobReserveRequest,
     BridgeJobState,
     BridgeJobStatus,
     SolanaCCTPBurnPrepareRequest,
@@ -32,6 +33,7 @@ router = APIRouter(prefix="/api", tags=["Bridge"])
 EVM_TX_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 # Solana signatures are base58, 87-88 chars
 SOLANA_SIG_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{87,88}$")
+PENDING_BURN_PREFIX = "pending:"
 
 
 def _validate_tx_hash(tx_hash: str, chain: str) -> None:
@@ -88,7 +90,7 @@ def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
         try:
             existing_quote = (
                 client.table("bridge_jobs")
-                .select("id, status")
+                .select("*")
                 .eq("quote_id", body.quote_id)
                 .execute()
             )
@@ -96,6 +98,17 @@ def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
             logger.exception("Failed to check for duplicate quote")
             raise HTTPException(502, "Could not check for duplicate quote")
         if existing_quote.data:
+            reserved = existing_quote.data[0]
+            if (
+                reserved.get("source_chain") == body.source_chain.value
+                and reserved.get("dest_chain") == body.dest_chain.value
+                and reserved.get("user_id") == body.user_id
+                and reserved.get("status") == BridgeJobState.PENDING.value
+                and str(reserved.get("burn_tx_hash", "")).startswith(
+                    PENDING_BURN_PREFIX
+                )
+            ):
+                return _finalize_bridge_reservation_or_raise(reserved, body)
             raise HTTPException(
                 409,
                 f"Bridge job already exists for quote "
@@ -128,6 +141,93 @@ def _create_bridge_job_or_raise(body: BridgeAndTradeRequest) -> str:
     job_id = result.data[0]["id"]
     enqueue_job(job_id)
     return job_id
+
+
+def _finalize_bridge_reservation_or_raise(
+    reserved: dict, body: BridgeAndTradeRequest
+) -> str:
+    client = get_client()
+    fields = {
+        "burn_tx_hash": body.burn_tx_hash,
+        "burn_amount": body.burn_amount,
+        "mint_recipient": body.mint_recipient,
+        "signed_trade_tx": body.signed_trade_tx,
+        "error_message": None,
+    }
+    try:
+        result = (
+            client.table("bridge_jobs")
+            .update(fields)
+            .eq("id", reserved["id"])
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to finalize bridge reservation %s", reserved["id"])
+        raise HTTPException(502, "Could not finalize bridge job reservation")
+
+    if not result.data:
+        raise HTTPException(502, "Bridge job reservation finalize returned no data")
+
+    job_id = result.data[0]["id"]
+    enqueue_job(job_id)
+    return job_id
+
+
+def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
+    if not body.quote_id:
+        raise HTTPException(400, "quote_id is required")
+    if body.source_chain != BridgeChain.BASE or body.dest_chain != BridgeChain.SOLANA:
+        raise HTTPException(
+            400,
+            "Bridge reservation currently supports source_chain=base and dest_chain=solana",
+        )
+    if not is_valid_solana_address(body.mint_recipient):
+        raise HTTPException(400, "mint_recipient must be a Solana address")
+
+    client = get_client()
+    try:
+        existing_quote = (
+            client.table("bridge_jobs")
+            .select("id, status")
+            .eq("quote_id", body.quote_id)
+            .execute()
+        )
+    except Exception:
+        logger.exception("Failed to check for duplicate quote reservation")
+        raise HTTPException(502, "Could not check for duplicate quote")
+    if existing_quote.data:
+        raise HTTPException(
+            409,
+            f"Bridge job already exists for quote "
+            f"{body.quote_id} "
+            f"(job {existing_quote.data[0]['id']})",
+        )
+
+    row = {
+        "user_id": body.user_id,
+        "source_chain": body.source_chain.value,
+        "dest_chain": body.dest_chain.value,
+        "status": BridgeJobState.PENDING.value,
+        "burn_tx_hash": f"{PENDING_BURN_PREFIX}{body.quote_id}",
+        "burn_amount": body.burn_amount,
+        "mint_recipient": body.mint_recipient,
+        "quote_id": body.quote_id,
+        "signed_trade_tx": body.signed_trade_tx,
+    }
+
+    try:
+        result = client.table("bridge_jobs").insert(row).execute()
+    except Exception:
+        logger.exception("Failed to reserve bridge job for quote %s", body.quote_id)
+        raise HTTPException(
+            409,
+            f"Bridge job already exists or could not be reserved for quote {body.quote_id}",
+        )
+
+    if not result.data:
+        raise HTTPException(502, "Bridge job reservation returned no data")
+
+    return result.data[0]["id"]
 
 
 def _ensure_quote_unused_or_raise(quote_id: str | None) -> None:
@@ -259,6 +359,21 @@ def _finalize_solana_burn_reservation_or_raise(job_id: str, burn_tx_hash: str) -
 
     if not result.data:
         raise HTTPException(502, "Bridge job finalize returned no data")
+
+
+@router.post(
+    "/bridge-and-trade/reserve",
+    summary="Reserve a Base to Solana bridge job before burn",
+)
+async def reserve_bridge_and_trade(body: BridgeJobReserveRequest):
+    """Reserve quote_id before frontend broadcasts Base CCTP burn.
+
+    This is intentionally scoped to Base → Solana. It prevents the frontend
+    from burning USDC and then discovering that quote_id is already blocked.
+    """
+    _validate_bridge_chains(body.source_chain.value, body.dest_chain.value)
+    job_id = _create_bridge_reservation_or_raise(body)
+    return {"job_id": job_id, "status": "reserved"}
 
 
 @router.post(

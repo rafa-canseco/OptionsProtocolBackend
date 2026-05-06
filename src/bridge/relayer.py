@@ -59,6 +59,9 @@ async def process_bridge_job(job_id: str) -> None:
     source_chain = BridgeChain(job["source_chain"])
     dest_chain = BridgeChain(job["dest_chain"])
     burn_tx_hash = job["burn_tx_hash"]
+    if str(burn_tx_hash).startswith("pending:"):
+        logger.info("Job %s is a bridge reservation; skipping until finalized", job_id)
+        return
 
     try:
         # ── Attesting ──
