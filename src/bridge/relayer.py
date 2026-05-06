@@ -265,6 +265,7 @@ def _submit_trade_solana(signed_tx_base64: str) -> str:
     import base64
 
     from solana.rpc.commitment import Confirmed
+    from solders.signature import Signature
     from solders.transaction import VersionedTransaction
 
     from src.chains.solana.client import get_solana_client
@@ -275,7 +276,11 @@ def _submit_trade_solana(signed_tx_base64: str) -> str:
 
     resp = client.send_transaction(tx)
     sig = str(resp.value)
-    client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+    client.confirm_transaction(
+        Signature.from_string(sig),
+        commitment=Confirmed,
+        sleep_seconds=0.5,
+    )
     return sig
 
 
