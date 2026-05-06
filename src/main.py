@@ -13,6 +13,7 @@ from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
 from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
+from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
@@ -207,6 +208,10 @@ openapi_tags = [
         "description": "CCTP V2 cross-chain USDC bridging and trade execution. Orchestrates burn→attestation→mint→trade.",
     },
     {
+        "name": "B1nary Accounts",
+        "description": "Product account identity, Privy user membership, and verified wallet linking.",
+    },
+    {
         "name": "System",
         "description": "Health checks and operational status.",
     },
@@ -247,6 +252,7 @@ app.include_router(mm_ws_router)
 app.include_router(activity_router)
 app.include_router(leaderboard_router)
 app.include_router(notifications_router)
+app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
 app.include_router(bridge_router)
 
