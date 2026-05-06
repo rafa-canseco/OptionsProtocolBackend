@@ -705,10 +705,9 @@ def _build_settle_vault_ix(
             AccountMeta(vault_pda, False, True),
             AccountMeta(otoken_info, False, False),
             AccountMeta(pool_token_account, False, True),
+            AccountMeta(collateral_mint, False, False),
             AccountMeta(beneficiary_token_account, False, True),
             AccountMeta(pool_vault_authority, False, False),
-            # controller_admin — same key as operator
-            AccountMeta(operator.pubkey(), True, False),
             AccountMeta(controller_prog, False, False),
             AccountMeta(TOKEN_PROGRAM_ID, False, False),
         ],
