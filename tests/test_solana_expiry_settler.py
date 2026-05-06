@@ -498,16 +498,19 @@ class TestSettleOnce:
     @patch(f"{_MODULE}._identify_itm_positions")
     @patch(f"{_MODULE}._settle_vaults")
     @patch(f"{_MODULE}._ensure_expiry_prices_set")
+    @patch(f"{_MODULE}.get_pending_phase2_solana")
     @patch(f"{_MODULE}.get_expired_unsettled_solana")
     async def test_no_positions_returns_zero(
         self,
         mock_query,
+        mock_phase2_query,
         mock_phase0,
         mock_phase1,
         mock_phase2_id,
         mock_phase2_redeem,
     ):
         mock_query.return_value = []
+        mock_phase2_query.return_value = []
         from src.bots.solana_expiry_settler import settle_once
 
         count = await settle_once()
@@ -520,10 +523,12 @@ class TestSettleOnce:
     @patch(f"{_MODULE}._identify_itm_positions")
     @patch(f"{_MODULE}._settle_vaults")
     @patch(f"{_MODULE}._ensure_expiry_prices_set")
+    @patch(f"{_MODULE}.get_pending_phase2_solana")
     @patch(f"{_MODULE}.get_expired_unsettled_solana")
     async def test_full_flow_with_positions(
         self,
         mock_query,
+        mock_phase2_query,
         mock_phase0,
         mock_phase1,
         mock_phase2_id,
@@ -531,6 +536,7 @@ class TestSettleOnce:
     ):
         positions = [_make_position()]
         mock_query.return_value = positions
+        mock_phase2_query.return_value = []
         mock_phase1.return_value = positions
         mock_phase2_id.return_value = ([], {})
 
@@ -547,10 +553,12 @@ class TestSettleOnce:
     @patch(f"{_MODULE}._identify_itm_positions")
     @patch(f"{_MODULE}._settle_vaults")
     @patch(f"{_MODULE}._ensure_expiry_prices_set")
+    @patch(f"{_MODULE}.get_pending_phase2_solana")
     @patch(f"{_MODULE}.get_expired_unsettled_solana")
     async def test_itm_positions_trigger_redeem(
         self,
         mock_query,
+        mock_phase2_query,
         mock_phase0,
         mock_phase1,
         mock_phase2_id,
@@ -558,6 +566,7 @@ class TestSettleOnce:
     ):
         positions = [_make_position()]
         mock_query.return_value = positions
+        mock_phase2_query.return_value = []
         mock_phase1.return_value = positions
         itm_list = [_make_position()]
         price_cache = {"otoken123": 150000000000}
@@ -568,6 +577,35 @@ class TestSettleOnce:
         count = await settle_once()
         assert count == 1
         mock_phase2_redeem.assert_called_once_with(itm_list, price_cache)
+
+    @pytest.mark.asyncio
+    @patch(f"{_MODULE}._redeem_itm_positions")
+    @patch(f"{_MODULE}._identify_itm_positions")
+    @patch(f"{_MODULE}._settle_vaults")
+    @patch(f"{_MODULE}._ensure_expiry_prices_set")
+    @patch(f"{_MODULE}.get_pending_phase2_solana")
+    @patch(f"{_MODULE}.get_expired_unsettled_solana")
+    async def test_phase2_recovery_without_unsettled_positions(
+        self,
+        mock_query,
+        mock_phase2_query,
+        mock_phase0,
+        mock_phase1,
+        mock_phase2_id,
+        mock_phase2_redeem,
+    ):
+        recovered = [_make_position()]
+        mock_query.return_value = []
+        mock_phase2_query.return_value = recovered
+        mock_phase2_id.return_value = ([], {})
+
+        from src.bots.solana_expiry_settler import settle_once
+
+        count = await settle_once()
+        assert count == 1
+        mock_phase0.assert_not_called()
+        mock_phase1.assert_not_called()
+        mock_phase2_id.assert_called_once_with(recovered)
 
 
 class TestNormalizePythPrice:

@@ -306,6 +306,30 @@ def get_expired_unsettled_solana() -> list[dict]:
     return result.data or []
 
 
+def get_pending_phase2_solana() -> list[dict]:
+    """Get Solana positions settled in Phase 1 but missing Phase 2 marks."""
+    client = get_client()
+    now = int(datetime.now(timezone.utc).timestamp())
+    result = (
+        client.table("order_events")
+        .select(
+            "user_address, vault_id, otoken_address, expiry, "
+            "amount, strike_price, is_put, mm_address, asset"
+        )
+        .eq("chain", "solana")
+        .eq("is_settled", True)
+        .is_("delivery_tx_hash", "null")
+        .lte("expiry", now)
+        .or_("is_itm.is.null,is_itm.eq.true")
+        .not_.is_("strike_price", "null")
+        .not_.is_("is_put", "null")
+        .not_.is_("amount", "null")
+        .not_.is_("mm_address", "null")
+        .execute()
+    )
+    return result.data or []
+
+
 def _db_update(
     user_address: str,
     vault_id: int,
@@ -749,22 +773,21 @@ def _settle_vaults(
             )
             continue
 
-        _ensure_ata_exists(
-            vault_data["beneficiary"],
-            vault_data["collateral_mint"],
-            f"beneficiary {str(vault_data['beneficiary'])[:8]} "
-            f"{str(vault_data['collateral_mint'])[:8]}",
-        )
-
-        otoken_mint = Pubkey.from_string(otoken_addr)
-        ix = _build_settle_vault_ix(
-            vault_data["vault_pda"],
-            otoken_mint,
-            vault_data["collateral_mint"],
-            vault_data["beneficiary"],
-        )
-
         try:
+            _ensure_ata_exists(
+                vault_data["beneficiary"],
+                vault_data["collateral_mint"],
+                f"beneficiary {str(vault_data['beneficiary'])[:8]} "
+                f"{str(vault_data['collateral_mint'])[:8]}",
+            )
+
+            otoken_mint = Pubkey.from_string(otoken_addr)
+            ix = _build_settle_vault_ix(
+                vault_data["vault_pda"],
+                otoken_mint,
+                vault_data["collateral_mint"],
+                vault_data["beneficiary"],
+            )
             sig = _send_ix(
                 ix,
                 f"settle_vault({user_addr[:12]}/{vault_id})",
@@ -1347,17 +1370,29 @@ def _redeem_itm_positions(
 async def settle_once() -> int:
     """Run one full settlement cycle. Returns count of settled."""
     positions = await asyncio.to_thread(get_expired_unsettled_solana)
-    if not positions:
+    phase2_recovery = await asyncio.to_thread(get_pending_phase2_solana)
+    if not positions and not phase2_recovery:
         logger.info("Solana settler: no expired unsettled positions")
         return 0
 
-    logger.info("Solana settler: %d expired unsettled positions", len(positions))
+    logger.info(
+        "Solana settler: %d expired unsettled positions, %d pending Phase 2",
+        len(positions),
+        len(phase2_recovery),
+    )
 
-    # Phase 0: ensure expiry prices are set
-    await asyncio.to_thread(_ensure_expiry_prices_set, positions)
+    if positions:
+        # Phase 0: ensure expiry prices are set
+        await asyncio.to_thread(_ensure_expiry_prices_set, positions)
 
     # Phase 1: settle vaults
-    settled = await asyncio.to_thread(_settle_vaults, positions)
+    settled = await asyncio.to_thread(_settle_vaults, positions) if positions else []
+    seen_keys = {(p["user_address"], p["vault_id"]) for p in settled}
+    for pos in phase2_recovery:
+        key = (pos["user_address"], pos["vault_id"])
+        if key not in seen_keys:
+            settled.append(pos)
+            seen_keys.add(key)
     logger.info("Solana settler Phase 1: settled %d vaults", len(settled))
 
     if not settled:
