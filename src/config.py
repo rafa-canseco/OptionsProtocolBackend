@@ -233,10 +233,17 @@ def get_cctp_attestation_url() -> str:
 
 def has_bridge_config() -> bool:
     """True when CCTP relayer wallets + contracts are configured."""
+    has_base_message_transmitter = (
+        bool(settings.cctp_base_message_transmitter) or settings.chain_id == 8453
+    )
+    has_relayer_key = bool(
+        settings.relayer_base_private_key
+        or settings.operator_private_key
+        or settings.relayer_solana_keypair
+    )
     return bool(
-        settings.cctp_base_message_transmitter
-        and settings.cctp_base_token_messenger
-        and (settings.relayer_base_private_key or settings.relayer_solana_keypair)
+        has_base_message_transmitter
+        and has_relayer_key
     )
 
 
