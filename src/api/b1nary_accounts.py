@@ -58,6 +58,10 @@ class TrustedWalletRequest(BaseModel):
     wallet_client_type: str | None = Field(None, max_length=64)
 
 
+class TrustedMemberRequest(BaseModel):
+    privy_user_id: str = Field(..., min_length=1, max_length=255)
+
+
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
@@ -156,7 +160,10 @@ def _fetch_account_by_privy_user_id(client, privy_user_id: str) -> dict | None:
     if not member_result.data:
         return None
 
-    account_id = member_result.data[0]["account_id"]
+    return _fetch_account_bundle(client, member_result.data[0]["account_id"])
+
+
+def _fetch_account_bundle(client, account_id: str) -> dict | None:
     account_result = (
         client.table("b1nary_accounts").select("*").eq("id", account_id).execute()
     )
@@ -183,6 +190,31 @@ def _fetch_account_by_privy_user_id(client, privy_user_id: str) -> dict | None:
     }
 
 
+def _fetch_account_by_wallet(
+    client,
+    *,
+    chain: WalletChain,
+    address_normalized: str,
+) -> dict | None:
+    wallet_result = (
+        client.table("b1nary_wallets")
+        .select("*")
+        .eq("chain", chain)
+        .eq("address_normalized", address_normalized)
+        .execute()
+    )
+    if not wallet_result.data:
+        return None
+
+    wallet = wallet_result.data[0]
+    if not wallet.get("verified_at"):
+        return None
+    if wallet.get("role") not in {"trading", "funding", "login"}:
+        return None
+
+    return _fetch_account_bundle(client, wallet["account_id"])
+
+
 def _fetch_account(client, account_id: str) -> dict:
     result = client.table("b1nary_accounts").select("*").eq("id", account_id).execute()
     if not result.data:
@@ -200,6 +232,29 @@ async def get_b1nary_account(
         account = _fetch_account_by_privy_user_id(get_client(), privy_user_id)
     except Exception:
         logger.exception("Failed to fetch b1nary account for privy user")
+        raise HTTPException(502, "Could not fetch b1nary account")
+    return account or {"account": None, "members": [], "wallets": []}
+
+
+@router.get(
+    "/b1nary-account/by-wallet",
+    summary="Get b1nary account by verified wallet",
+)
+async def get_b1nary_account_by_wallet(
+    request: Request,
+    chain: WalletChain = Query(...),
+    address: str = Query(..., min_length=1, max_length=128),
+):
+    _check_read_rate_limit(_get_client_ip(request))
+    address_normalized = _normalize_wallet_address(chain, address)
+    try:
+        account = _fetch_account_by_wallet(
+            get_client(),
+            chain=chain,
+            address_normalized=address_normalized,
+        )
+    except Exception:
+        logger.exception("Failed to fetch b1nary account by wallet")
         raise HTTPException(502, "Could not fetch b1nary account")
     return account or {"account": None, "members": [], "wallets": []}
 
@@ -478,6 +533,60 @@ async def link_trusted_wallet(
         raise HTTPException(502, "Could not link trusted wallet")
 
     return {"wallet": wallet_result.data[0]}
+
+
+@router.post(
+    "/b1nary-accounts/{account_id}/members/trusted",
+    summary="Link a Privy user ID to an existing b1nary account",
+)
+async def link_trusted_member(
+    account_id: str,
+    body: TrustedMemberRequest,
+    request: Request,
+):
+    _check_read_rate_limit(_get_client_ip(request))
+    client = get_client()
+
+    try:
+        _fetch_account(client, account_id)
+        existing_member = (
+            client.table("b1nary_account_members")
+            .select("account_id")
+            .eq("privy_user_id", body.privy_user_id)
+            .execute()
+        )
+        if existing_member.data:
+            existing_account_id = existing_member.data[0]["account_id"]
+            if existing_account_id != account_id:
+                raise HTTPException(
+                    409,
+                    "Privy user already belongs to another b1nary account",
+                )
+            account = _fetch_account_bundle(client, account_id)
+            return account or {"account": None, "members": [], "wallets": []}
+
+        member_result = (
+            client.table("b1nary_account_members")
+            .insert(
+                {
+                    "account_id": account_id,
+                    "privy_user_id": body.privy_user_id,
+                    "role": "owner",
+                    "verified_at": _now().isoformat(),
+                }
+            )
+            .execute()
+        )
+        if not member_result.data:
+            raise HTTPException(502, "Could not link b1nary account member")
+        account = _fetch_account_bundle(client, account_id)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to link trusted b1nary account member")
+        raise HTTPException(502, "Could not link b1nary account member")
+
+    return account or {"account": None, "members": [], "wallets": []}
 
 
 def _fetch_account_positions(client, account_id: str) -> list[dict]:

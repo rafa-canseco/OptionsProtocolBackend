@@ -255,6 +255,92 @@ def test_link_trusted_wallet_rejects_external(fake_db):
     assert response.status_code == 422
 
 
+def test_get_account_by_wallet_returns_verified_wallet_account(fake_db):
+    account_id = _create_account(fake_db)
+    address = "0x6666666666666666666666666666666666666666"
+    fake_db.tables["b1nary_wallets"].append(
+        {
+            "account_id": account_id,
+            "chain": "base",
+            "address_normalized": address,
+            "role": "trading",
+            "verified_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    )
+
+    response = client.get(f"/b1nary-account/by-wallet?chain=base&address={address}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["account"]["id"] == account_id
+    assert body["members"][0]["privy_user_id"] == "privy-a"
+    assert body["wallets"][0]["address_normalized"] == address
+
+
+def test_get_account_by_wallet_ignores_unverified_wallet(fake_db):
+    account_id = _create_account(fake_db)
+    address = "0x7777777777777777777777777777777777777777"
+    fake_db.tables["b1nary_wallets"].append(
+        {
+            "account_id": account_id,
+            "chain": "base",
+            "address_normalized": address,
+            "role": "trading",
+            "verified_at": None,
+        }
+    )
+
+    response = client.get(f"/b1nary-account/by-wallet?chain=base&address={address}")
+
+    assert response.status_code == 200
+    assert response.json() == {"account": None, "members": [], "wallets": []}
+
+
+def test_link_trusted_member_adds_new_privy_user(fake_db):
+    account_id = _create_account(fake_db)
+
+    response = client.post(
+        f"/b1nary-accounts/{account_id}/members/trusted",
+        json={"privy_user_id": "privy-b"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    member_ids = {m["privy_user_id"] for m in body["members"]}
+    assert member_ids == {"privy-a", "privy-b"}
+    assert body["account"]["id"] == account_id
+
+
+def test_link_trusted_member_returns_409_for_other_account(fake_db):
+    account_id = _create_account(fake_db)
+    fake_db.tables["b1nary_accounts"].append(
+        {
+            "id": "other-account",
+            "username": "Other",
+            "username_normalized": "other",
+        }
+    )
+    fake_db.tables["b1nary_account_members"].append(
+        {
+            "account_id": "other-account",
+            "privy_user_id": "privy-b",
+            "role": "owner",
+            "verified_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+    )
+
+    response = client.post(
+        f"/b1nary-accounts/{account_id}/members/trusted",
+        json={"privy_user_id": "privy-b"},
+    )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "Privy user already belongs to another b1nary account"
+    )
+
+
 def test_positions_by_privy_user_only_uses_verified_trading_wallets(fake_db):
     account_id = _create_account(fake_db)
     fake_db.tables["b1nary_wallets"].extend(
