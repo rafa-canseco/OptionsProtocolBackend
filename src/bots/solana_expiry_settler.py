@@ -17,6 +17,7 @@ import base64
 import hashlib
 import logging
 import struct
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -462,6 +463,22 @@ def _read_oracle_expiry_price(underlying: Pubkey, expiry: int) -> int:
     return price if is_finalized else 0
 
 
+def _wait_for_oracle_expiry_price(
+    underlying: Pubkey,
+    expiry: int,
+    attempts: int = 6,
+    delay_seconds: float = 1.0,
+) -> int:
+    """Read oracle expiry price with short retries after an init transaction."""
+    for attempt in range(attempts):
+        price = _read_oracle_expiry_price(underlying, expiry)
+        if price > 0:
+            return price
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return 0
+
+
 def _build_oracle_set_expiry_price_ix(
     underlying: Pubkey,
     expiry: int,
@@ -559,19 +576,36 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
                     pyth_price_update,
                 )
                 _send_ix(oracle_ix, f"oracle_set_expiry_price({asset_str})")
-                oracle_price = _read_oracle_expiry_price(
+                oracle_price = _wait_for_oracle_expiry_price(
                     info["underlying"],
                     int(info["expiry"]),
                 )
-            except (ValueError, RuntimeError, SolanaRpcException, httpx.HTTPError, OSError):
-                logger.exception(
-                    "Phase 0: failed to finalize oracle expiry price for %s "
-                    "(underlying=%s expiry=%s)",
-                    otoken_addr[:12],
+            except (
+                ValueError,
+                RuntimeError,
+                SolanaRpcException,
+                httpx.HTTPError,
+                OSError,
+            ):
+                oracle_price = _wait_for_oracle_expiry_price(
                     info["underlying"],
-                    info["expiry"],
+                    int(info["expiry"]),
                 )
-                continue
+                if oracle_price > 0:
+                    logger.info(
+                        "Phase 0: oracle expiry price exists after failed init "
+                        "for %s; continuing",
+                        otoken_addr[:12],
+                    )
+                else:
+                    logger.exception(
+                        "Phase 0: failed to finalize oracle expiry price for %s "
+                        "(underlying=%s expiry=%s)",
+                        otoken_addr[:12],
+                        info["underlying"],
+                        info["expiry"],
+                    )
+                    continue
 
             if oracle_price == 0:
                 logger.error(
