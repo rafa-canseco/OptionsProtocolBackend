@@ -951,6 +951,43 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
                 otoken_addr[:12],
             )
 
+    _retry_missing_controller_expiry_prices(positions)
+
+
+def _retry_missing_controller_expiry_prices(positions: list[dict]) -> None:
+    """Copy finalized oracle prices into oTokenInfo accounts missed in pass one."""
+    seen: set[str] = set()
+    for pos in positions:
+        otoken_addr = pos["otoken_address"]
+        if otoken_addr in seen:
+            continue
+        seen.add(otoken_addr)
+
+        otoken_mint = Pubkey.from_string(otoken_addr)
+        if _read_otoken_info_expiry_price(otoken_mint) > 0:
+            continue
+
+        info = _read_otoken_info(otoken_addr)
+        if info is None:
+            continue
+        oracle_price = _read_oracle_expiry_price(
+            info["underlying"],
+            int(info["expiry"]),
+        )
+        if oracle_price == 0:
+            continue
+
+        try:
+            _send_ix(
+                _build_set_expiry_price_ix(otoken_mint),
+                f"set_expiry_price_retry({otoken_addr[:12]})",
+            )
+        except (SolanaRpcException, RuntimeError, httpx.HTTPError, OSError):
+            logger.exception(
+                "Phase 0: retry set_expiry_price tx failed for %s",
+                otoken_addr[:12],
+            )
+
 
 # ── Phase 1: settle vaults ───────────────────────────────────────
 
@@ -1087,6 +1124,13 @@ def _settle_vaults(
             )
 
             otoken_mint = Pubkey.from_string(otoken_addr)
+            if _read_otoken_info_expiry_price(otoken_mint) == 0:
+                logger.error(
+                    "Phase 1: controller expiry price missing for %s/%d, skipping",
+                    user_addr[:12],
+                    vault_id,
+                )
+                continue
             ix = _build_settle_vault_ix(
                 vault_data["vault_pda"],
                 otoken_mint,
