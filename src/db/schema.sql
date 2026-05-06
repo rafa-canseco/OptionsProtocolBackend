@@ -93,6 +93,77 @@ create index if not exists idx_order_events_unsettled
 create index if not exists idx_order_events_group_id
   on order_events(group_id) where group_id is not null;
 
+-- ============================================================
+-- Product identity: b1nary accounts, Privy members, verified wallets
+-- ============================================================
+
+create table if not exists b1nary_accounts (
+  id uuid primary key default gen_random_uuid(),
+  username text not null,
+  username_normalized text not null unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists b1nary_account_members (
+  account_id uuid not null references b1nary_accounts(id) on delete cascade,
+  privy_user_id text not null,
+  role text not null default 'owner' check (role in ('owner')),
+  verified_at timestamptz,
+  created_at timestamptz not null default now(),
+  primary key (account_id, privy_user_id),
+  unique (privy_user_id)
+);
+
+create index if not exists idx_b1nary_account_members_account
+  on b1nary_account_members(account_id);
+
+create table if not exists b1nary_wallets (
+  id uuid primary key default gen_random_uuid(),
+  account_id uuid not null references b1nary_accounts(id) on delete cascade,
+  privy_user_id text,
+  chain text not null check (chain in ('base', 'solana')),
+  address text not null,
+  address_normalized text not null,
+  wallet_type text not null check (wallet_type in ('smart', 'embedded', 'external')),
+  role text not null default 'trading' check (role in ('trading', 'funding', 'login')),
+  wallet_client_type text,
+  verification_message text,
+  verification_signature text,
+  verified_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (chain, address_normalized)
+);
+
+create index if not exists idx_b1nary_wallets_account
+  on b1nary_wallets(account_id);
+
+create index if not exists idx_b1nary_wallets_verified_trading
+  on b1nary_wallets(account_id, chain, address_normalized)
+  where verified_at is not null and role = 'trading';
+
+create table if not exists b1nary_wallet_link_nonces (
+  nonce text primary key,
+  account_id uuid not null references b1nary_accounts(id) on delete cascade,
+  privy_user_id text not null,
+  chain text not null check (chain in ('base', 'solana')),
+  address text not null,
+  address_normalized text not null,
+  role text not null check (role in ('trading', 'funding', 'login')),
+  message text not null,
+  expires_at timestamptz not null,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_b1nary_wallet_link_nonces_account
+  on b1nary_wallet_link_nonces(account_id);
+
+create index if not exists idx_b1nary_wallet_link_nonces_expires
+  on b1nary_wallet_link_nonces(expires_at)
+  where used_at is null;
+
 -- Singleton row tracking last indexed block (for resumability)
 create table if not exists indexer_state (
   id integer primary key default 1 check (id = 1),
