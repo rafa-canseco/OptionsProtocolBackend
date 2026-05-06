@@ -214,6 +214,7 @@ def build_solana_cctp_burn_transaction(
 def submit_solana_cctp_burn_transaction(signed_tx_base64: str) -> str:
     """Submit a fully signed Solana CCTP burn transaction."""
     from solana.rpc.commitment import Confirmed
+    from solders.signature import Signature
     from solders.transaction import VersionedTransaction
 
     from src.chains.solana.client import get_solana_client
@@ -235,7 +236,11 @@ def submit_solana_cctp_burn_transaction(signed_tx_base64: str) -> str:
 
     sig = str(resp.value)
     try:
-        client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+        client.confirm_transaction(
+            Signature.from_string(sig),
+            commitment=Confirmed,
+            sleep_seconds=0.5,
+        )
     except Exception as exc:
         logger.error("Solana CCTP burn sent but unconfirmed: %s", sig)
         raise RuntimeError(
@@ -393,6 +398,7 @@ def receive_message_solana(
     from solders.keypair import Keypair
     from solders.message import MessageV0
     from solders.pubkey import Pubkey
+    from solders.signature import Signature
     from solders.transaction import VersionedTransaction
 
     from src.chains.solana.client import (
@@ -551,7 +557,11 @@ def receive_message_solana(
 
     sig = str(resp.value)
     try:
-        client.confirm_transaction(sig, commitment=Confirmed, sleep_seconds=0.5)
+        client.confirm_transaction(
+            Signature.from_string(sig),
+            commitment=Confirmed,
+            sleep_seconds=0.5,
+        )
     except Exception as exc:
         logger.error("Solana receiveMessage sent but unconfirmed: %s", sig)
         raise RuntimeError(
