@@ -167,6 +167,38 @@ def _create_solana_burn_reservation_or_raise(body: SolanaCCTPBurnSubmitRequest) 
             "quote_id is required for Solana CCTP burn submit idempotency",
         )
 
+    active_statuses = [
+        BridgeJobState.PENDING.value,
+        BridgeJobState.ATTESTING.value,
+        BridgeJobState.MINTING.value,
+        BridgeJobState.TRADING.value,
+    ]
+    client = get_client()
+    try:
+        active = (
+            client.table("bridge_jobs")
+            .select("id, status, quote_id")
+            .eq("user_id", body.user_id)
+            .eq("source_chain", BridgeChain.SOLANA.value)
+            .in_("status", active_statuses)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        logger.exception(
+            "Failed to check active Solana CCTP bridge for user %s",
+            body.user_id,
+        )
+        raise HTTPException(502, "Could not check active bridge jobs")
+
+    if active.data:
+        existing = active.data[0]
+        raise HTTPException(
+            409,
+            f"Active Solana bridge job already exists "
+            f"(job {existing['id']}, status {existing['status']})",
+        )
+
     row = {
         "user_id": body.user_id,
         "source_chain": BridgeChain.SOLANA.value,
@@ -179,7 +211,6 @@ def _create_solana_burn_reservation_or_raise(body: SolanaCCTPBurnSubmitRequest) 
         "signed_trade_tx": body.signed_trade_tx,
     }
 
-    client = get_client()
     try:
         result = client.table("bridge_jobs").insert(row).execute()
     except Exception:

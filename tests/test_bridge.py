@@ -390,6 +390,9 @@ class TestSolanaCCTPBurnEndpoints:
 
     def test_submit_broadcasts_and_creates_bridge_job(self, mock_db, monkeypatch):
         monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
         mock_db.table.return_value.insert.return_value.execute.return_value = MagicMock(
             data=[{"id": "new-job-id"}]
         )
@@ -444,6 +447,9 @@ class TestSolanaCCTPBurnEndpoints:
 
     def test_submit_duplicate_quote_does_not_broadcast(self, mock_db, monkeypatch):
         monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
         mock_db.table.return_value.insert.return_value.execute.side_effect = Exception(
             "duplicate key"
         )
@@ -462,6 +468,29 @@ class TestSolanaCCTPBurnEndpoints:
             )
 
         assert resp.status_code == 409
+        mock_submit.assert_not_called()
+
+    def test_submit_active_bridge_does_not_broadcast(self, mock_db, monkeypatch):
+        monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
+        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.in_.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"id": "active-job", "status": "minting", "quote_id": "q-old"}]
+        )
+
+        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+            resp = client.post(
+                "/api/bridge/solana-cctp-burn/submit",
+                json={
+                    "signed_transaction_base64": "AQID",
+                    "dest_chain": "base",
+                    "user_id": "did:privy:test",
+                    "mint_recipient": BASE_ADDR,
+                    "burn_amount": "1000000",
+                    "quote_id": "q-solana-2",
+                },
+            )
+
+        assert resp.status_code == 409
+        assert "Active Solana bridge job already exists" in resp.text
         mock_submit.assert_not_called()
 
 
