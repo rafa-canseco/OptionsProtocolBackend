@@ -17,6 +17,7 @@ Base equivalent mapping:
 import asyncio
 import logging
 import struct
+from datetime import datetime, timezone
 
 from solders.instruction import AccountMeta, Instruction  # type: ignore[import-untyped]
 from solders.message import MessageV0  # type: ignore[import-untyped]
@@ -53,6 +54,16 @@ _CLOSE_OTOKEN_INFO_DISC = bytes([110, 129, 226, 76, 224, 3, 121, 255])
 
 SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
 USDC_DECIMALS = 6
+OTokenKey = tuple[float, int, bool]
+
+# Solana RPC is materially more expensive than Base reads. Keep normal cycles
+# DB-first and only run a full on-chain reconciliation periodically.
+FULL_RECONCILE_EVERY_CYCLES = 12
+_publish_cycle_count = 0
+
+
+def _spec_key(spec: OTokenSpec) -> OTokenKey:
+    return (spec.strike, spec.expiry_ts, spec.option_type == OptionType.PUT)
 
 
 def _get_program_ids() -> tuple[Pubkey, Pubkey, Pubkey]:
@@ -525,6 +536,7 @@ def _find_or_create_otoken(
 def ensure_solana_otokens_exist(
     specs: list[OTokenSpec],
     asset: Asset,
+    existing_by_key: dict[OTokenKey, str] | None = None,
 ) -> list[tuple[str, OTokenSpec]]:
     """For each spec, ensure oToken exists on Solana. Returns (mint, spec) pairs."""
     factory_program, controller_program, whitelist_program = _get_program_ids()
@@ -535,12 +547,13 @@ def ensure_solana_otokens_exist(
     underlying = Pubkey.from_string(cfg.underlying_address)
     strike_asset = Pubkey.from_string(settings.solana_usdc_mint)
 
+    existing_by_key = existing_by_key or {}
     seen: dict[tuple, str | None] = {}
     results: list[tuple[str, OTokenSpec]] = []
 
     for spec in specs:
         is_put = spec.option_type == OptionType.PUT
-        key = (spec.strike, spec.expiry_ts, is_put)
+        key = _spec_key(spec)
         label = (
             f"{asset.value} strike={spec.strike} "
             f"expiry={spec.expiry_ts} "
@@ -550,6 +563,12 @@ def ensure_solana_otokens_exist(
         if key in seen:
             if seen[key] is not None:
                 results.append((seen[key], spec))
+            continue
+
+        existing_addr = existing_by_key.get(key)
+        if existing_addr:
+            seen[key] = existing_addr
+            results.append((existing_addr, spec))
             continue
 
         strike_price = strike_to_8_decimals(spec.strike)
@@ -585,16 +604,54 @@ def ensure_solana_otokens_exist(
         seen[key] = mint_addr
         results.append((mint_addr, spec))
 
-        # Incremental DB upsert so `/prices?asset=X` can see this oToken
-        # immediately, instead of waiting ~30-60 min for the full asset
-        # cycle to finish (especially painful on first-run with many new
-        # strikes × expiries on-chain).
-        try:
-            _upsert_solana_otokens([(mint_addr, spec)], asset)
-        except Exception:
-            logger.exception("Failed incremental upsert for %s", label)
-
     return results
+
+
+def _load_existing_solana_otokens_for_specs(
+    specs: list[OTokenSpec],
+    asset: Asset,
+) -> dict[OTokenKey, str]:
+    """Load already-published Solana oTokens for target specs from DB.
+
+    This mirrors Base's DB-fast path and avoids repeated Solana
+    get_account_info calls for oTokens already known to be usable.
+    """
+    if not specs:
+        return {}
+
+    target_keys = {_spec_key(spec) for spec in specs}
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    underlying = get_asset_config(asset).underlying_address
+    client = get_client()
+    result = (
+        client.table("available_otokens")
+        .select("otoken_address,strike_price,expiry,is_put,underlying")
+        .eq("chain", "solana")
+        .gt("expiry", now_ts)
+        .execute()
+    )
+    if result.data is None:
+        raise RuntimeError("available_otokens query returned data=None")
+
+    existing: dict[OTokenKey, str] = {}
+    for row in result.data:
+        try:
+            row_underlying = row.get("underlying")
+            if row_underlying is not None and str(row_underlying) != underlying:
+                continue
+            key = (
+                float(row["strike_price"]),
+                int(row["expiry"]),
+                bool(row["is_put"]),
+            )
+            addr = str(row["otoken_address"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("Skipping malformed Solana available_otokens row: %s", row)
+            continue
+        if key in target_keys and key not in existing:
+            existing[key] = addr
+
+    return existing
 
 
 def _upsert_solana_otokens(
@@ -640,6 +697,9 @@ def _upsert_solana_otokens(
 
 async def publish_once():
     """Single cycle: generate specs for Solana assets, create on-chain."""
+    global _publish_cycle_count
+    _publish_cycle_count += 1
+
     custom_expiries = None
     raw = settings.custom_expiry_timestamps.strip()
     if raw:
@@ -659,7 +719,33 @@ async def publish_once():
             spot=spot, asset=asset, expiry_timestamps=custom_expiries
         )
 
-        paired = await asyncio.to_thread(ensure_solana_otokens_exist, specs, asset)
+        if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
+            existing_by_key = {}
+            logger.info(
+                "Solana oToken manager full reconciliation cycle for %s: "
+                "checking target specs on-chain",
+                asset.value,
+            )
+        else:
+            existing_by_key = await asyncio.to_thread(
+                _load_existing_solana_otokens_for_specs,
+                specs,
+                asset,
+            )
+            logger.info(
+                "Solana oToken manager DB diff for %s: "
+                "%d/%d target specs already published",
+                asset.value,
+                len(existing_by_key),
+                len({_spec_key(spec) for spec in specs}),
+            )
+
+        paired = await asyncio.to_thread(
+            ensure_solana_otokens_exist,
+            specs,
+            asset,
+            existing_by_key,
+        )
         if not paired:
             logger.warning("No Solana oTokens for %s", asset.value)
             continue
