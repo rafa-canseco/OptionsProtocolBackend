@@ -7,6 +7,7 @@ import pytest
 from solders.instruction import AccountMeta  # type: ignore[import-untyped]
 from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
+from spl.token.constants import TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID
 from unittest.mock import MagicMock, patch
 
 
@@ -222,11 +223,12 @@ class TestBuildSetExpiryPriceIx:
 class TestBuildSettleVaultIx:
     """Verify settle_vault instruction structure."""
 
+    @patch(f"{_MODULE}._token_program_for_mint", return_value=TOKEN_2022_PROGRAM_ID)
     @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}.get_solana_operator")
     @patch(f"{_MODULE}.settings")
     def test_instruction_targets_settler_program(
-        self, mock_settings, mock_operator, mock_pool
+        self, mock_settings, mock_operator, mock_pool, mock_token_program
     ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
@@ -249,16 +251,21 @@ class TestBuildSettleVaultIx:
         assert bytes(ix.data) == _SETTLE_VAULT_DISC
         # 11 accounts
         assert len(ix.accounts) == 11
+        assert ix.accounts[10] == AccountMeta(TOKEN_2022_PROGRAM_ID, False, False)
 
 
 class TestBuildRedeemForMmIx:
     """Verify redeem_for_mm instruction structure."""
 
+    @patch(
+        f"{_MODULE}._token_program_for_mint",
+        side_effect=[TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID],
+    )
     @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}.get_solana_operator")
     @patch(f"{_MODULE}.settings")
     def test_instruction_data_contains_amount(
-        self, mock_settings, mock_operator, mock_pool
+        self, mock_settings, mock_operator, mock_pool, mock_token_program
     ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
@@ -281,19 +288,29 @@ class TestBuildRedeemForMmIx:
         assert bytes(ix.data[:8]) == _REDEEM_FOR_MM_DISC
         decoded = struct.unpack_from("<Q", bytes(ix.data), 8)[0]
         assert decoded == amount
-        # 13 accounts
-        assert len(ix.accounts) == 13
+        # 15 accounts
+        assert len(ix.accounts) == 15
+        assert ix.accounts[13] == AccountMeta(TOKEN_PROGRAM_ID, False, False)
+        assert ix.accounts[14] == AccountMeta(TOKEN_2022_PROGRAM_ID, False, False)
 
 
 class TestBuildPhysicalRedeemIx:
     """Verify physical_redeem instruction structure."""
 
+    @patch(
+        f"{_MODULE}._token_program_for_mint",
+        side_effect=[
+            TOKEN_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID,
+            TOKEN_2022_PROGRAM_ID,
+        ],
+    )
     @patch(f"{_MODULE}._read_settler_jupiter_program", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}._find_pool_token_account", return_value=Pubkey.new_unique())
     @patch(f"{_MODULE}.get_solana_operator")
     @patch(f"{_MODULE}.settings")
     def test_instruction_data_contains_amount_max_and_route(
-        self, mock_settings, mock_operator, mock_pool, mock_jup
+        self, mock_settings, mock_operator, mock_pool, mock_jup, mock_token_program
     ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
@@ -343,6 +360,9 @@ class TestBuildPhysicalRedeemIx:
         assert route_len == len(jup_ix.data)
         assert raw[28:] == jup_ix.data
         assert len(ix.accounts) == 24
+        assert ix.accounts[20] == AccountMeta(TOKEN_PROGRAM_ID, False, False)
+        assert ix.accounts[21] == AccountMeta(TOKEN_2022_PROGRAM_ID, False, False)
+        assert ix.accounts[22] == AccountMeta(TOKEN_2022_PROGRAM_ID, False, False)
         assert ix.accounts[-1] == AccountMeta(jupiter_authority, False, True)
 
 

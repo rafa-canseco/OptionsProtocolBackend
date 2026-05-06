@@ -40,6 +40,7 @@ from solders.transaction import (  # type: ignore[import-untyped]
 )
 from spl.token.constants import (  # type: ignore[import-untyped]
     TOKEN_PROGRAM_ID,
+    TOKEN_2022_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
 )
 from spl.token.instructions import (  # type: ignore[import-untyped]
@@ -114,9 +115,25 @@ def _derive_pda(seeds: list[bytes], program: Pubkey) -> Pubkey:
     return Pubkey.find_program_address(seeds, program)[0]
 
 
-def _derive_ata(owner: Pubkey, mint: Pubkey) -> Pubkey:
+def _token_program_for_mint(mint: Pubkey) -> Pubkey:
+    rpc = get_solana_client()
+    resp = rpc.get_account_info(mint)
+    if resp.value is None:
+        raise RuntimeError(f"Mint account not found: {mint}")
+    owner = resp.value.owner
+    if owner not in (TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID):
+        raise RuntimeError(f"Unsupported token program for mint {mint}: {owner}")
+    return owner
+
+
+def _derive_ata(
+    owner: Pubkey,
+    mint: Pubkey,
+    token_program_id: Pubkey | None = None,
+) -> Pubkey:
+    token_program = token_program_id or _token_program_for_mint(mint)
     return Pubkey.find_program_address(
-        [bytes(owner), bytes(TOKEN_PROGRAM_ID), bytes(mint)],
+        [bytes(owner), bytes(token_program), bytes(mint)],
         ASSOCIATED_TOKEN_PROGRAM_ID,
     )[0]
 
@@ -171,7 +188,8 @@ def _account_exists(pubkey: Pubkey) -> bool:
 
 def _ensure_ata_exists(owner: Pubkey, mint: Pubkey, label: str) -> Pubkey:
     """Ensure owner has an ATA for mint and return its address."""
-    ata = _derive_ata(owner, mint)
+    token_program = _token_program_for_mint(mint)
+    ata = _derive_ata(owner, mint, token_program)
     if _account_exists(ata):
         return ata
 
@@ -180,7 +198,7 @@ def _ensure_ata_exists(owner: Pubkey, mint: Pubkey, label: str) -> Pubkey:
         payer=operator.pubkey(),
         owner=owner,
         mint=mint,
-        token_program_id=TOKEN_PROGRAM_ID,
+        token_program_id=token_program,
     )
     _send_ix(ix, f"create_ata({label})")
     return ata
@@ -195,14 +213,15 @@ def _find_pool_token_account(pool_vault_authority: Pubkey, mint: Pubkey) -> Pubk
     from solana.rpc.types import TokenAccountOpts
 
     rpc = get_solana_client()
+    token_program = _token_program_for_mint(mint)
     resp = rpc.get_token_accounts_by_owner(
         pool_vault_authority,
-        TokenAccountOpts(mint=mint),
+        TokenAccountOpts(mint=mint, program_id=token_program),
     )
     if resp.value:
         return resp.value[0].pubkey
     # Fallback to ATA
-    return _derive_ata(pool_vault_authority, mint)
+    return _derive_ata(pool_vault_authority, mint, token_program)
 
 
 def _normalize_pyth_price_to_8dec(asset: Asset) -> int:
@@ -718,7 +737,12 @@ def _build_settle_vault_ix(
     pool_token_account = _find_pool_token_account(pool_vault_authority, collateral_mint)
     if pool_token_account is None:
         raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
-    beneficiary_token_account = _derive_ata(beneficiary, collateral_mint)
+    collateral_token_program = _token_program_for_mint(collateral_mint)
+    beneficiary_token_account = _derive_ata(
+        beneficiary,
+        collateral_mint,
+        collateral_token_program,
+    )
 
     return Instruction(
         program_id=settler_prog,
@@ -733,7 +757,7 @@ def _build_settle_vault_ix(
             AccountMeta(beneficiary_token_account, False, True),
             AccountMeta(pool_vault_authority, False, False),
             AccountMeta(controller_prog, False, False),
-            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+            AccountMeta(collateral_token_program, False, False),
         ],
         data=_SETTLE_VAULT_DISC,
     )
@@ -894,9 +918,23 @@ def _build_redeem_for_mm_ix(
     pool_token_account = _find_pool_token_account(pool_vault_authority, collateral_mint)
     if pool_token_account is None:
         raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
-    settler_otoken_account = _derive_ata(settler_config, otoken_mint)
-    settler_collateral_account = _derive_ata(settler_config, collateral_mint)
-    mm_collateral_account = _derive_ata(mm_address, collateral_mint)
+    otoken_token_program = _token_program_for_mint(otoken_mint)
+    collateral_token_program = _token_program_for_mint(collateral_mint)
+    settler_otoken_account = _derive_ata(
+        settler_config,
+        otoken_mint,
+        otoken_token_program,
+    )
+    settler_collateral_account = _derive_ata(
+        settler_config,
+        collateral_mint,
+        collateral_token_program,
+    )
+    mm_collateral_account = _derive_ata(
+        mm_address,
+        collateral_mint,
+        collateral_token_program,
+    )
 
     data = _REDEEM_FOR_MM_DISC + struct.pack("<Q", amount)
 
@@ -909,13 +947,15 @@ def _build_redeem_for_mm_ix(
             AccountMeta(controller_config, False, False),
             AccountMeta(otoken_info, False, False),
             AccountMeta(otoken_mint, False, True),
+            AccountMeta(collateral_mint, False, False),
             AccountMeta(settler_otoken_account, False, True),
             AccountMeta(settler_collateral_account, False, True),
             AccountMeta(mm_collateral_account, False, True),
             AccountMeta(pool_token_account, False, True),
             AccountMeta(pool_vault_authority, False, False),
             AccountMeta(controller_prog, False, False),
-            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+            AccountMeta(otoken_token_program, False, False),
+            AccountMeta(collateral_token_program, False, False),
         ],
         data=data,
     )
@@ -1048,6 +1088,12 @@ def _build_physical_redeem_ix(
         raise RuntimeError(f"No pool token account found for mint {collateral_mint}")
     surplus_mint = collateral_mint if is_put else contra_mint
     jupiter_program = _read_settler_jupiter_program()
+    otoken_token_program = _token_program_for_mint(otoken_mint)
+    collateral_token_program = _token_program_for_mint(collateral_mint)
+    contra_token_program = _token_program_for_mint(contra_mint)
+    surplus_token_program = (
+        collateral_token_program if is_put else contra_token_program
+    )
 
     data = (
         _PHYSICAL_REDEEM_DISC
@@ -1072,22 +1118,46 @@ def _build_physical_redeem_ix(
             AccountMeta(otoken_info["pda"], False, False),
             AccountMeta(otoken_mint, False, True),
             AccountMeta(collateral_mint, False, False),
-            AccountMeta(_derive_ata(settler_config, otoken_mint), False, True),
-            AccountMeta(_derive_ata(settler_config, collateral_mint), False, True),
+            AccountMeta(
+                _derive_ata(settler_config, otoken_mint, otoken_token_program),
+                False,
+                True,
+            ),
+            AccountMeta(
+                _derive_ata(
+                    settler_config,
+                    collateral_mint,
+                    collateral_token_program,
+                ),
+                False,
+                True,
+            ),
             AccountMeta(contra_mint, False, False),
-            AccountMeta(_derive_ata(settler_config, contra_mint), False, True),
+            AccountMeta(
+                _derive_ata(settler_config, contra_mint, contra_token_program),
+                False,
+                True,
+            ),
             AccountMeta(user, False, False),
             AccountMeta(vault_pda, False, False),
             AccountMeta(vault_mm, False, True),
-            AccountMeta(_derive_ata(user, contra_mint), False, True),
-            AccountMeta(_derive_ata(mm_address, surplus_mint), False, True),
+            AccountMeta(
+                _derive_ata(user, contra_mint, contra_token_program),
+                False,
+                True,
+            ),
+            AccountMeta(
+                _derive_ata(mm_address, surplus_mint, surplus_token_program),
+                False,
+                True,
+            ),
             AccountMeta(pool_token_account, False, True),
             AccountMeta(pool_vault_authority, False, False),
             AccountMeta(jupiter_program, False, False),
             AccountMeta(controller_prog, False, False),
-            AccountMeta(TOKEN_PROGRAM_ID, False, False),
-            AccountMeta(TOKEN_PROGRAM_ID, False, False),
-            AccountMeta(TOKEN_PROGRAM_ID, False, False),
+            AccountMeta(otoken_token_program, False, False),
+            AccountMeta(collateral_token_program, False, False),
+            AccountMeta(contra_token_program, False, False),
         ]
         + jupiter_remaining_accounts,
         data=data,
