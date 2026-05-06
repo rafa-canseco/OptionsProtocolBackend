@@ -137,14 +137,19 @@ class TestDbUpdate:
 class TestBuildSetExpiryPriceIx:
     """Verify set_expiry_price instruction structure."""
 
-    @patch(f"{_MODULE}.get_solana_operator")
+    @patch(f"{_MODULE}._read_otoken_info")
     @patch(f"{_MODULE}.settings")
-    def test_instruction_data_contains_price(self, mock_settings, mock_operator):
+    def test_instruction_data_is_controller_discriminator_only(
+        self, mock_settings, mock_read_info
+    ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
+        oracle_id = Pubkey.new_unique()
+        underlying = Pubkey.new_unique()
         mock_settings.solana_batch_settler_program_id = str(settler_id)
         mock_settings.solana_controller_program_id = str(controller_id)
-        mock_operator.return_value = Keypair()
+        mock_settings.solana_oracle_program_id = str(oracle_id)
+        mock_read_info.return_value = {"underlying": underlying, "expiry": 1700000000}
 
         from src.bots.solana_expiry_settler import (
             _build_set_expiry_price_ix,
@@ -152,30 +157,66 @@ class TestBuildSetExpiryPriceIx:
         )
 
         otoken_mint = Pubkey.new_unique()
-        price = 15000000000  # $150 in 8 decimals
-        ix = _build_set_expiry_price_ix(otoken_mint, price)
+        ix = _build_set_expiry_price_ix(otoken_mint)
 
-        # Data = discriminator (8 bytes) + price (u64, 8 bytes)
-        assert len(ix.data) == 16
-        assert bytes(ix.data[:8]) == _SET_EXPIRY_PRICE_DISC
-        decoded_price = struct.unpack_from("<Q", bytes(ix.data), 8)[0]
-        assert decoded_price == price
+        assert bytes(ix.data) == _SET_EXPIRY_PRICE_DISC
 
-    @patch(f"{_MODULE}.get_solana_operator")
+    @patch(f"{_MODULE}._read_otoken_info")
     @patch(f"{_MODULE}.settings")
-    def test_instruction_targets_controller_program(self, mock_settings, mock_operator):
+    def test_instruction_targets_controller_program(
+        self, mock_settings, mock_read_info
+    ):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
+        oracle_id = Pubkey.new_unique()
         mock_settings.solana_batch_settler_program_id = str(settler_id)
         mock_settings.solana_controller_program_id = str(controller_id)
-        mock_operator.return_value = Keypair()
+        mock_settings.solana_oracle_program_id = str(oracle_id)
+        mock_read_info.return_value = {
+            "underlying": Pubkey.new_unique(),
+            "expiry": 1700000000,
+        }
 
         from src.bots.solana_expiry_settler import (
             _build_set_expiry_price_ix,
         )
 
-        ix = _build_set_expiry_price_ix(Pubkey.new_unique(), 100)
+        ix = _build_set_expiry_price_ix(Pubkey.new_unique())
         assert ix.program_id == controller_id
+
+    @patch(f"{_MODULE}._read_otoken_info")
+    @patch(f"{_MODULE}.settings")
+    def test_instruction_includes_oracle_accounts(
+        self, mock_settings, mock_read_info
+    ):
+        settler_id = Pubkey.new_unique()
+        controller_id = Pubkey.new_unique()
+        oracle_id = Pubkey.new_unique()
+        underlying = Pubkey.new_unique()
+        expiry = 1700000000
+        mock_settings.solana_batch_settler_program_id = str(settler_id)
+        mock_settings.solana_controller_program_id = str(controller_id)
+        mock_settings.solana_oracle_program_id = str(oracle_id)
+        mock_read_info.return_value = {"underlying": underlying, "expiry": expiry}
+
+        from src.bots.solana_expiry_settler import (
+            _build_set_expiry_price_ix,
+            _derive_pda,
+        )
+
+        ix = _build_set_expiry_price_ix(Pubkey.new_unique())
+
+        expected_oracle_expiry_price = _derive_pda(
+            [b"expiry_price", bytes(underlying), struct.pack("<q", expiry)],
+            oracle_id,
+        )
+        assert len(ix.accounts) == 4
+        assert ix.accounts[2] == AccountMeta(
+            expected_oracle_expiry_price,
+            False,
+            False,
+        )
+        assert ix.accounts[3] == AccountMeta(oracle_id, False, False)
 
 
 class TestBuildSettleVaultIx:

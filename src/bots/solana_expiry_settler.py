@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation
 import httpx
 from solana.exceptions import SolanaRpcException
 from solana.rpc.commitment import Confirmed
+from solana.rpc.types import MemcmpOpts
 from solders.address_lookup_table_account import (  # type: ignore[import-untyped]
     AddressLookupTable,
     AddressLookupTableAccount,
@@ -52,7 +53,7 @@ from src.chains.solana.client import (
 from src.chains.solana.oracle import get_pyth_price
 from src.config import has_solana_config, settings
 from src.db.database import get_client
-from src.pricing.assets import Asset
+from src.pricing.assets import Asset, get_asset_config
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,14 @@ _ASSET_MAP: dict[str, Asset] = {
     "sol": Asset.SOL,
     "tslax": Asset.TSLAX,
 }
+SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
+_PRICE_UPDATE_V2_DISC = bytes.fromhex("22f123639d7ef4cd")
+_PYTH_FEED_ID_OFFSET = 41
+_PYTH_PRICE_OFFSET = 73
+_PYTH_CONF_OFFSET = 81
+_PYTH_EXPO_OFFSET = 89
+_PYTH_PUBLISH_TIME_OFFSET = 93
+_ORACLE_CONFIG_PYTH_RECEIVER_OFFSET = 104
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -204,6 +213,52 @@ def _normalize_pyth_price_to_8dec(asset: Asset) -> int:
             f"{price_8dec} (non-positive). Raw: {price_float}"
         )
     return price_8dec
+
+
+def _read_oracle_pyth_receiver_program() -> Pubkey:
+    if settings.solana_pyth_receiver_program:
+        return Pubkey.from_string(settings.solana_pyth_receiver_program)
+
+    oracle_program = Pubkey.from_string(settings.solana_oracle_program_id)
+    config = _derive_pda([b"oracle_config"], oracle_program)
+    data = _read_account_data(config)
+    end = _ORACLE_CONFIG_PYTH_RECEIVER_OFFSET + 32
+    if data is None or len(data) < end:
+        raise RuntimeError("Cannot read oracle_config.pyth_receiver_program")
+    return Pubkey.from_bytes(data[_ORACLE_CONFIG_PYTH_RECEIVER_OFFSET:end])
+
+
+def _find_latest_pyth_price_update(asset: Asset) -> Pubkey:
+    """Find the freshest Pyth PriceUpdateV2 account for an asset feed."""
+    receiver_program = _read_oracle_pyth_receiver_program()
+    feed_id_hex = get_asset_config(asset).pyth_feed_id
+    # Memcmp filters expect base58 bytes. A Pubkey is just base58-encoded 32 bytes.
+    feed_id_base58 = str(Pubkey.from_bytes(bytes.fromhex(feed_id_hex)))
+    rpc = get_solana_client()
+    resp = rpc.get_program_accounts(
+        receiver_program,
+        filters=[MemcmpOpts(offset=_PYTH_FEED_ID_OFFSET, bytes=feed_id_base58)],
+    )
+
+    best: tuple[int, Pubkey] | None = None
+    for keyed_account in resp.value:
+        data = bytes(keyed_account.account.data)
+        if len(data) < _PYTH_PUBLISH_TIME_OFFSET + 8:
+            continue
+        if data[:8] != _PRICE_UPDATE_V2_DISC:
+            continue
+        publish_time = struct.unpack_from("<q", data, _PYTH_PUBLISH_TIME_OFFSET)[0]
+        price = struct.unpack_from("<q", data, _PYTH_PRICE_OFFSET)[0]
+        conf = struct.unpack_from("<Q", data, _PYTH_CONF_OFFSET)[0]
+        exponent = struct.unpack_from("<i", data, _PYTH_EXPO_OFFSET)[0]
+        if price <= 0 or conf < 0 or exponent > 0:
+            continue
+        if best is None or publish_time > best[0]:
+            best = (publish_time, keyed_account.pubkey)
+
+    if best is None:
+        raise RuntimeError(f"No Pyth PriceUpdateV2 account found for {asset.value}")
+    return best[1]
 
 
 def _strike_price_to_8dec(strike_price: int | float | str) -> int:
@@ -358,24 +413,81 @@ def _mark_otm(user_address: str, vault_id: int, expiry_price: int) -> None:
 
 def _build_set_expiry_price_ix(
     otoken_mint: Pubkey,
-    price: int,
 ) -> Instruction:
     """Build controller.set_expiry_price instruction.
 
-    Accounts: controller_config, otoken_info PDA (mut), admin (signer).
-    Data: discriminator + price (u64).
+    The Controller copies the finalized price from oracle::ExpiryPrice into
+    OTokenInfo. The price itself must already be finalized by the Oracle program.
     """
     _, controller = _get_program_ids()
+    oracle_program = Pubkey.from_string(settings.solana_oracle_program_id)
     controller_config = _derive_pda([b"controller_config"], controller)
     otoken_info = _derive_pda([b"otoken_info", bytes(otoken_mint)], controller)
-    operator = get_solana_operator()
-    data = _SET_EXPIRY_PRICE_DISC + struct.pack("<Q", price)
+    info = _read_otoken_info(str(otoken_mint))
+    if info is None:
+        raise RuntimeError(f"Cannot read otoken_info for {otoken_mint}")
+    oracle_expiry_price = _derive_oracle_expiry_price(
+        info["underlying"],
+        int(info["expiry"]),
+    )
     return Instruction(
         program_id=controller,
         accounts=[
             AccountMeta(controller_config, False, False),
             AccountMeta(otoken_info, False, True),
-            AccountMeta(operator.pubkey(), True, False),
+            AccountMeta(oracle_expiry_price, False, False),
+            AccountMeta(oracle_program, False, False),
+        ],
+        data=_SET_EXPIRY_PRICE_DISC,
+    )
+
+
+def _derive_oracle_expiry_price(underlying: Pubkey, expiry: int) -> Pubkey:
+    oracle_program = Pubkey.from_string(settings.solana_oracle_program_id)
+    return _derive_pda(
+        [b"expiry_price", bytes(underlying), struct.pack("<q", expiry)],
+        oracle_program,
+    )
+
+
+def _read_oracle_expiry_price(underlying: Pubkey, expiry: int) -> int:
+    """Read oracle::ExpiryPrice.price. Returns 0 when missing or unfinalized."""
+    expiry_price_pda = _derive_oracle_expiry_price(underlying, expiry)
+    data = _read_account_data(expiry_price_pda)
+    # ExpiryPrice: disc(8)+underlying(32)+expiry(i64)+price(u64)+finalized(bool)+bump
+    if data is None or len(data) < 58:
+        return 0
+    price = struct.unpack_from("<Q", data, 48)[0]
+    is_finalized = bool(data[56])
+    return price if is_finalized else 0
+
+
+def _build_oracle_set_expiry_price_ix(
+    underlying: Pubkey,
+    expiry: int,
+    price: int,
+    pyth_price_update: Pubkey,
+) -> Instruction:
+    oracle_program = Pubkey.from_string(settings.solana_oracle_program_id)
+    expiry_price = _derive_oracle_expiry_price(underlying, expiry)
+    oracle_config = _derive_pda([b"oracle_config"], oracle_program)
+    feed = _derive_pda([b"feed", bytes(underlying)], oracle_program)
+    operator = get_solana_operator()
+    data = (
+        _SET_EXPIRY_PRICE_DISC
+        + bytes(underlying)
+        + struct.pack("<q", expiry)
+        + struct.pack("<Q", price)
+    )
+    return Instruction(
+        program_id=oracle_program,
+        accounts=[
+            AccountMeta(expiry_price, False, True),
+            AccountMeta(oracle_config, False, False),
+            AccountMeta(feed, False, False),
+            AccountMeta(pyth_price_update, False, False),
+            AccountMeta(operator.pubkey(), True, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
         ],
         data=data,
     )
@@ -427,16 +539,54 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
             )
             continue
 
-        try:
-            price_8dec = _normalize_pyth_price_to_8dec(asset_enum)
-        except (ValueError, RuntimeError, httpx.HTTPError):
-            logger.exception("Phase 0: failed to get Pyth price for %s", asset_str)
+        info = _read_otoken_info(otoken_addr)
+        if info is None:
+            logger.error("Phase 0: cannot read otoken_info for %s", otoken_addr[:12])
             continue
 
-        ix = _build_set_expiry_price_ix(otoken_mint, price_8dec)
+        oracle_price = _read_oracle_expiry_price(
+            info["underlying"],
+            int(info["expiry"]),
+        )
+        if oracle_price == 0:
+            try:
+                price_8dec = _normalize_pyth_price_to_8dec(asset_enum)
+                pyth_price_update = _find_latest_pyth_price_update(asset_enum)
+                oracle_ix = _build_oracle_set_expiry_price_ix(
+                    info["underlying"],
+                    int(info["expiry"]),
+                    price_8dec,
+                    pyth_price_update,
+                )
+                _send_ix(oracle_ix, f"oracle_set_expiry_price({asset_str})")
+                oracle_price = _read_oracle_expiry_price(
+                    info["underlying"],
+                    int(info["expiry"]),
+                )
+            except (ValueError, RuntimeError, SolanaRpcException, httpx.HTTPError, OSError):
+                logger.exception(
+                    "Phase 0: failed to finalize oracle expiry price for %s "
+                    "(underlying=%s expiry=%s)",
+                    otoken_addr[:12],
+                    info["underlying"],
+                    info["expiry"],
+                )
+                continue
+
+            if oracle_price == 0:
+                logger.error(
+                    "Phase 0: oracle expiry price still missing after tx for %s "
+                    "(underlying=%s expiry=%s)",
+                    otoken_addr[:12],
+                    info["underlying"],
+                    info["expiry"],
+                )
+                continue
+
+        ix = _build_set_expiry_price_ix(otoken_mint)
         try:
             _send_ix(ix, f"set_expiry_price({otoken_addr[:12]})")
-        except (SolanaRpcException, httpx.HTTPError, OSError):
+        except (SolanaRpcException, RuntimeError, httpx.HTTPError, OSError):
             logger.exception(
                 "Phase 0: set_expiry_price tx failed for %s",
                 otoken_addr[:12],
@@ -936,6 +1086,7 @@ def _read_otoken_info(otoken_addr: str) -> dict | None:
             data[_OTOKEN_INFO_COLLATERAL_OFFSET : _OTOKEN_INFO_COLLATERAL_OFFSET + 32]
         ),
         "strike_price": struct.unpack_from("<Q", data, _OTOKEN_INFO_STRIKE_OFFSET)[0],
+        "expiry": struct.unpack_from("<q", data, _OTOKEN_INFO_EXPIRY_OFFSET)[0],
         "is_put": bool(data[_OTOKEN_INFO_IS_PUT_OFFSET]),
         "expiry_price": struct.unpack_from(
             "<Q",
