@@ -29,10 +29,15 @@ from solders.address_lookup_table_account import (  # type: ignore[import-untype
     AddressLookupTable,
     AddressLookupTableAccount,
 )
+from solders.compute_budget import (  # type: ignore[import-untyped]
+    set_compute_unit_limit,
+    set_compute_unit_price,
+)
 from solders.instruction import (  # type: ignore[import-untyped]
     AccountMeta,
     Instruction,
 )
+from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.message import MessageV0  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.transaction import (  # type: ignore[import-untyped]
@@ -91,13 +96,28 @@ _ASSET_MAP: dict[str, Asset] = {
     "tslax": Asset.TSLAX,
 }
 SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
+WORMHOLE_PROGRAM = Pubkey.from_string("HDwcJBJXjL9FpJ7UBsYBtaDjsBUhuLCUYoz3zr8SWWaQ")
 _PRICE_UPDATE_V2_DISC = bytes.fromhex("22f123639d7ef4cd")
+_PYTH_POST_UPDATE_ATOMIC_DISC = hashlib.sha256(
+    b"global:post_update_atomic"
+).digest()[:8]
 _PYTH_FEED_ID_OFFSET = 41
 _PYTH_PRICE_OFFSET = 73
 _PYTH_CONF_OFFSET = 81
 _PYTH_EXPO_OFFSET = 89
 _PYTH_PUBLISH_TIME_OFFSET = 93
 _ORACLE_CONFIG_PYTH_RECEIVER_OFFSET = 104
+_ORACLE_CONFIG_MAX_STALENESS_OFFSET = 136
+_PYTH_ACCUMULATOR_MAGIC = bytes.fromhex("504e4155")
+_PYTH_ACCUMULATOR_MAJOR_VERSION = 1
+_PYTH_ACCUMULATOR_MINOR_VERSION = 0
+_PYTH_KECCAK160_HASH_SIZE = 20
+_PYTH_PRICE_FEED_MESSAGE_VARIANT = 0
+_PYTH_REDUCED_GUARDIAN_SIGNATURES = 5
+_PYTH_VAA_SIGNATURE_SIZE = 66
+_PYTH_POST_UPDATE_ATOMIC_COMPUTE_UNITS = 170_000
+_PYTH_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS = 100_000
+_PYTH_HERMES_LATEST_URL = "https://hermes.pyth.network/v2/updates/price/latest"
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -147,6 +167,7 @@ def _send_ixs(
     ixs: list[Instruction],
     label: str,
     address_lookup_tables: list[AddressLookupTableAccount] | None = None,
+    extra_signers: list[Keypair] | None = None,
 ) -> str:
     """Build, sign, send and confirm one transaction with one or more ixs."""
     operator = get_solana_operator()
@@ -158,7 +179,7 @@ def _send_ixs(
         address_lookup_tables or [],
         blockhash,
     )
-    tx = VersionedTransaction(msg, [operator])
+    tx = VersionedTransaction(msg, [operator, *(extra_signers or [])])
     sig = build_and_send_solana_tx(tx)
     logger.info("%s tx=%s", label, sig)
     return sig
@@ -249,8 +270,40 @@ def _read_oracle_pyth_receiver_program() -> Pubkey:
     return Pubkey.from_bytes(data[_ORACLE_CONFIG_PYTH_RECEIVER_OFFSET:end])
 
 
-def _find_latest_pyth_price_update(asset: Asset) -> Pubkey:
-    """Find the freshest Pyth PriceUpdateV2 account for an asset feed."""
+def _read_oracle_max_staleness() -> int:
+    oracle_program = Pubkey.from_string(settings.solana_oracle_program_id)
+    config = _derive_pda([b"oracle_config"], oracle_program)
+    data = _read_account_data(config)
+    end = _ORACLE_CONFIG_MAX_STALENESS_OFFSET + 8
+    if data is None or len(data) < end:
+        raise RuntimeError("Cannot read oracle_config.max_staleness")
+    return struct.unpack_from("<Q", data, _ORACLE_CONFIG_MAX_STALENESS_OFFSET)[0]
+
+
+def _parse_pyth_price_update(data: bytes, expected_feed_id: str) -> dict | None:
+    if len(data) < _PYTH_PUBLISH_TIME_OFFSET + 8:
+        return None
+    if data[:8] != _PRICE_UPDATE_V2_DISC:
+        return None
+    feed_id = data[_PYTH_FEED_ID_OFFSET : _PYTH_FEED_ID_OFFSET + 32].hex()
+    if feed_id != expected_feed_id:
+        return None
+    price = struct.unpack_from("<q", data, _PYTH_PRICE_OFFSET)[0]
+    conf = struct.unpack_from("<Q", data, _PYTH_CONF_OFFSET)[0]
+    exponent = struct.unpack_from("<i", data, _PYTH_EXPO_OFFSET)[0]
+    publish_time = struct.unpack_from("<q", data, _PYTH_PUBLISH_TIME_OFFSET)[0]
+    if price <= 0 or exponent > 0:
+        return None
+    return {
+        "price": price,
+        "conf": conf,
+        "exponent": exponent,
+        "publish_time": publish_time,
+    }
+
+
+def _find_latest_pyth_price_update_entry(asset: Asset) -> tuple[Pubkey, int] | None:
+    """Find the freshest Pyth PriceUpdateV2 account and publish time."""
     receiver_program = _read_oracle_pyth_receiver_program()
     feed_id_hex = get_asset_config(asset).pyth_feed_id
     # Memcmp filters expect base58 bytes. A Pubkey is just base58-encoded 32 bytes.
@@ -264,22 +317,260 @@ def _find_latest_pyth_price_update(asset: Asset) -> Pubkey:
     best: tuple[int, Pubkey] | None = None
     for keyed_account in resp.value:
         data = bytes(keyed_account.account.data)
-        if len(data) < _PYTH_PUBLISH_TIME_OFFSET + 8:
+        parsed = _parse_pyth_price_update(data, feed_id_hex)
+        if parsed is None:
             continue
-        if data[:8] != _PRICE_UPDATE_V2_DISC:
-            continue
-        publish_time = struct.unpack_from("<q", data, _PYTH_PUBLISH_TIME_OFFSET)[0]
-        price = struct.unpack_from("<q", data, _PYTH_PRICE_OFFSET)[0]
-        conf = struct.unpack_from("<Q", data, _PYTH_CONF_OFFSET)[0]
-        exponent = struct.unpack_from("<i", data, _PYTH_EXPO_OFFSET)[0]
-        if price <= 0 or conf < 0 or exponent > 0:
-            continue
+        publish_time = int(parsed["publish_time"])
         if best is None or publish_time > best[0]:
             best = (publish_time, keyed_account.pubkey)
 
     if best is None:
+        return None
+    return (best[1], best[0])
+
+
+def _find_latest_pyth_price_update(asset: Asset) -> Pubkey:
+    """Find the freshest Pyth PriceUpdateV2 account for an asset feed."""
+    best = _find_latest_pyth_price_update_entry(asset)
+    if best is None:
         raise RuntimeError(f"No Pyth PriceUpdateV2 account found for {asset.value}")
-    return best[1]
+    return best[0]
+
+
+def _borsh_bytes(raw: bytes) -> bytes:
+    return struct.pack("<I", len(raw)) + raw
+
+
+def _borsh_vec_fixed_20(items: list[bytes]) -> bytes:
+    payload = struct.pack("<I", len(items))
+    for item in items:
+        if len(item) != _PYTH_KECCAK160_HASH_SIZE:
+            raise ValueError("Invalid Pyth proof item length")
+        payload += item
+    return payload
+
+
+def _parse_pyth_accumulator_update(data: bytes) -> tuple[bytes, list[dict]]:
+    if (
+        len(data) < 11
+        or data[:4] != _PYTH_ACCUMULATOR_MAGIC
+        or data[4] != _PYTH_ACCUMULATOR_MAJOR_VERSION
+        or data[5] != _PYTH_ACCUMULATOR_MINOR_VERSION
+    ):
+        raise ValueError("Invalid Pyth accumulator update")
+
+    cursor = 6
+    trailing_payload_size = data[cursor]
+    cursor += 1 + trailing_payload_size
+    cursor += 1  # proof type
+    vaa_size = int.from_bytes(data[cursor : cursor + 2], "big")
+    cursor += 2
+    vaa = data[cursor : cursor + vaa_size]
+    cursor += vaa_size
+    if cursor >= len(data):
+        raise ValueError("Pyth accumulator missing updates")
+
+    num_updates = data[cursor]
+    cursor += 1
+    updates: list[dict] = []
+    for _ in range(num_updates):
+        message_size = int.from_bytes(data[cursor : cursor + 2], "big")
+        cursor += 2
+        message = data[cursor : cursor + message_size]
+        cursor += message_size
+        num_proofs = data[cursor]
+        cursor += 1
+        proof: list[bytes] = []
+        for _ in range(num_proofs):
+            proof.append(data[cursor : cursor + _PYTH_KECCAK160_HASH_SIZE])
+            cursor += _PYTH_KECCAK160_HASH_SIZE
+        updates.append({"message": message, "proof": proof})
+
+    if cursor != len(data):
+        raise ValueError("Trailing bytes in Pyth accumulator update")
+    return vaa, updates
+
+
+def _parse_price_feed_message(message: bytes) -> dict:
+    if len(message) < 85:
+        raise ValueError("Pyth price feed message too short")
+    if message[0] != _PYTH_PRICE_FEED_MESSAGE_VARIANT:
+        raise ValueError("Pyth message is not a price feed update")
+    return {
+        "feed_id": message[1:33].hex(),
+        "price": int.from_bytes(message[33:41], "big", signed=True),
+        "conf": int.from_bytes(message[41:49], "big", signed=False),
+        "exponent": int.from_bytes(message[49:53], "big", signed=True),
+        "publish_time": int.from_bytes(message[53:61], "big", signed=False),
+    }
+
+
+def _trim_pyth_vaa_signatures(
+    vaa: bytes,
+    max_signatures: int = _PYTH_REDUCED_GUARDIAN_SIGNATURES,
+) -> bytes:
+    if len(vaa) < 6:
+        raise ValueError("Pyth VAA too short")
+    current = vaa[5]
+    if current < max_signatures:
+        raise ValueError("Pyth VAA has fewer guardian signatures than required")
+    if current == max_signatures:
+        return vaa
+    keep_end = 6 + max_signatures * _PYTH_VAA_SIGNATURE_SIZE
+    original_end = 6 + current * _PYTH_VAA_SIGNATURE_SIZE
+    trimmed = bytearray(vaa[:keep_end] + vaa[original_end:])
+    trimmed[5] = max_signatures
+    return bytes(trimmed)
+
+
+def _pyth_guardian_set_index(vaa: bytes) -> int:
+    if len(vaa) < 5:
+        raise ValueError("Pyth VAA too short for guardian set index")
+    return int.from_bytes(vaa[1:5], "big")
+
+
+def _fetch_pyth_accumulator_update(asset: Asset) -> tuple[bytes, dict]:
+    feed_id = get_asset_config(asset).pyth_feed_id
+    resp = httpx.get(
+        _PYTH_HERMES_LATEST_URL,
+        params={
+            "ids[]": feed_id,
+            "encoding": "base64",
+            "parsed": "true",
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    try:
+        update_b64 = payload["binary"]["data"][0]
+        parsed_price = payload["parsed"][0]["price"]
+        parsed = {
+            "price": int(parsed_price["price"]),
+            "conf": int(parsed_price["conf"]),
+            "exponent": int(parsed_price["expo"]),
+            "publish_time": int(parsed_price["publish_time"]),
+        }
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise ValueError(f"Unexpected Pyth Hermes update for {asset.value}") from exc
+    return base64.b64decode(update_b64), parsed
+
+
+def _build_pyth_post_update_atomic_ix(
+    *,
+    receiver_program: Pubkey,
+    accumulator_update: bytes,
+    expected_feed_id: str,
+    treasury_id: int,
+    price_update_account: Pubkey,
+) -> Instruction:
+    vaa, updates = _parse_pyth_accumulator_update(accumulator_update)
+    trimmed_vaa = _trim_pyth_vaa_signatures(vaa)
+    matching_update = None
+    for update in updates:
+        message = update["message"]
+        parsed = _parse_price_feed_message(message)
+        if parsed["feed_id"] == expected_feed_id:
+            matching_update = update
+            break
+    if matching_update is None:
+        raise ValueError("Pyth accumulator does not contain expected feed")
+
+    guardian_set_index = _pyth_guardian_set_index(vaa)
+    guardian_set = _derive_pda(
+        [b"GuardianSet", guardian_set_index.to_bytes(4, "big")],
+        WORMHOLE_PROGRAM,
+    )
+    config = _derive_pda([b"config"], receiver_program)
+    treasury = _derive_pda([b"treasury", bytes([treasury_id])], receiver_program)
+    operator = get_solana_operator()
+    data = (
+        _PYTH_POST_UPDATE_ATOMIC_DISC
+        + _borsh_bytes(trimmed_vaa)
+        + _borsh_bytes(matching_update["message"])
+        + _borsh_vec_fixed_20(matching_update["proof"])
+        + bytes([treasury_id])
+    )
+    return Instruction(
+        program_id=receiver_program,
+        accounts=[
+            AccountMeta(operator.pubkey(), True, True),
+            AccountMeta(guardian_set, False, False),
+            AccountMeta(config, False, False),
+            AccountMeta(treasury, False, True),
+            AccountMeta(price_update_account, True, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+            AccountMeta(operator.pubkey(), True, False),
+        ],
+        data=data,
+    )
+
+
+def _post_fresh_pyth_price_update(asset: Asset) -> tuple[Pubkey, int]:
+    feed_id = get_asset_config(asset).pyth_feed_id
+    accumulator_update, hermes_price = _fetch_pyth_accumulator_update(asset)
+    vaa, updates = _parse_pyth_accumulator_update(accumulator_update)
+    if not updates:
+        raise ValueError(f"Pyth accumulator has no updates for {asset.value}")
+    if _pyth_guardian_set_index(vaa) < 0:
+        raise ValueError("Invalid Pyth guardian set index")
+
+    price_update_keypair = Keypair()
+    receiver_program = _read_oracle_pyth_receiver_program()
+    treasury_id = hashlib.sha256(feed_id.encode("ascii")).digest()[0]
+    ix = _build_pyth_post_update_atomic_ix(
+        receiver_program=receiver_program,
+        accumulator_update=accumulator_update,
+        expected_feed_id=feed_id,
+        treasury_id=treasury_id,
+        price_update_account=price_update_keypair.pubkey(),
+    )
+    _send_ixs(
+        [
+            set_compute_unit_price(_PYTH_COMPUTE_UNIT_PRICE_MICRO_LAMPORTS),
+            set_compute_unit_limit(_PYTH_POST_UPDATE_ATOMIC_COMPUTE_UNITS),
+            ix,
+        ],
+        f"pyth_post_update_atomic({asset.value})",
+        extra_signers=[price_update_keypair],
+    )
+    return price_update_keypair.pubkey(), int(hermes_price["publish_time"])
+
+
+def _ensure_fresh_pyth_price_update(asset: Asset) -> Pubkey:
+    max_staleness = _read_oracle_max_staleness()
+    if max_staleness == 0:
+        return _find_latest_pyth_price_update(asset)
+
+    now = int(time.time())
+    best = _find_latest_pyth_price_update_entry(asset)
+    if best is not None:
+        pubkey, publish_time = best
+        age = now - publish_time
+        if age <= max_staleness:
+            return pubkey
+        logger.warning(
+            "Phase 0: Pyth PriceUpdateV2 stale for %s (account=%s age=%ss "
+            "max_staleness=%ss); posting fresh update",
+            asset.value,
+            pubkey,
+            age,
+            max_staleness,
+        )
+    else:
+        logger.warning(
+            "Phase 0: no Pyth PriceUpdateV2 found for %s; posting fresh update",
+            asset.value,
+        )
+
+    pubkey, publish_time = _post_fresh_pyth_price_update(asset)
+    age = int(time.time()) - publish_time
+    if age > max_staleness:
+        raise RuntimeError(
+            f"Hermes returned stale Pyth update for {asset.value}: "
+            f"age={age}s max_staleness={max_staleness}s"
+        )
+    return pubkey
 
 
 def _strike_price_to_8dec(strike_price: int | float | str) -> int:
@@ -612,7 +903,7 @@ def _ensure_expiry_prices_set(positions: list[dict]) -> None:
         if oracle_price == 0:
             try:
                 price_8dec = _normalize_pyth_price_to_8dec(asset_enum)
-                pyth_price_update = _find_latest_pyth_price_update(asset_enum)
+                pyth_price_update = _ensure_fresh_pyth_price_update(asset_enum)
                 oracle_ix = _build_oracle_set_expiry_price_ix(
                     info["underlying"],
                     int(info["expiry"]),

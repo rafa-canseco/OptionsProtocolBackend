@@ -1,5 +1,6 @@
 """Tests for Solana expiry settler bot."""
 
+import base64
 import hashlib
 import struct
 
@@ -510,6 +511,131 @@ class TestIdentifyItmPositions:
         call_pos = _make_position(strike_price="200000000000", is_put=False)
         itm, _ = _identify_itm_positions([put_pos, call_pos])
         assert len(itm) == 0
+
+
+def _make_pyth_accumulator(feed_id: str, guardian_signatures: int = 6) -> bytes:
+    vaa = bytearray(6 + guardian_signatures * 66 + 12)
+    vaa[0] = 1
+    vaa[1:5] = (7).to_bytes(4, "big")
+    vaa[5] = guardian_signatures
+    message = (
+        bytes([0])
+        + bytes.fromhex(feed_id)
+        + (398_00000000).to_bytes(8, "big", signed=True)
+        + (1234).to_bytes(8, "big")
+        + (-8).to_bytes(4, "big", signed=True)
+        + (1_778_087_632).to_bytes(8, "big")
+        + (1_778_087_600).to_bytes(8, "big")
+        + (397_00000000).to_bytes(8, "big", signed=True)
+        + (1200).to_bytes(8, "big")
+    )
+    proof = bytes([3]) * 20
+    return (
+        bytes.fromhex("504e4155")
+        + bytes([1, 0, 0, 0])
+        + len(vaa).to_bytes(2, "big")
+        + bytes(vaa)
+        + bytes([1])
+        + len(message).to_bytes(2, "big")
+        + message
+        + bytes([1])
+        + proof
+    )
+
+
+class TestPythPriceUpdatePosting:
+    def test_build_post_update_atomic_ix_targets_receiver(self):
+        from src.bots.solana_expiry_settler import (
+            _PYTH_POST_UPDATE_ATOMIC_DISC,
+            _build_pyth_post_update_atomic_ix,
+        )
+
+        operator = Keypair()
+        receiver = Pubkey.new_unique()
+        price_update = Pubkey.new_unique()
+        feed_id = "47a156470288850a440df3a6ce85a55917b813a19bb5b31128a33a986566a362"
+        with patch(f"{_MODULE}.get_solana_operator", return_value=operator):
+            ix = _build_pyth_post_update_atomic_ix(
+                receiver_program=receiver,
+                accumulator_update=_make_pyth_accumulator(feed_id),
+                expected_feed_id=feed_id,
+                treasury_id=9,
+                price_update_account=price_update,
+            )
+
+        assert ix.program_id == receiver
+        assert bytes(ix.data[:8]) == _PYTH_POST_UPDATE_ATOMIC_DISC
+        assert ix.accounts[0] == AccountMeta(operator.pubkey(), True, True)
+        assert ix.accounts[4] == AccountMeta(price_update, True, True)
+        assert ix.accounts[-1] == AccountMeta(operator.pubkey(), True, False)
+
+    @patch(f"{_MODULE}._post_fresh_pyth_price_update")
+    @patch(f"{_MODULE}._find_latest_pyth_price_update_entry")
+    @patch(f"{_MODULE}._read_oracle_max_staleness", return_value=3600)
+    @patch(f"{_MODULE}.time.time", return_value=1_778_088_000)
+    def test_ensure_fresh_reuses_recent_account(
+        self,
+        mock_time,
+        mock_staleness,
+        mock_find,
+        mock_post,
+    ):
+        from src.bots.solana_expiry_settler import _ensure_fresh_pyth_price_update
+        from src.pricing.assets import Asset
+
+        account = Pubkey.new_unique()
+        mock_find.return_value = (account, 1_778_087_632)
+
+        assert _ensure_fresh_pyth_price_update(Asset.TSLAX) == account
+        mock_post.assert_not_called()
+
+    @patch(f"{_MODULE}._post_fresh_pyth_price_update")
+    @patch(f"{_MODULE}._find_latest_pyth_price_update_entry")
+    @patch(f"{_MODULE}._read_oracle_max_staleness", return_value=3600)
+    @patch(f"{_MODULE}.time.time", return_value=1_778_088_000)
+    def test_ensure_fresh_posts_when_account_stale(
+        self,
+        mock_time,
+        mock_staleness,
+        mock_find,
+        mock_post,
+    ):
+        from src.bots.solana_expiry_settler import _ensure_fresh_pyth_price_update
+        from src.pricing.assets import Asset
+
+        stale = Pubkey.new_unique()
+        fresh = Pubkey.new_unique()
+        mock_find.return_value = (stale, 1_778_000_000)
+        mock_post.return_value = (fresh, 1_778_087_632)
+
+        assert _ensure_fresh_pyth_price_update(Asset.TSLAX) == fresh
+        mock_post.assert_called_once_with(Asset.TSLAX)
+
+    @patch(f"{_MODULE}.httpx.get")
+    def test_fetch_pyth_accumulator_update_reads_binary_payload(self, mock_get):
+        from src.bots.solana_expiry_settler import _fetch_pyth_accumulator_update
+        from src.pricing.assets import Asset
+
+        raw = b"pyth-update"
+        response = MagicMock()
+        response.json.return_value = {
+            "binary": {"data": [base64.b64encode(raw).decode("ascii")]},
+            "parsed": [
+                {
+                    "price": {
+                        "price": "39800000000",
+                        "conf": "1234",
+                        "expo": "-8",
+                        "publish_time": "1778087632",
+                    }
+                }
+            ],
+        }
+        mock_get.return_value = response
+
+        data, parsed = _fetch_pyth_accumulator_update(Asset.TSLAX)
+        assert data == raw
+        assert parsed["publish_time"] == 1778087632
 
 
 class TestSettleOnce:
