@@ -72,6 +72,35 @@ def test_build_order_row_sets_chain_and_metadata():
     assert row["strike_price"] == 2030000000
 
 
+def test_build_order_row_decodes_wrapper_tx_without_execute_instruction_log():
+    tx = {
+        "meta": {
+            "err": None,
+            "logMessages": [
+                "Program log: Instruction: DepositCollateral",
+                f"Program data: {_DEPOSIT_DATA}",
+                f"Program data: {_EXECUTE_DATA}",
+            ],
+        }
+    }
+
+    with patch.object(
+        sei,
+        "_load_otoken_metadata",
+        return_value={
+            "strike_price": 2030000000,
+            "expiry": 1776470400,
+            "is_put": True,
+            "asset": "sol",
+        },
+    ):
+        row = sei._build_order_row("sig-wrapper", 455096804, tx)
+
+    assert row is not None
+    assert row["tx_hash"] == "sig-wrapper"
+    assert row["user_address"] == "7bx3QgnwiKn3iQAzqKHpsotg9iC6SGghoUakPRxkkjj"
+
+
 class _FakeWebSocket:
     def __init__(self):
         self.messages = []
