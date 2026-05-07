@@ -165,8 +165,8 @@ def test_two_wallets_get_separate_emails():
         assert marked_ids == {pos1["id"], pos2["id"]}
 
 
-def test_partial_batch_failure_only_marks_successful():
-    """When one wallet's send returns no id, only the other wallet's id is marked."""
+def test_partial_batch_failure_premarks_all_to_avoid_duplicate_retries():
+    """Missing provider id after send must not leave rows unmarked for spam retries."""
     pos1 = _make_position("0xuser1", 1, is_itm=False)
     pos2 = _make_position("0xuser2", 1, is_itm=False)
     mock_db = _mock_db_with_emails(
@@ -182,11 +182,12 @@ def test_partial_batch_failure_only_marks_successful():
             {"to": "user1@test.com", "subject": "s1", "html": "<p>1</p>"},
             {"to": "user2@test.com", "subject": "s2", "html": "<p>2</p>"},
         ]
-        # First send ok, second missing id
+        # First send ok, second missing id. Both were pre-marked before send.
         mock_send.return_value = [{"id": "a"}, {}]
         _send_settlement_emails([pos1, pos2], [])
         update_chain = mock_db._tables["order_events"].update.return_value
-        update_chain.eq.assert_called_once_with("id", pos1["id"])
+        marked_ids = {call.args[1] for call in update_chain.eq.call_args_list}
+        assert marked_ids == {pos1["id"], pos2["id"]}
 
 
 def test_db_update_by_id_raises_on_zero_rows():
@@ -206,6 +207,28 @@ def test_db_update_by_id_raises_on_zero_rows():
     with patch("src.bots.expiry_settler.get_client", return_value=mock_db):
         with pytest.raises(RuntimeError, match="matched no rows"):
             _db_update_by_id("evt-missing", {"result_sent_at": "now"}, "ctx")
+
+
+def test_settlement_email_not_sent_when_premark_fails():
+    """If DB cannot mark result_sent_at first, do not send and risk duplicates."""
+    pos = _make_position("0xuser1", 1, is_itm=False)
+    mock_db = _mock_db_with_emails({"0xuser1": "user1@test.com"})
+    order_events = mock_db.table("order_events")
+    order_events.update.return_value.execute.return_value.data = []
+
+    with (
+        patch("src.bots.expiry_settler.get_client", return_value=mock_db),
+        patch("src.bots.expiry_settler.send_batch") as mock_send,
+        patch("src.bots.expiry_settler.build_consolidated_result_email") as mock_build,
+    ):
+        mock_build.return_value = {
+            "to": "user1@test.com",
+            "subject": "OTM",
+            "html": "<p>otm</p>",
+        }
+        _send_settlement_emails([pos], [])
+
+    mock_send.assert_not_called()
 
 
 def test_skips_wallet_without_email():

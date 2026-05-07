@@ -106,6 +106,55 @@ class TestBaseSettlementQueries:
 
         assert ("eq", ("chain", "base")) in db.calls
 
+    def test_settlement_queries_select_email_dedupe_fields(self):
+        db = _QueryRecorder()
+
+        with patch("src.bots.expiry_settler.get_client", return_value=db):
+            settler_module.get_expired_unsettled()
+            settler_module.get_pending_phase2()
+
+        selected = " ".join(args[0] for method, args in db.calls if method == "select")
+        assert "result_sent_at" in selected
+        assert "settled_at" in selected
+        assert "net_premium" in selected
+
+    def test_restart_phase2_recovery_does_not_send_legacy_result_email(self):
+        recovered = {
+            "id": "evt-recovered",
+            "user_address": "0x0000000000000000000000000000000000000001",
+            "vault_id": 1,
+            "otoken_address": "0xtoken",
+            "expiry": 1711526400,
+            "amount": "100000000",
+            "strike_price": "200000000000",
+            "is_put": True,
+            "mm_address": "0x0000000000000000000000000000000000000002",
+            "asset": "eth",
+            "is_settled": True,
+            "settlement_type": "cash",
+            "delivery_tx_hash": None,
+            "is_itm": False,
+            "settled_at": "2026-05-01T08:00:00+00:00",
+            "result_sent_at": None,
+        }
+
+        with (
+            patch("src.bots.expiry_settler.get_expired_unsettled", return_value=[]),
+            patch("src.bots.expiry_settler.get_pending_phase2", return_value=[recovered]),
+            patch("src.bots.expiry_settler._ensure_expiry_prices_set"),
+            patch("src.bots.expiry_settler.get_batch_settler"),
+            patch("src.bots.expiry_settler.get_operator_account"),
+            patch(
+                "src.bots.expiry_settler.identify_itm_positions",
+                return_value=([], {}, set()),
+            ),
+            patch("src.bots.expiry_settler._db_update"),
+            patch("src.bots.expiry_settler._send_settlement_emails") as mock_email,
+        ):
+            asyncio.run(settler_module.settle_once())
+
+        mock_email.assert_called_once_with([], [])
+
 
 # ---------------------------------------------------------------------------
 # _compute_contra_amount

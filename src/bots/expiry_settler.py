@@ -42,7 +42,8 @@ BETA_SLIPPAGE_BPS = 1_000  # 10% buffer used in beta mode (no live DEX quote ava
 _SETTLE_FIELDS = (
     "id, user_address, vault_id, otoken_address, expiry, amount, "
     "strike_price, is_put, mm_address, asset, is_settled, "
-    "settlement_type, delivery_tx_hash, is_itm"
+    "settlement_type, delivery_tx_hash, is_itm, settled_at, result_sent_at, "
+    "premium, gross_premium, net_premium"
 )
 
 
@@ -730,48 +731,64 @@ def _send_settlement_emails(
     if not emails_to_send:
         return
 
-    logger.info("Sending %d settlement result emails", len(emails_to_send))
-    try:
-        results = send_batch(emails_to_send)
-    except Exception:
-        logger.exception("Settlement result batch send failed")
-        return
-
-    if len(results) != len(emails_to_send):
-        logger.error(
-            "Settlement batch results length mismatch: sent=%d got=%d",
-            len(emails_to_send),
-            len(results),
-        )
-
+    # Fail closed: mark before sending. If the email provider succeeds but the
+    # DB mark fails afterward, users get duplicate result emails on every
+    # restart/cycle. Missing a retry is less harmful than spamming old positions.
     now = datetime.now(timezone.utc).isoformat()
+    marked_emails: list[dict] = []
+    marked_refs: list[list[str]] = []
     failed_marks: list[str] = []
-    for i, refs in enumerate(position_refs):
-        if i < len(results) and results[i].get("id"):
+    for email_dict, refs in zip(emails_to_send, position_refs):
+        try:
             for order_event_id in refs:
-                try:
-                    _db_update_by_id(
-                        order_event_id, {"result_sent_at": now}, "Settlement email mark"
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to mark result_sent_at for order_event_id=%s",
-                        order_event_id,
-                    )
-                    failed_marks.append(order_event_id)
-        else:
-            logger.warning(
-                "Settlement email send reported no id for refs=%s, will retry next cycle",
+                _db_update_by_id(
+                    order_event_id, {"result_sent_at": now}, "Settlement email pre-mark"
+                )
+        except Exception:
+            logger.exception(
+                "Settlement email pre-mark failed for refs=%s; skipping send",
                 refs,
             )
+            failed_marks.extend(refs)
+            continue
+        marked_emails.append(email_dict)
+        marked_refs.append(refs)
 
     if failed_marks:
         logger.error(
-            "ALERT: %d settlement email(s) sent but result_sent_at mark failed — "
-            "duplicate emails likely on next cycle. order_event_ids=%s",
+            "ALERT: skipped %d settlement email position(s) because result_sent_at "
+            "could not be marked. order_event_ids=%s",
             len(failed_marks),
             failed_marks,
         )
+
+    if not marked_emails:
+        return
+
+    logger.info("Sending %d settlement result emails", len(marked_emails))
+    try:
+        results = send_batch(marked_emails)
+    except Exception:
+        logger.exception(
+            "Settlement result batch send failed after pre-mark; will not retry "
+            "automatically to avoid duplicate result emails"
+        )
+        return
+
+    if len(results) != len(marked_emails):
+        logger.error(
+            "Settlement batch results length mismatch: sent=%d got=%d",
+            len(marked_emails),
+            len(results),
+        )
+
+    for i, refs in enumerate(marked_refs):
+        if i >= len(results) or not results[i].get("id"):
+            logger.warning(
+                "Settlement email send reported no id for pre-marked refs=%s; "
+                "not retrying automatically to avoid duplicates",
+                refs,
+            )
 
 
 async def settle_once():
@@ -826,6 +843,7 @@ async def settle_once():
 
     # Phase-2-only seed bypasses Phase 1 (already settled on-chain).
     settled_positions: list[dict] = list(phase2_only_seed)
+    email_eligible_positions: list[dict] = []
     phase1_failed = False
 
     for i in range(0, len(positions), MAX_BATCH_SIZE):
@@ -870,6 +888,11 @@ async def settle_once():
         now = datetime.now(timezone.utc).isoformat()
         try:
             _mark_batch_settled(owners, vault_ids, tx_hash, now)
+            for pos in batch:
+                pos["is_settled"] = True
+                pos["settled_at"] = now
+                pos["settlement_tx_hash"] = tx_hash
+            email_eligible_positions.extend(batch)
         except Exception:
             logger.exception(
                 f"Phase 1: DB write failed after on-chain success (tx: {tx_hash}). "
@@ -1056,7 +1079,7 @@ async def settle_once():
     # --- Email notifications (fire-and-forget) ---
     try:
         await asyncio.to_thread(
-            _send_settlement_emails, settled_positions, itm_positions
+            _send_settlement_emails, email_eligible_positions, itm_positions
         )
     except Exception:
         logger.exception("Settlement emails failed (non-blocking)")
