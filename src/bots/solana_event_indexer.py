@@ -27,7 +27,6 @@ MAX_SUPPORTED_TX_VERSION = 0
 
 _EXECUTE_ORDER_DISC = hashlib.sha256(b"event:OrderExecuted").digest()[:8]
 _DEPOSIT_COLLATERAL_DISC = bytes.fromhex("f43e4d0b87703d60")
-_ORDER_EXECUTED_LOG = "Program log: Instruction: ExecuteOrder"
 
 
 def _utc_day_start_ts() -> int:
@@ -278,9 +277,6 @@ def _build_order_row(signature: str, slot: int, tx: dict) -> dict | None:
         return None
 
     logs = meta.get("logMessages") or []
-    if _ORDER_EXECUTED_LOG not in logs:
-        return None
-
     event = _parse_log_payloads(logs)
     if not event:
         raise ValueError(f"Failed to decode executeOrder logs for tx={signature}")
