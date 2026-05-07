@@ -32,6 +32,10 @@ class BridgeAndTradeRequest(BaseModel):
     mint_recipient: str = Field(
         ..., description="Destination wallet address to receive USDC"
     )
+    solana_owner: str | None = Field(
+        None,
+        description="Solana wallet owner for mint_recipient when destination is Solana.",
+    )
     burn_amount: str = Field(..., description="USDC amount burned (raw, 6 decimals)")
     quote_id: str | None = Field(
         None,
@@ -52,6 +56,10 @@ class BridgeJobReserveRequest(BaseModel):
     user_id: str = Field(..., description="Privy user ID")
     mint_recipient: str = Field(
         ..., description="Destination wallet address to receive USDC"
+    )
+    solana_owner: str | None = Field(
+        None,
+        description="Solana wallet owner for mint_recipient when destination is Solana.",
     )
     burn_amount: str = Field(..., description="Expected USDC amount to burn")
     quote_id: str = Field(..., description="Quote ID to reserve before burn")

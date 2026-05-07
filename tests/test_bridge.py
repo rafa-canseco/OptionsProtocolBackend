@@ -320,7 +320,9 @@ class TestBridgeAndTradeEndpoint:
 
         with (
             patch("src.bridge.routes.enqueue_job") as mock_enqueue,
-            patch("src.bridge.routes._validate_solana_cctp_mint_recipient_or_raise"),
+            patch(
+                "src.bridge.routes._ensure_solana_cctp_mint_recipient_or_raise"
+            ) as mock_ensure_recipient,
             patch(
                 "src.bridge.routes._normalize_signed_trade_tx_or_raise",
                 return_value="cosigned-tx",
@@ -345,6 +347,11 @@ class TestBridgeAndTradeEndpoint:
         assert body["status"] == "reserved"
         inserted = mock_db.table.return_value.insert.call_args.args[0]
         assert inserted["signed_trade_tx"] == "cosigned-tx"
+        mock_ensure_recipient.assert_called_once_with(
+            SOL_ADDR,
+            user_id="test",
+            solana_owner=None,
+        )
         mock_enqueue.assert_not_called()
 
     def test_reserve_is_scoped_to_base_to_solana(self, mock_db):
