@@ -2,8 +2,10 @@
 
 import logging
 import re
+import time
 
 from fastapi import APIRouter, HTTPException
+from solana.rpc.commitment import Confirmed
 
 from src.bridge.cctp import (
     build_solana_cctp_burn_transaction,
@@ -390,6 +392,28 @@ def _create_solana_usdc_ata_or_raise(*, owner: str, expected_ata: str) -> None:
         raise HTTPException(502, "Could not create Solana USDC token account") from exc
 
 
+def _get_solana_account_info(address: str):
+    from solders.pubkey import Pubkey
+
+    from src.chains.solana.client import get_solana_client
+
+    return get_solana_client().get_account_info(
+        Pubkey.from_string(address),
+        commitment=Confirmed,
+    ).value
+
+
+def _wait_for_solana_account_info(address: str, *, timeout_seconds: float = 12.0):
+    deadline = time.monotonic() + timeout_seconds
+    last_account = None
+    while time.monotonic() < deadline:
+        last_account = _get_solana_account_info(address)
+        if last_account is not None:
+            return last_account
+        time.sleep(0.5)
+    return last_account
+
+
 def _validate_solana_cctp_mint_recipient_or_raise(address: str) -> None:
     _ensure_solana_cctp_mint_recipient_or_raise(address)
 
@@ -408,12 +432,8 @@ def _ensure_solana_cctp_mint_recipient_or_raise(
     recipient account is not owned by the SPL Token program. If the expected
     ATA does not exist yet, create it with the operator hot wallet before burn.
     """
-    from solders.pubkey import Pubkey
-
-    from src.chains.solana.client import get_solana_client
-
     try:
-        account = get_solana_client().get_account_info(Pubkey.from_string(address)).value
+        account = _get_solana_account_info(address)
     except Exception:
         logger.exception("Failed to validate Solana CCTP mint recipient %s", address)
         raise HTTPException(502, "Could not validate Solana mint recipient")
@@ -431,7 +451,7 @@ def _ensure_solana_cctp_mint_recipient_or_raise(
             )
         _create_solana_usdc_ata_or_raise(owner=owner, expected_ata=address)
         try:
-            account = get_solana_client().get_account_info(Pubkey.from_string(address)).value
+            account = _wait_for_solana_account_info(address)
         except Exception:
             logger.exception("Failed to validate created Solana CCTP recipient %s", address)
             raise HTTPException(502, "Could not validate Solana mint recipient")
@@ -444,6 +464,8 @@ def _ensure_solana_cctp_mint_recipient_or_raise(
             400,
             "mint_recipient must be a Solana USDC token account, not wallet owner",
         )
+
+    from solders.pubkey import Pubkey
 
     data = bytes(account.data)
     if len(data) < 64:
