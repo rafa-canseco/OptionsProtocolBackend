@@ -204,7 +204,11 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
         )
     if not is_valid_solana_address(body.mint_recipient):
         raise HTTPException(400, "mint_recipient must be a Solana address")
-    _validate_solana_cctp_mint_recipient_or_raise(body.mint_recipient)
+    _ensure_solana_cctp_mint_recipient_or_raise(
+        body.mint_recipient,
+        user_id=body.user_id,
+        solana_owner=body.solana_owner,
+    )
     signed_trade_tx = _normalize_signed_trade_tx_or_raise(
         body.dest_chain, body.signed_trade_tx
     )
@@ -255,13 +259,154 @@ def _create_bridge_reservation_or_raise(body: BridgeJobReserveRequest) -> str:
     return result.data[0]["id"]
 
 
+def _derive_solana_usdc_ata(owner: str) -> str:
+    from solders.pubkey import Pubkey
+    from spl.token.constants import TOKEN_PROGRAM_ID  # type: ignore[import-untyped]
+    from spl.token.instructions import (  # type: ignore[import-untyped]
+        get_associated_token_address,
+    )
+
+    return str(
+        get_associated_token_address(
+            Pubkey.from_string(owner),
+            Pubkey.from_string(settings.cctp_solana_usdc_mint),
+            TOKEN_PROGRAM_ID,
+        )
+    )
+
+
+def _resolve_solana_owner_for_mint_recipient(
+    *, user_id: str | None, mint_recipient: str
+) -> str | None:
+    if not user_id:
+        return None
+
+    client = get_client()
+    try:
+        direct = (
+            client.table("b1nary_wallets")
+            .select("address,verified_at")
+            .eq("privy_user_id", user_id)
+            .eq("chain", "solana")
+            .eq("role", "trading")
+            .execute()
+        )
+        rows = [row for row in (direct.data or []) if row.get("verified_at")]
+
+        member = (
+            client.table("b1nary_account_members")
+            .select("account_id")
+            .eq("privy_user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if member.data:
+            account_id = member.data[0]["account_id"]
+            account_wallets = (
+                client.table("b1nary_wallets")
+                .select("address,verified_at")
+                .eq("account_id", account_id)
+                .eq("chain", "solana")
+                .eq("role", "trading")
+                .execute()
+            )
+            rows.extend(row for row in (account_wallets.data or []) if row.get("verified_at"))
+    except Exception:
+        logger.exception("Failed to resolve Solana owner for user_id=%s", user_id)
+        raise HTTPException(502, "Could not resolve Solana owner wallet")
+
+    seen: set[str] = set()
+    for row in rows:
+        owner = row.get("address")
+        if not owner or owner in seen:
+            continue
+        seen.add(owner)
+        try:
+            if _derive_solana_usdc_ata(owner) == mint_recipient:
+                return owner
+        except Exception:
+            logger.warning("Skipping invalid Solana wallet while resolving ATA: %s", owner)
+            continue
+    return None
+
+
+def _create_solana_usdc_ata_or_raise(*, owner: str, expected_ata: str) -> None:
+    from solders.message import MessageV0  # type: ignore[import-untyped]
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction  # type: ignore[import-untyped]
+    from spl.token.constants import TOKEN_PROGRAM_ID  # type: ignore[import-untyped]
+    from spl.token.instructions import (  # type: ignore[import-untyped]
+        create_idempotent_associated_token_account,
+        get_associated_token_address,
+    )
+
+    from src.chains.solana.client import (
+        build_and_send_solana_tx,
+        get_solana_client,
+        get_solana_operator,
+    )
+
+    try:
+        owner_pk = Pubkey.from_string(owner)
+        mint = Pubkey.from_string(settings.cctp_solana_usdc_mint)
+        expected = Pubkey.from_string(expected_ata)
+        derived = get_associated_token_address(owner_pk, mint, TOKEN_PROGRAM_ID)
+    except Exception as exc:
+        raise HTTPException(400, "Invalid Solana owner or mint_recipient") from exc
+
+    if derived != expected:
+        raise HTTPException(
+            400,
+            "mint_recipient does not match the owner's Solana USDC ATA",
+        )
+
+    try:
+        operator = get_solana_operator()
+        ix = create_idempotent_associated_token_account(
+            payer=operator.pubkey(),
+            owner=owner_pk,
+            mint=mint,
+            token_program_id=TOKEN_PROGRAM_ID,
+        )
+        blockhash = get_solana_client().get_latest_blockhash().value.blockhash
+        msg = MessageV0.try_compile(
+            payer=operator.pubkey(),
+            instructions=[ix],
+            address_lookup_table_accounts=[],
+            recent_blockhash=blockhash,
+        )
+        tx = VersionedTransaction(msg, [operator])
+        sig = build_and_send_solana_tx(tx, timeout=45)
+        logger.info(
+            "Created Solana USDC ATA for CCTP recipient owner=%s ata=%s tx=%s",
+            owner,
+            expected_ata,
+            sig,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to create Solana USDC ATA %s", expected_ata)
+        raise HTTPException(502, "Could not create Solana USDC token account") from exc
+
+
 def _validate_solana_cctp_mint_recipient_or_raise(address: str) -> None:
+    _ensure_solana_cctp_mint_recipient_or_raise(address)
+
+
+def _ensure_solana_cctp_mint_recipient_or_raise(
+    address: str,
+    *,
+    user_id: str | None = None,
+    solana_owner: str | None = None,
+) -> None:
     """Validate Base→Solana CCTP recipient is a USDC token account.
 
     Circle's Solana TokenMessenger receives into a token account, not the
     owner's wallet address. Accepting an owner wallet strands the message:
     Circle attests it, but Solana receive_message rejects it because the
-    recipient account is not owned by the SPL Token program.
+    recipient account is not owned by the SPL Token program. If the expected
+    ATA does not exist yet, create it with the operator hot wallet before burn.
     """
     from solders.pubkey import Pubkey
 
@@ -274,10 +419,24 @@ def _validate_solana_cctp_mint_recipient_or_raise(address: str) -> None:
         raise HTTPException(502, "Could not validate Solana mint recipient")
 
     if account is None:
-        raise HTTPException(
-            400,
-            "mint_recipient must be an existing Solana USDC token account",
+        owner = solana_owner or _resolve_solana_owner_for_mint_recipient(
+            user_id=user_id,
+            mint_recipient=address,
         )
+        if not owner:
+            raise HTTPException(
+                400,
+                "mint_recipient must be an existing Solana USDC token account "
+                "or match a verified Solana trading wallet",
+            )
+        _create_solana_usdc_ata_or_raise(owner=owner, expected_ata=address)
+        try:
+            account = get_solana_client().get_account_info(Pubkey.from_string(address)).value
+        except Exception:
+            logger.exception("Failed to validate created Solana CCTP recipient %s", address)
+            raise HTTPException(502, "Could not validate Solana mint recipient")
+        if account is None:
+            raise HTTPException(502, "Solana USDC token account was not created")
 
     token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
     if str(account.owner) != token_program:
