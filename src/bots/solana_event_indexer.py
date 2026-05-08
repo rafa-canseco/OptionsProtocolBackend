@@ -279,7 +279,8 @@ def _build_order_row(signature: str, slot: int, tx: dict) -> dict | None:
     logs = meta.get("logMessages") or []
     event = _parse_log_payloads(logs)
     if not event:
-        raise ValueError(f"Failed to decode executeOrder logs for tx={signature}")
+        logger.info("Skipping Solana tx without OrderExecuted event tx=%s", signature)
+        return None
 
     row = {
         "tx_hash": signature,

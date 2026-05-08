@@ -101,6 +101,23 @@ def test_build_order_row_decodes_wrapper_tx_without_execute_instruction_log():
     assert row["user_address"] == "7bx3QgnwiKn3iQAzqKHpsotg9iC6SGghoUakPRxkkjj"
 
 
+def test_build_order_row_skips_program_tx_without_order_executed_event():
+    tx = {
+        "meta": {
+            "err": None,
+            "logMessages": [
+                "Program GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS invoke [1]",
+                "Program GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS consumed 4360 of 200000 compute units",
+                "Program GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS success",
+            ],
+        }
+    }
+
+    row = sei._build_order_row("sig-no-event", 418243765, tx)
+
+    assert row is None
+
+
 class _FakeWebSocket:
     def __init__(self):
         self.messages = []
