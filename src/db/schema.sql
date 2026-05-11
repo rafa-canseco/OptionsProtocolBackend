@@ -264,6 +264,12 @@ create index if not exists idx_mm_quotes_otoken
   on mm_quotes (otoken_address) where is_active = true;
 create index if not exists idx_mm_quotes_mm
   on mm_quotes (mm_address) where is_active = true;
+create index if not exists idx_mm_quotes_cleanup_active
+  on mm_quotes (mm_address, chain, is_active);
+create index if not exists idx_mm_quotes_cleanup_deadline
+  on mm_quotes (mm_address, chain, deadline);
+create index if not exists idx_mm_quotes_cleanup_expiry
+  on mm_quotes (mm_address, chain, expiry);
 
 -- ============================================================
 -- Market Maker API keys

@@ -69,6 +69,9 @@ def mock_deps():
     mock_client.table.return_value.upsert.return_value.execute.return_value = MagicMock(
         data=[{}]
     )
+    mock_client.table.return_value.delete.return_value.eq.return_value.eq.return_value.or_.return_value.execute.return_value = MagicMock(
+        data=[]
+    )  # noqa: E501
 
     with (
         patch("src.api.mm_routes.get_client", return_value=mock_client),
@@ -126,6 +129,25 @@ class TestSolanaQuoteSubmission:
         data = resp.json()
         assert data["accepted"] == 1
         assert data["rejected"] == 0
+
+    def test_prunes_stale_quotes_after_accepting_batch(self, mock_deps):
+        resp = client.post(
+            "/mm/quotes",
+            json=self._quote_payload(),
+            headers={"X-API-Key": "fake"},
+        )
+        assert resp.status_code == 200, resp.text
+
+        delete_chain = mock_deps.table.return_value.delete.return_value
+        first_eq = delete_chain.eq
+        assert first_eq.call_args_list[0].args == ("mm_address", SOL_MAKER)
+        assert first_eq.return_value.eq.call_args.args == ("chain", "solana")
+        stale_filter = (
+            first_eq.return_value.eq.return_value.or_.call_args.args[0]
+        )
+        assert "is_active.eq.false" in stale_filter
+        assert "deadline.lt." in stale_filter
+        assert "expiry.lt." in stale_filter
 
     def test_accepts_valid_tslax_solana_quote(self, mock_deps):
         resp = client.post(
