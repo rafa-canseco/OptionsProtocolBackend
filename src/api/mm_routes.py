@@ -56,6 +56,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/mm", tags=["Market Making"])
 
+_MM_QUOTE_SELECT = (
+    "id,otoken_address,bid_price,deadline,quote_id,max_amount,maker_nonce,"
+    "signature,asset,strike_price,expiry,is_put,is_active,created_at"
+)
+_MM_FILL_SELECT = (
+    "tx_hash,chain,block_number,otoken_address,amount,gross_premium,net_premium,"
+    "protocol_fee,premium,collateral,user_address,vault_id,strike_price,expiry,"
+    "is_put,indexed_at"
+)
+_MM_POSITION_SELECT = "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+
 
 def _normalize_mm_address(addr: str) -> str:
     """Normalize MM address: lowercase for EVM (0x), as-is for Solana (base58)."""
@@ -92,6 +103,17 @@ def _resolve_nonce(
             logger.exception("Failed to read makerNonce for %s", mm_address)
             raise HTTPException(502, "Could not read on-chain makerNonce")
         return mm_address.lower(), nonce
+
+
+def _prune_stale_quotes_for_mm(db, mm_id: str, chain: str, now_ts: int) -> None:
+    """Delete quotes that can no longer be served or executed.
+
+    Fills and position history live in order_events, so stale mm_quotes rows are
+    operational cache entries, not canonical trade history.
+    """
+    db.table("mm_quotes").delete().eq("mm_address", mm_id).eq("chain", chain).or_(
+        f"is_active.eq.false,deadline.lt.{now_ts},expiry.lt.{now_ts}"
+    ).execute()
 
 
 @router.post(
@@ -184,6 +206,16 @@ async def submit_quotes(
             logger.exception("Failed to upsert mm_quotes")
             raise HTTPException(status_code=502, detail="Database write failed")
 
+        try:
+            _prune_stale_quotes_for_mm(db, mm_id, chain, now_ts)
+        except Exception:
+            logger.warning(
+                "Failed to prune stale mm_quotes for mm=%s chain=%s",
+                mm_id,
+                chain,
+                exc_info=True,
+            )
+
     return QuoteBatchResponse(
         accepted=accepted,
         rejected=len(body.quotes) - accepted,
@@ -265,7 +297,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
         client = get_client()
         result = (
             client.table("mm_quotes")
-            .select("*")
+            .select(_MM_QUOTE_SELECT)
             .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
             .gt("deadline", now_ts)
@@ -341,7 +373,7 @@ async def get_fills(
         client = get_client()
         q = (
             client.table("order_events")
-            .select("*")
+            .select(_MM_FILL_SELECT)
             .eq("mm_address", _normalize_mm_address(mm_address))
         )
         if since is not None:
@@ -389,7 +421,7 @@ async def get_positions(mm_address: str = Depends(require_mm_api_key)):
         client = get_client()
         result = (
             client.table("order_events")
-            .select("*")
+            .select(_MM_POSITION_SELECT)
             .eq("mm_address", _normalize_mm_address(mm_address))
             .gt("expiry", now_ts)
             .order("expiry")

@@ -56,6 +56,19 @@ _MIN_QUOTE_TTL = _PRICES_TTL
 
 ACTIVITY_MULTIPLIER = 1
 
+_CAPACITY_SELECT = "mm_address,capacity_eth,capacity_usd,status,reported_at"
+_PRICE_QUOTE_SELECT = (
+    "id,mm_address,otoken_address,bid_price,deadline,quote_id,max_amount,"
+    "maker_nonce,signature,strike_price,expiry,is_put,chain"
+)
+_POSITION_SELECT = (
+    "id,tx_hash,block_number,chain,user_address,mm_address,otoken_address,"
+    "amount,premium,gross_premium,net_premium,protocol_fee,collateral,vault_id,"
+    "strike_price,expiry,is_put,is_settled,settled_at,settlement_tx_hash,"
+    "settlement_type,is_itm,expiry_price,delivered_asset,delivered_amount,"
+    "delivery_tx_hash,group_id,indexed_at,asset"
+)
+
 
 def _get_client_ip(request: Request) -> str:
     """Extract client IP, preferring X-Forwarded-For for proxied requests."""
@@ -135,7 +148,7 @@ def _fetch_capacity_rows(asset: Asset = Asset.ETH) -> list[dict]:
     client = get_client()
     result = (
         client.table("mm_capacity")
-        .select("*")
+        .select(_CAPACITY_SELECT)
         .eq("asset", asset.value)
         .eq("chain", chain)
         .gte("reported_at", cutoff)
@@ -281,7 +294,7 @@ def _fetch_active_quotes(asset: Asset = Asset.ETH) -> list[dict]:
     client = get_client()
     result = (
         client.table("mm_quotes")
-        .select("*")
+        .select(_PRICE_QUOTE_SELECT)
         .eq("is_active", True)
         .eq("asset", asset.value)
         .eq("chain", chain)
@@ -774,7 +787,7 @@ async def get_positions(address: str, request: Request):
         client = get_client()
         result = (
             client.table("order_events")
-            .select("*")
+            .select(_POSITION_SELECT)
             .eq("user_address", addr_normalized)
             .eq("chain", chain.value)
             .order("indexed_at", desc=True)
@@ -899,7 +912,7 @@ async def get_positions_by_user(
         try:
             result = (
                 client.table("order_events")
-                .select("*")
+                .select(_POSITION_SELECT)
                 .eq("user_address", base_address.lower())
                 .eq("chain", "base")
                 .order("indexed_at", desc=True)
@@ -916,7 +929,7 @@ async def get_positions_by_user(
         try:
             result = (
                 client.table("order_events")
-                .select("*")
+                .select(_POSITION_SELECT)
                 .eq("user_address", solana_address)
                 .eq("chain", "solana")
                 .order("indexed_at", desc=True)
