@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     # Base chain
     chain_id: int = 8453  # Base mainnet
 
+    # ── Agora / MetaVault testnet deployment registry ──
+    arc_chain_id: int = 5042002
+    arc_testnet_rpc: str = ""
+    arc_metavault_address: str = ""
+    arc_usdc: str = "0x3600000000000000000000000000000000000000"
+    base_sepolia_usdc: str = ""
+    base_sepolia_vault_adapter: str = ""
+    solana_devnet_usdc: str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+    cctp_domain_arc: int = 26
+    cctp_domain_base: int = 6
+    cctp_domain_solana: int = 5
+
     # ── Solana ──
     solana_rpc_url: str = ""
     solana_wss_rpc_url: str = ""

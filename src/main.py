@@ -17,6 +17,7 @@ from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
 from src.capital_intents.routes import router as capital_intents_router
+from src.deployments.routes import router as deployments_router
 from src.config import (
     settings,
     has_solana_config,
@@ -213,6 +214,10 @@ openapi_tags = [
         "description": "MetaVault USDC movement intents for deposits, deployments, returns, and venue-to-venue rotations.",
     },
     {
+        "name": "Deployments",
+        "description": "Public deployment registry for staging/testnet chain addresses and CCTP domains.",
+    },
+    {
         "name": "B1nary Accounts",
         "description": "Product account identity, Privy user membership, and verified wallet linking.",
     },
@@ -261,6 +266,7 @@ app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
 app.include_router(bridge_router)
 app.include_router(capital_intents_router)
+app.include_router(deployments_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
