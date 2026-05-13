@@ -16,6 +16,7 @@ from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
 from src.bridge.routes import router as bridge_router
+from src.capital_intents.routes import router as capital_intents_router
 from src.config import (
     settings,
     has_solana_config,
@@ -208,6 +209,10 @@ openapi_tags = [
         "description": "CCTP V2 cross-chain USDC bridging and trade execution. Orchestrates burn→attestation→mint→trade.",
     },
     {
+        "name": "Capital Intents",
+        "description": "MetaVault USDC movement intents for deposits, deployments, returns, and venue-to-venue rotations.",
+    },
+    {
         "name": "B1nary Accounts",
         "description": "Product account identity, Privy user membership, and verified wallet linking.",
     },
@@ -255,6 +260,7 @@ app.include_router(notifications_router)
 app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
 app.include_router(bridge_router)
+app.include_router(capital_intents_router)
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
