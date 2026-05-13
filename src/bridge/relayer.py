@@ -12,6 +12,7 @@ from src.bridge.cctp import (
 )
 from src.bridge.models import BridgeChain, BridgeJobState
 from src.bridge.solana_trade import cosign_sponsored_solana_trade_tx
+from src.capital_intents.sync import sync_capital_intents_for_bridge_job
 from src.chains import Chain
 from src.config import settings
 from src.db.database import get_client
@@ -35,6 +36,15 @@ def _update_job(job_id: str, fields: dict, context: str) -> None:
     except Exception:
         logger.exception("%s: DB update failed for job %s", context, job_id)
         raise
+
+    try:
+        sync_capital_intents_for_bridge_job(job_id, fields)
+    except Exception:
+        logger.exception(
+            "%s: bridge job %s updated, but linked capital intent sync failed",
+            context,
+            job_id,
+        )
 
 
 def _get_job(job_id: str) -> dict | None:
