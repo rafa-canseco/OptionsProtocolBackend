@@ -72,7 +72,7 @@ def sync_capital_intents_for_bridge_job(
             bridge_status,
             intent["intent_type"],
         )
-        updates: dict[str, str] = {}
+        updates: dict[str, str | None] = {}
         if intent.get("status") != next_status.value:
             updates["status"] = next_status.value
         if bridge_fields.get("mint_tx_hash") and not intent.get("destination_tx"):
@@ -93,6 +93,16 @@ def sync_capital_intents_for_bridge_job(
                 updates[amount_key] = str(bridge_fields[amount_key])
         if bridge_fields.get("error_message") and not intent.get("failure_reason"):
             updates["failure_reason"] = str(bridge_fields["error_message"])[:500]
+        if (
+            next_status
+            in {
+                CapitalIntentStatus.WAITING_TO_BE_DEPLOYED,
+                CapitalIntentStatus.RETURNED_TO_USDC,
+                CapitalIntentStatus.DEPLOYED,
+            }
+            and intent.get("failure_reason")
+        ):
+            updates["failure_reason"] = None
 
         if not updates:
             continue

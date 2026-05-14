@@ -86,6 +86,32 @@ async def process_bridge_job(job_id: str) -> None:
     source_chain = BridgeChain(job["source_chain"])
     dest_chain = BridgeChain(job["dest_chain"])
     burn_tx_hash = job["burn_tx_hash"]
+    if status in {
+        BridgeJobState.COMPLETED,
+        BridgeJobState.MINT_COMPLETED,
+    }:
+        logger.info("Job %s already terminal (%s), skipping", job_id, status)
+        return
+    if dest_chain == BridgeChain.ARC and _arc_finalize_tx(job):
+        finalize_tx = _arc_finalize_tx(job)
+        await asyncio.to_thread(
+            _update_job,
+            job_id,
+            {
+                "status": BridgeJobState.MINT_COMPLETED,
+                "trade_tx_hash": finalize_tx,
+                "arc_finalize_tx_hash": finalize_tx,
+                "error_message": None,
+            },
+            "arc finalize already recorded",
+        )
+        logger.info(
+            "Job %s: Arc finalize tx already recorded (finalize=%s), "
+            "marking complete without retry",
+            job_id,
+            finalize_tx,
+        )
+        return
     if str(burn_tx_hash).startswith("pending:"):
         logger.info("Job %s is a bridge reservation; skipping until finalized", job_id)
         return
@@ -212,6 +238,30 @@ async def process_bridge_job(job_id: str) -> None:
     except Exception as exc:
         current = await asyncio.to_thread(_get_job, job_id)
         current_status = current["status"] if current else "unknown"
+        if current and dest_chain == BridgeChain.ARC and _arc_finalize_tx(current):
+            finalize_tx = _arc_finalize_tx(current)
+            logger.warning(
+                "Job %s errored after Arc finalize tx was recorded; preserving "
+                "success (finalize=%s): %s",
+                job_id,
+                finalize_tx,
+                exc,
+            )
+            try:
+                await asyncio.to_thread(
+                    _update_job,
+                    job_id,
+                    {
+                        "status": BridgeJobState.MINT_COMPLETED,
+                        "trade_tx_hash": finalize_tx,
+                        "arc_finalize_tx_hash": finalize_tx,
+                        "error_message": None,
+                    },
+                    "arc finalize already recorded",
+                )
+            except Exception:
+                logger.exception("ALERT: Could not preserve finalized job %s", job_id)
+            return
 
         if current_status == BridgeJobState.TRADING:
             fail_state = BridgeJobState.MINT_COMPLETED_TRADE_FAILED
@@ -294,9 +344,29 @@ async def _process_arc_deposit_job(
 ) -> None:
     """Process Base Sepolia -> Arc MetaVault deposit completion."""
     mint_tx = job.get("mint_tx_hash")
+    finalize_tx = _arc_finalize_tx(job)
     gross = job.get("gross_amount_usdc")
     fee = job.get("circle_fee_usdc")
     net = job.get("net_amount_usdc")
+
+    if finalize_tx:
+        await asyncio.to_thread(
+            _update_job,
+            job_id,
+            {
+                "status": BridgeJobState.MINT_COMPLETED,
+                "trade_tx_hash": finalize_tx,
+                "arc_finalize_tx_hash": finalize_tx,
+                "error_message": None,
+            },
+            "arc finalize already complete",
+        )
+        logger.info(
+            "Job %s: Arc finalize already recorded (finalize=%s), skipping retry",
+            job_id,
+            finalize_tx,
+        )
+        return
 
     if initial_status in (
         BridgeJobState.PENDING,
@@ -363,6 +433,7 @@ async def _process_arc_deposit_job(
             "net_amount_usdc": str(net),
             "circle_fee_usdc": str(fee or "0"),
             "gross_amount_usdc": str(gross or job.get("burn_amount")),
+            "error_message": None,
         },
         "arc finalize complete",
     )
@@ -373,6 +444,11 @@ async def _process_arc_deposit_job(
         finalize_tx,
         net,
     )
+
+
+def _arc_finalize_tx(job: dict) -> str | None:
+    """Return the recorded Arc finalize tx, if any."""
+    return job.get("arc_finalize_tx_hash") or job.get("trade_tx_hash")
 
 
 def _get_linked_capital_intent(job_id: str) -> dict | None:

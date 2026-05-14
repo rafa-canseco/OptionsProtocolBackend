@@ -83,6 +83,34 @@ class TestArcBridgeRelayer:
         assert mint_fields["circle_fee_usdc"] == "130"
 
     @pytest.mark.asyncio
+    async def test_retry_with_recorded_finalize_tx_marks_complete_without_contract_call(self):
+        from src.bridge import relayer
+
+        retry_job = _job(
+            status=BridgeJobState.FAILED.value,
+            arc_finalize_tx_hash=FINALIZE_TX,
+            trade_tx_hash=FINALIZE_TX,
+            mint_tx_hash=RECEIVE_TX,
+        )
+        mock_update = MagicMock()
+        with (
+            patch("src.bridge.relayer._get_job", return_value=retry_job),
+            patch("src.bridge.relayer._update_job", mock_update),
+            patch("src.bridge.relayer.poll_attestation", new=AsyncMock()) as mock_poll,
+            patch("src.bridge.relayer.receive_message_arc") as mock_receive,
+            patch("src.bridge.relayer.finalize_arc_metavault_deposit") as mock_finalize,
+        ):
+            await relayer.process_bridge_job("bridge-job-1")
+
+        mock_poll.assert_not_called()
+        mock_receive.assert_not_called()
+        mock_finalize.assert_not_called()
+        final_fields = mock_update.call_args_list[-1].args[1]
+        assert final_fields["status"] == BridgeJobState.MINT_COMPLETED
+        assert final_fields["arc_finalize_tx_hash"] == FINALIZE_TX
+        assert final_fields["error_message"] is None
+
+    @pytest.mark.asyncio
     async def test_receive_message_failure_marks_failed_before_finalize(self):
         from src.bridge import relayer
 
