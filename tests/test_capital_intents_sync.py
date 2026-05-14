@@ -103,6 +103,38 @@ class TestCapitalIntentSync:
         assert updates["status"] == "failed"
         assert updates["failure_reason"] == "attestation timeout"
 
+    def test_sync_clears_failure_reason_after_successful_retry(self):
+        mock_db = MagicMock()
+        mock_table = mock_db.table.return_value
+        mock_table.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "id": "intent-1",
+                    "intent_type": "deposit",
+                    "status": "failed",
+                    "destination_tx": None,
+                    "failure_reason": "IntentAlreadyProcessed",
+                }
+            ]
+        )
+        mock_table.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[{"id": "intent-1"}]
+        )
+
+        with patch("src.capital_intents.sync.get_client", return_value=mock_db):
+            sync_capital_intents_for_bridge_job(
+                "bridge-job-1",
+                {
+                    "status": BridgeJobState.MINT_COMPLETED.value,
+                    "arc_finalize_tx_hash": "finalize-tx",
+                },
+            )
+
+        updates = mock_table.update.call_args.args[0]
+        assert updates["status"] == "waiting_to_be_deployed"
+        assert updates["destination_tx"] == "finalize-tx"
+        assert updates["failure_reason"] is None
+
 
 class TestRelayerIntentSyncHook:
     def test_update_job_triggers_capital_intent_sync(self):
