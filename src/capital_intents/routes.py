@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/capital-intents", tags=["Capital Intents"])
 
-BRIDGEABLE_CHAINS = {CapitalChain.BASE, CapitalChain.SOLANA}
-
 
 def _default_reason(intent_type: CapitalIntentType) -> MovementReason:
     if intent_type == CapitalIntentType.DEPOSIT:
@@ -98,11 +96,20 @@ def _read_existing_by_idempotency(idempotency_key: str) -> dict | None:
 
 
 def _create_bridge_job(body: CapitalIntentCreate) -> str:
-    if (
-        body.source_chain not in BRIDGEABLE_CHAINS
-        or body.destination_chain not in BRIDGEABLE_CHAINS
-    ):
-        raise HTTPException(400, "Bridge job creation supports only base<->solana")
+    is_base_to_arc_deposit = (
+        body.intent_type == CapitalIntentType.DEPOSIT
+        and body.source_chain == CapitalChain.BASE
+        and body.destination_chain == CapitalChain.ARC
+    )
+    is_base_solana_move = (
+        body.source_chain in {CapitalChain.BASE, CapitalChain.SOLANA}
+        and body.destination_chain in {CapitalChain.BASE, CapitalChain.SOLANA}
+    )
+    if not (is_base_solana_move or is_base_to_arc_deposit):
+        raise HTTPException(
+            400,
+            "Bridge job creation supports base<->solana moves and base->arc deposits",
+        )
 
     row = {
         "user_id": body.user_id,
@@ -114,6 +121,8 @@ def _create_bridge_job(body: CapitalIntentCreate) -> str:
         "mint_recipient": body.destination_account,
         "quote_id": body.quote_id or body.idempotency_key,
         "signed_trade_tx": body.signed_trade_tx,
+        "gross_amount_usdc": body.amount_usdc,
+        "receiver": body.receiver,
     }
 
     client = get_client()
@@ -153,6 +162,7 @@ def _insert_intent(
         "destination_account": body.destination_account,
         "destination_tx": body.destination_tx,
         "amount_usdc": body.amount_usdc,
+        "onchain_intent_id": body.onchain_intent_id,
         "status": status.value,
         "bridge_job_id": bridge_job_id or body.bridge_job_id,
         "idempotency_key": body.idempotency_key,

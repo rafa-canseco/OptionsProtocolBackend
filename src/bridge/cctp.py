@@ -28,6 +28,7 @@ RECEIVE_MESSAGE_ABI = [
 ]
 
 BASE_MAINNET_MESSAGE_TRANSMITTER_V2 = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+ARC_TESTNET_MESSAGE_TRANSMITTER_V2 = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275"
 
 
 TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -36,11 +37,41 @@ SYSTEM_PROGRAM_ID = "11111111111111111111111111111111"
 
 
 def get_domain_for_chain(chain: Chain) -> int:
+    if chain == Chain.ARC:
+        return settings.cctp_domain_arc
     if chain == Chain.BASE:
         return settings.cctp_base_domain
     if chain == Chain.SOLANA:
         return settings.cctp_solana_domain
     raise ValueError(f"No CCTP domain for chain {chain.value}")
+
+
+def parse_cctp_v2_burn_amounts(
+    message_hex: str,
+    fallback_gross_amount: str | int | None = None,
+) -> tuple[int, int, int]:
+    """Return (gross_amount, fee_executed, net_amount) from a CCTP V2 message.
+
+    Circle's CCTP V2 BurnMessage body starts at byte 148 of the top-level
+    message. Within that body, amount is at offset 68 and feeExecuted at 164.
+    """
+    message_bytes = bytes.fromhex(
+        message_hex[2:] if message_hex.startswith("0x") else message_hex
+    )
+    if len(message_bytes) < 148 + 196:
+        if fallback_gross_amount is None:
+            raise ValueError("CCTP message too short to parse amount fields")
+        gross = int(fallback_gross_amount)
+        return gross, 0, gross
+
+    body = message_bytes[148:]
+    gross = int.from_bytes(body[68:100], "big")
+    fee = int.from_bytes(body[164:196], "big")
+    if gross <= 0 and fallback_gross_amount is not None:
+        gross = int(fallback_gross_amount)
+    if fee > gross:
+        raise ValueError("CCTP feeExecuted exceeds gross amount")
+    return gross, fee, gross - fee
 
 
 def _load_relayer_solana_keypair():
@@ -385,6 +416,61 @@ def receive_message_base(
 
     return _sign_send_and_confirm(
         w3, tx_dict, account, "CCTP receiveMessage (Base)", tx_timeout=120
+    )
+
+
+def receive_message_arc(
+    message_hex: str,
+    attestation_hex: str,
+) -> str:
+    """Call receiveMessage on Arc Testnet MessageTransmitterV2."""
+    from eth_account import Account
+
+    from src.contracts.web3_client import _sign_send_and_confirm
+
+    relayer_private_key = (
+        settings.relayer_base_private_key or settings.operator_private_key
+    )
+    if not relayer_private_key:
+        raise ValueError(
+            "relayer_base_private_key not configured and operator_private_key "
+            "fallback is unavailable. Set RELAYER_BASE_PRIVATE_KEY or "
+            "OPERATOR_PRIVATE_KEY env var."
+        )
+    if not settings.arc_testnet_rpc:
+        raise ValueError("arc_testnet_rpc not configured. Set ARC_TESTNET_RPC env var.")
+
+    message_transmitter = (
+        settings.arc_message_transmitter or ARC_TESTNET_MESSAGE_TRANSMITTER_V2
+    )
+    w3 = Web3(Web3.HTTPProvider(settings.arc_testnet_rpc))
+    account = Account.from_key(relayer_private_key)
+
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(message_transmitter),
+        abi=RECEIVE_MESSAGE_ABI,
+    )
+    message_bytes = bytes.fromhex(
+        message_hex[2:] if message_hex.startswith("0x") else message_hex
+    )
+    attestation_bytes = bytes.fromhex(
+        attestation_hex[2:] if attestation_hex.startswith("0x") else attestation_hex
+    )
+    tx_fn = contract.functions.receiveMessage(message_bytes, attestation_bytes)
+    try:
+        gas = tx_fn.estimate_gas({"from": account.address})
+    except Exception as exc:
+        raise RuntimeError(f"Arc receiveMessage gas estimation failed: {exc}") from exc
+
+    tx_dict = tx_fn.build_transaction(
+        {
+            "from": account.address,
+            "gas": int(gas * 2),
+            "chainId": settings.arc_chain_id,
+        }
+    )
+    return _sign_send_and_confirm(
+        w3, tx_dict, account, "CCTP receiveMessage (Arc)", tx_timeout=120
     )
 
 

@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 
 from src.bridge.cctp import (
     get_domain_for_chain,
+    parse_cctp_v2_burn_amounts,
     poll_attestation,
+    receive_message_arc,
     receive_message_base,
     receive_message_solana,
 )
@@ -23,6 +25,20 @@ _job_queue: asyncio.Queue[str] = asyncio.Queue()
 
 # Number of concurrent worker tasks
 _NUM_WORKERS = 2
+
+FINALIZE_BRIDGE_DEPOSIT_ABI = [
+    {
+        "inputs": [
+            {"name": "intentId", "type": "bytes32"},
+            {"name": "receiver", "type": "address"},
+            {"name": "netAmount", "type": "uint256"},
+        ],
+        "name": "finalizeBridgeDeposit",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
 
 
 def _update_job(job_id: str, fields: dict, context: str) -> None:
@@ -110,6 +126,16 @@ async def process_bridge_job(job_id: str) -> None:
                 raise RuntimeError(
                     f"Job {job_id} in state {status} but missing attestation data"
                 )
+
+        if dest_chain == BridgeChain.ARC:
+            await _process_arc_deposit_job(
+                job_id,
+                job,
+                status,
+                message_hex,
+                attestation_hex,
+            )
+            return
 
         # ── Minting ──
         if status in (
@@ -257,6 +283,174 @@ async def _submit_trade(
                 )
 
     raise RuntimeError(f"Trade failed after {max_retries} attempts: {last_exc}")
+
+
+async def _process_arc_deposit_job(
+    job_id: str,
+    job: dict,
+    initial_status: str,
+    message_hex: str,
+    attestation_hex: str,
+) -> None:
+    """Process Base Sepolia -> Arc MetaVault deposit completion."""
+    mint_tx = job.get("mint_tx_hash")
+    gross = job.get("gross_amount_usdc")
+    fee = job.get("circle_fee_usdc")
+    net = job.get("net_amount_usdc")
+
+    if initial_status in (
+        BridgeJobState.PENDING,
+        BridgeJobState.ATTESTING,
+        BridgeJobState.MINTING,
+    ) and not mint_tx:
+        parsed_gross, parsed_fee, parsed_net = parse_cctp_v2_burn_amounts(
+            message_hex,
+            job.get("burn_amount"),
+        )
+        mint_tx = await asyncio.to_thread(
+            receive_message_arc,
+            message_hex,
+            attestation_hex,
+        )
+        gross = str(parsed_gross)
+        fee = str(parsed_fee)
+        net = str(parsed_net)
+        await asyncio.to_thread(
+            _update_job,
+            job_id,
+            {
+                "status": BridgeJobState.TRADING,
+                "mint_tx_hash": mint_tx,
+                "arc_receive_tx_hash": mint_tx,
+                "gross_amount_usdc": gross,
+                "circle_fee_usdc": fee,
+                "net_amount_usdc": net,
+            },
+            "arc mint complete",
+        )
+    elif not mint_tx:
+        raise RuntimeError(f"Job {job_id} missing Arc receive tx for finalize retry")
+
+    intent = await asyncio.to_thread(_get_linked_capital_intent, job_id)
+    if not intent:
+        raise RuntimeError(f"Job {job_id} has no linked capital movement intent")
+
+    receiver = intent.get("receiver") or job.get("receiver")
+    onchain_intent_id = intent.get("onchain_intent_id") or intent.get("idempotency_key")
+    if not receiver:
+        raise RuntimeError(f"Job {job_id} linked intent is missing receiver")
+    if not _is_bytes32_hex(onchain_intent_id):
+        raise RuntimeError(
+            f"Job {job_id} linked intent requires bytes32 onchain_intent_id"
+        )
+    if not net:
+        raise RuntimeError(f"Job {job_id} missing net_amount_usdc for finalize")
+
+    finalize_tx = await asyncio.to_thread(
+        finalize_arc_metavault_deposit,
+        onchain_intent_id,
+        receiver,
+        int(net),
+    )
+    await asyncio.to_thread(
+        _update_job,
+        job_id,
+        {
+            "status": BridgeJobState.MINT_COMPLETED,
+            "trade_tx_hash": finalize_tx,
+            "arc_finalize_tx_hash": finalize_tx,
+            "receiver": receiver,
+            "net_amount_usdc": str(net),
+            "circle_fee_usdc": str(fee or "0"),
+            "gross_amount_usdc": str(gross or job.get("burn_amount")),
+        },
+        "arc finalize complete",
+    )
+    logger.info(
+        "Job %s: Arc deposit finalized (receive=%s, finalize=%s, net=%s)",
+        job_id,
+        mint_tx,
+        finalize_tx,
+        net,
+    )
+
+
+def _get_linked_capital_intent(job_id: str) -> dict | None:
+    client = get_client()
+    result = (
+        client.table("capital_movement_intents")
+        .select("id, onchain_intent_id, idempotency_key, receiver, amount_usdc")
+        .eq("bridge_job_id", job_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def _is_bytes32_hex(value: str | None) -> bool:
+    if not value:
+        return False
+    return value.startswith("0x") and len(value) == 66
+
+
+def finalize_arc_metavault_deposit(
+    intent_id: str,
+    receiver: str,
+    net_amount: int,
+) -> str:
+    """Call ArcMetaVault.finalizeBridgeDeposit(bytes32,address,uint256)."""
+    from eth_account import Account
+    from web3 import Web3
+
+    from src.contracts.web3_client import _sign_send_and_confirm
+
+    relayer_private_key = (
+        settings.relayer_base_private_key or settings.operator_private_key
+    )
+    if not relayer_private_key:
+        raise ValueError(
+            "relayer_base_private_key not configured and operator_private_key "
+            "fallback is unavailable. Set RELAYER_BASE_PRIVATE_KEY or "
+            "OPERATOR_PRIVATE_KEY env var."
+        )
+    if not settings.arc_testnet_rpc:
+        raise ValueError("arc_testnet_rpc not configured. Set ARC_TESTNET_RPC env var.")
+    if not settings.arc_metavault_address:
+        raise ValueError(
+            "arc_metavault_address not configured. Set ARC_METAVAULT_ADDRESS env var."
+        )
+
+    w3 = Web3(Web3.HTTPProvider(settings.arc_testnet_rpc))
+    account = Account.from_key(relayer_private_key)
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(settings.arc_metavault_address),
+        abi=FINALIZE_BRIDGE_DEPOSIT_ABI,
+    )
+    tx_fn = contract.functions.finalizeBridgeDeposit(
+        bytes.fromhex(intent_id[2:]),
+        Web3.to_checksum_address(receiver),
+        net_amount,
+    )
+    try:
+        gas = tx_fn.estimate_gas({"from": account.address})
+    except Exception as exc:
+        raise RuntimeError(
+            f"Arc finalizeBridgeDeposit gas estimation failed: {exc}"
+        ) from exc
+
+    tx_dict = tx_fn.build_transaction(
+        {
+            "from": account.address,
+            "gas": int(gas * 2),
+            "chainId": settings.arc_chain_id,
+        }
+    )
+    return _sign_send_and_confirm(
+        w3,
+        tx_dict,
+        account,
+        "ArcMetaVault finalizeBridgeDeposit",
+        tx_timeout=120,
+    )
 
 
 def _submit_trade_base(signed_tx_hex: str) -> str:

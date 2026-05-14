@@ -180,24 +180,76 @@ class TestCapitalIntentCreate:
         assert resp.json()["intent"]["ux_status"] == "Deposit received"
         mock_enqueue.assert_not_called()
 
-    def test_rejects_bridge_job_creation_for_arc_until_arc_rail_is_available(self):
-        resp = client.post(
-            "/api/capital-intents",
-            json={
-                "intent_type": "deployment",
-                "source_chain": "arc",
-                "source_account": "arc-metavault",
-                "source_tx": BURN_TX,
-                "destination_chain": "base",
-                "destination_account": BASE_VAULT_ADAPTER,
-                "amount_usdc": "1000000",
-                "create_bridge_job": True,
-                "user_id": "agent-1",
-            },
+    def test_creates_base_to_arc_deposit_bridge_job(self):
+        onchain_intent_id = "0x" + "ab" * 32
+        mock_db = MagicMock()
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_db.table.return_value.insert.return_value.execute.side_effect = [
+            MagicMock(
+                data=[
+                    _capital_row(
+                        intent_type="deposit",
+                        movement_reason="user_deposit",
+                        receiver=BASE_ADDR,
+                        source_chain="base",
+                        source_account=BASE_ADDR,
+                        destination_chain="arc",
+                        destination_account="arc-metavault",
+                        status="pending",
+                        bridge_job_id=None,
+                        onchain_intent_id=onchain_intent_id,
+                    )
+                ]
+            ),
+            MagicMock(data=[{"id": "bridge-job-arc"}]),
+        ]
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[
+                _capital_row(
+                    intent_type="deposit",
+                    movement_reason="user_deposit",
+                    receiver=BASE_ADDR,
+                    source_chain="base",
+                    source_account=BASE_ADDR,
+                    destination_chain="arc",
+                    destination_account="arc-metavault",
+                    status="bridging",
+                    bridge_job_id="bridge-job-arc",
+                    onchain_intent_id=onchain_intent_id,
+                )
+            ]
         )
 
-        assert resp.status_code == 422
-        assert "base<->solana" in resp.text
+        with (
+            patch("src.capital_intents.routes.get_client", return_value=mock_db),
+            patch("src.capital_intents.routes.enqueue_job") as mock_enqueue,
+        ):
+            resp = client.post(
+                "/api/capital-intents",
+                json={
+                    "intent_type": "deposit",
+                    "receiver": BASE_ADDR,
+                    "source_chain": "base",
+                    "source_account": BASE_ADDR,
+                    "source_tx": BURN_TX,
+                    "destination_chain": "arc",
+                    "destination_account": "arc-metavault",
+                    "amount_usdc": "1000000",
+                    "onchain_intent_id": onchain_intent_id,
+                    "create_bridge_job": True,
+                    "user_id": "did:privy:test",
+                },
+            )
+
+        assert resp.status_code == 200
+        bridge_insert = mock_db.table.return_value.insert.call_args_list[1].args[0]
+        assert bridge_insert["source_chain"] == "base"
+        assert bridge_insert["dest_chain"] == "arc"
+        assert bridge_insert["gross_amount_usdc"] == "1000000"
+        assert bridge_insert["receiver"] == BASE_ADDR
+        mock_enqueue.assert_called_once_with("bridge-job-arc")
 
 
 class TestCapitalIntentRead:

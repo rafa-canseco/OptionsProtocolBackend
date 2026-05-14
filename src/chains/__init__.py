@@ -11,5 +11,6 @@ from enum import Enum
 
 
 class Chain(str, Enum):
+    ARC = "arc"
     BASE = "base"
     SOLANA = "solana"

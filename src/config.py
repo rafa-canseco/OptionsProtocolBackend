@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     arc_chain_id: int = 5042002
     arc_testnet_rpc: str = ""
     arc_metavault_address: str = ""
+    arc_message_transmitter: str = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275"
     arc_usdc: str = "0x3600000000000000000000000000000000000000"
     base_sepolia_usdc: str = ""
     base_sepolia_vault_adapter: str = ""
