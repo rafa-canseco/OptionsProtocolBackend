@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class BridgeChain(str, Enum):
+    ARC = "arc"
     BASE = "base"
     SOLANA = "solana"
 
@@ -140,6 +141,12 @@ class BridgeJobStatus(BaseModel):
     quote_id: str | None = None
     mint_tx_hash: str | None = None
     trade_tx_hash: str | None = None
+    arc_receive_tx_hash: str | None = None
+    arc_finalize_tx_hash: str | None = None
+    gross_amount_usdc: str | None = None
+    circle_fee_usdc: str | None = None
+    net_amount_usdc: str | None = None
+    receiver: str | None = None
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime

@@ -73,6 +73,10 @@ class CapitalIntentCreate(BaseModel):
     destination_account: str
     destination_tx: str | None = None
     amount_usdc: str = Field(..., description="USDC amount in raw 6-decimal units")
+    onchain_intent_id: str | None = Field(
+        None,
+        description="bytes32 intent id used by ArcMetaVault.finalizeBridgeDeposit.",
+    )
     status: CapitalIntentStatus | None = None
     idempotency_key: str | None = Field(
         None,
@@ -117,13 +121,20 @@ class CapitalIntentCreate(BaseModel):
             if not self.source_tx:
                 raise ValueError("source_tx is required when create_bridge_job=true")
             supported = {CapitalChain.BASE, CapitalChain.SOLANA}
-            if (
-                self.source_chain not in supported
-                or self.destination_chain not in supported
-            ):
+            is_base_to_arc_deposit = (
+                self.intent_type == CapitalIntentType.DEPOSIT
+                and self.source_chain == CapitalChain.BASE
+                and self.destination_chain == CapitalChain.ARC
+            )
+            is_base_solana_move = (
+                self.source_chain in supported and self.destination_chain in supported
+            )
+            if not (is_base_solana_move or is_base_to_arc_deposit):
                 raise ValueError(
-                    "create_bridge_job currently supports only base<->solana moves"
+                    "create_bridge_job supports base<->solana moves and base->arc deposits"
                 )
+            if is_base_to_arc_deposit and not self.onchain_intent_id:
+                raise ValueError("onchain_intent_id is required for base->arc deposits")
         return self
 
 
@@ -132,6 +143,12 @@ class CapitalIntentPatch(BaseModel):
     source_tx: str | None = None
     destination_tx: str | None = None
     bridge_job_id: str | None = None
+    onchain_intent_id: str | None = None
+    arc_receive_tx_hash: str | None = None
+    arc_finalize_tx_hash: str | None = None
+    gross_amount_usdc: str | None = None
+    circle_fee_usdc: str | None = None
+    net_amount_usdc: str | None = None
     failure_reason: str | None = None
     completed_at: datetime | None = None
 
@@ -149,9 +166,15 @@ class CapitalIntentResponse(BaseModel):
     destination_account: str
     destination_tx: str | None = None
     amount_usdc: str
+    onchain_intent_id: str | None = None
     status: CapitalIntentStatus
     ux_status: str
     bridge_job_id: str | None = None
+    arc_receive_tx_hash: str | None = None
+    arc_finalize_tx_hash: str | None = None
+    gross_amount_usdc: str | None = None
+    circle_fee_usdc: str | None = None
+    net_amount_usdc: str | None = None
     idempotency_key: str | None = None
     completed_at: datetime | None = None
     failure_reason: str | None = None

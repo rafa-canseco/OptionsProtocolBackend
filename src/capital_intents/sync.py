@@ -56,7 +56,10 @@ def sync_capital_intents_for_bridge_job(
     client = get_client()
     result = (
         client.table("capital_movement_intents")
-        .select("id, intent_type, status, destination_tx, failure_reason")
+        .select(
+            "id, intent_type, status, destination_tx, failure_reason, "
+            "arc_receive_tx_hash, arc_finalize_tx_hash"
+        )
         .eq("bridge_job_id", bridge_job_id)
         .execute()
     )
@@ -76,6 +79,18 @@ def sync_capital_intents_for_bridge_job(
             updates["destination_tx"] = bridge_fields["mint_tx_hash"]
         if bridge_fields.get("trade_tx_hash"):
             updates["destination_tx"] = bridge_fields["trade_tx_hash"]
+        if bridge_fields.get("arc_receive_tx_hash"):
+            updates["arc_receive_tx_hash"] = bridge_fields["arc_receive_tx_hash"]
+        if bridge_fields.get("arc_finalize_tx_hash"):
+            updates["arc_finalize_tx_hash"] = bridge_fields["arc_finalize_tx_hash"]
+            updates["destination_tx"] = bridge_fields["arc_finalize_tx_hash"]
+        for amount_key in (
+            "gross_amount_usdc",
+            "circle_fee_usdc",
+            "net_amount_usdc",
+        ):
+            if bridge_fields.get(amount_key):
+                updates[amount_key] = str(bridge_fields[amount_key])
         if bridge_fields.get("error_message") and not intent.get("failure_reason"):
             updates["failure_reason"] = str(bridge_fields["error_message"])[:500]
 
