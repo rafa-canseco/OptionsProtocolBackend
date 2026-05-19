@@ -11,15 +11,17 @@ import hashlib
 import json
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING
 from typing import Any, Literal
 
+import httpx
 from eth_abi import encode
 from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from src.capital_intents.models import CapitalIntentStatus
-from src.config import settings
+from src.config import get_cctp_attestation_url, settings
 from src.db.database import get_client
 from src.deployments.registry import get_deployment_registry
 
@@ -28,6 +30,7 @@ router = APIRouter(prefix="/agora", tags=["Agora"])
 USDC_DECIMALS = 1_000_000
 BASE_CCTP_TOKEN_MESSENGER = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA"
 ZERO_BYTES32 = "0x" + "00" * 32
+CCTP_FAST_FINALITY_THRESHOLD = 1000
 AGORA_LIFECYCLE = [
     "allocation_created",
     "smart_wallet_approval_burn",
@@ -208,6 +211,12 @@ class AgoraPreparedAllocation(BaseModel):
     source_wallet: str
     amount: float
     amount_raw: str
+    circleFee: float
+    circle_fee_usdc: str
+    netAmount: float
+    net_amount_usdc: str
+    cctpFeeBps: float
+    finalityThreshold: int
     receiverAddress: str | None
     receiver: str | None
     metaVaultAddress: str | None
@@ -223,6 +232,61 @@ def _raw_usdc_to_float(value: Any) -> float:
         return int(value or 0) / USDC_DECIMALS
     except (TypeError, ValueError):
         return 0.0
+
+
+def _calculate_cctp_max_fee(amount_raw: int, fee_bps: Decimal) -> int:
+    if amount_raw <= 0:
+        raise ValueError("amount must be greater than zero")
+    if fee_bps < 0:
+        raise ValueError("CCTP fee bps cannot be negative")
+
+    raw_fee = (
+        Decimal(amount_raw) * fee_bps / Decimal(10_000)
+    ).to_integral_value(rounding=ROUND_CEILING)
+    buffered_fee = (
+        raw_fee
+        * Decimal(10_000 + settings.cctp_fast_fee_buffer_bps)
+        / Decimal(10_000)
+    ).to_integral_value(rounding=ROUND_CEILING)
+    max_fee = int(buffered_fee)
+    if fee_bps > 0:
+        max_fee = max(max_fee, 1)
+    if amount_raw <= max_fee:
+        raise ValueError("amount must be greater than Circle fast transfer fee")
+    return max_fee
+
+
+async def get_cctp_fast_fee(
+    source_domain: int,
+    dest_domain: int,
+    amount_raw: int,
+) -> tuple[int, Decimal]:
+    """Return maxFee raw USDC plus quoted/fallback fee bps for CCTP fast burn."""
+    base_url = get_cctp_attestation_url().rstrip("/")
+    url = f"{base_url}/v2/burn/USDC/fees/{source_domain}/{dest_domain}"
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            quotes = response.json()
+    except Exception:
+        fallback = Decimal(str(settings.cctp_fast_fee_fallback_bps))
+        return _calculate_cctp_max_fee(amount_raw, fallback), fallback
+
+    fast_quote = next(
+        (
+            quote
+            for quote in quotes
+            if int(quote.get("finalityThreshold", 0)) == CCTP_FAST_FINALITY_THRESHOLD
+        ),
+        None,
+    )
+    if not fast_quote:
+        fallback = Decimal(str(settings.cctp_fast_fee_fallback_bps))
+        return _calculate_cctp_max_fee(amount_raw, fallback), fallback
+
+    fee_bps = Decimal(str(fast_quote["minimumFee"]))
+    return _calculate_cctp_max_fee(amount_raw, fee_bps), fee_bps
 
 
 def _shares_to_usdc(value: Any) -> float:
@@ -468,6 +532,7 @@ def _address_to_bytes32(address: str) -> bytes:
 def _prepare_base_actions(
     *,
     amount_raw: int,
+    max_fee: int,
     metavault: str,
 ) -> list[AgoraPreparedAction]:
     usdc = settings.base_sepolia_usdc or settings.usdc_address
@@ -486,8 +551,8 @@ def _prepare_base_actions(
             _address_to_bytes32(metavault),
             to_checksum_address(usdc),
             bytes.fromhex(ZERO_BYTES32[2:]),
-            500,
-            1000,
+            max_fee,
+            CCTP_FAST_FINALITY_THRESHOLD,
         ],
     )
     return [
@@ -566,6 +631,12 @@ async def prepare_allocation(body: AgoraAllocationPrepareRequest):
             source_wallet=body.source_wallet,
             amount=body.amount,
             amount_raw=str(amount_raw),
+            circleFee=0,
+            circle_fee_usdc="0",
+            netAmount=body.amount,
+            net_amount_usdc=str(amount_raw),
+            cctpFeeBps=0,
+            finalityThreshold=CCTP_FAST_FINALITY_THRESHOLD,
             receiverAddress=receiver,
             receiver=receiver,
             metaVaultAddress=metavault,
@@ -577,8 +648,14 @@ async def prepare_allocation(body: AgoraAllocationPrepareRequest):
         )
 
     try:
+        max_fee, fee_bps = await get_cctp_fast_fee(
+            settings.cctp_domain_base,
+            settings.cctp_domain_arc,
+            amount_raw,
+        )
         actions = _prepare_base_actions(
             amount_raw=amount_raw,
+            max_fee=max_fee,
             metavault=metavault,
         )
     except ValueError as exc:
@@ -598,6 +675,12 @@ async def prepare_allocation(body: AgoraAllocationPrepareRequest):
         source_wallet=body.source_wallet,
         amount=body.amount,
         amount_raw=str(amount_raw),
+        circleFee=_raw_usdc_to_float(max_fee),
+        circle_fee_usdc=str(max_fee),
+        netAmount=_raw_usdc_to_float(amount_raw - max_fee),
+        net_amount_usdc=str(amount_raw - max_fee),
+        cctpFeeBps=float(fee_bps),
+        finalityThreshold=CCTP_FAST_FINALITY_THRESHOLD,
         receiverAddress=receiver,
         receiver=receiver,
         metaVaultAddress=metavault,

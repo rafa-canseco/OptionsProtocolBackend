@@ -171,8 +171,10 @@ class Settings(BaseSettings):
 
     # Relayer tuning
     cctp_attestation_poll_interval: int = 3
-    cctp_attestation_timeout: int = 300
+    cctp_attestation_timeout: int = 900
     cctp_trade_max_retries: int = 3
+    cctp_fast_fee_buffer_bps: int = 2000  # 20% buffer over Iris minimum fee
+    cctp_fast_fee_fallback_bps: float = 2.0  # proportional fallback if Iris is down
 
     # CORS allowed origins (comma-separated). Set to production domain(s) in mainnet.
     allowed_origins: str = "*"
