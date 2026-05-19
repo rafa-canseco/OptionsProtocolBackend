@@ -1,5 +1,8 @@
 """Tests for frontend-facing Agora routes."""
 
+from decimal import Decimal
+
+from eth_abi import decode
 from fastapi.testclient import TestClient
 
 from src.agora import routes as agora_routes
@@ -170,6 +173,14 @@ def test_agora_prepare_base_returns_executable_cctp_actions(monkeypatch):
     _configure_agora(monkeypatch)
     source_wallet = "0x1111111111111111111111111111111111111111"
 
+    async def fake_fast_fee(source_domain, dest_domain, amount_raw):
+        assert source_domain == 6
+        assert dest_domain == 26
+        assert amount_raw == 1_500_000
+        return 234, Decimal("1.3")
+
+    monkeypatch.setattr(agora_routes, "get_cctp_fast_fee", fake_fast_fee)
+
     resp = client.post(
         "/agora/allocations/prepare",
         json={
@@ -185,6 +196,10 @@ def test_agora_prepare_base_returns_executable_cctp_actions(monkeypatch):
     assert body["status"] == "smart_wallet_approval_burn"
     assert body["source_chain"] == "base"
     assert body["amount_raw"] == "1500000"
+    assert body["circle_fee_usdc"] == "234"
+    assert body["net_amount_usdc"] == "1499766"
+    assert body["cctpFeeBps"] == 1.3
+    assert body["finalityThreshold"] == 1000
     assert body["receiver"] == source_wallet
     assert [action["kind"] for action in body["actions"]] == [
         "erc20_approve",
@@ -193,6 +208,15 @@ def test_agora_prepare_base_returns_executable_cctp_actions(monkeypatch):
     assert body["actions"][0]["to"] == "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
     assert body["actions"][1]["to"] == "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA"
     assert body["actions"][1]["data"].startswith("0x")
+    encoded_args = bytes.fromhex(body["actions"][1]["data"][10:])
+    decoded = decode(
+        ["uint256", "uint32", "bytes32", "address", "bytes32", "uint256", "uint32"],
+        encoded_args,
+    )
+    assert decoded[0] == 1_500_000
+    assert decoded[1] == 26
+    assert decoded[5] == 234
+    assert decoded[6] == 1000
 
 
 def test_agora_prepare_solana_is_visible_but_disabled(monkeypatch):
@@ -211,6 +235,17 @@ def test_agora_prepare_solana_is_visible_but_disabled(monkeypatch):
     body = resp.json()
     assert body["sourceChain"] == "solana"
     assert body["actions"] == []
+    assert body["circle_fee_usdc"] == "0"
+    assert body["net_amount_usdc"] == "2000000"
     assert body["disabled_reason"] == (
         "Solana -> Arc allocation prepare is not enabled in V1."
     )
+
+
+def test_cctp_fast_fee_calculation_is_proportional_with_buffer(monkeypatch):
+    _configure_agora(monkeypatch)
+    monkeypatch.setattr(agora_routes.settings, "cctp_fast_fee_buffer_bps", 2000)
+
+    fee = agora_routes._calculate_cctp_max_fee(1_000_000, Decimal("1.3"))
+
+    assert fee == 156
