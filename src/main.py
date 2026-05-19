@@ -15,6 +15,7 @@ from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
+from src.agora.routes import router as agora_router
 from src.bridge.routes import router as bridge_router
 from src.capital_intents.routes import router as capital_intents_router
 from src.deployments.routes import router as deployments_router
@@ -218,6 +219,10 @@ openapi_tags = [
         "description": "Public deployment registry for staging/testnet chain addresses and CCTP domains.",
     },
     {
+        "name": "Agora",
+        "description": "Frontend-facing MetaVault snapshot, registry, history, agent decisions, and allocation preparation.",
+    },
+    {
         "name": "B1nary Accounts",
         "description": "Product account identity, Privy user membership, and verified wallet linking.",
     },
@@ -264,6 +269,7 @@ app.include_router(leaderboard_router)
 app.include_router(notifications_router)
 app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
+app.include_router(agora_router)
 app.include_router(bridge_router)
 app.include_router(capital_intents_router)
 app.include_router(deployments_router)
