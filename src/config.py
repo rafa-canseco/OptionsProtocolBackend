@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     arc_metavault_address: str = ""
     arc_message_transmitter: str = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275"
     arc_usdc: str = "0x3600000000000000000000000000000000000000"
+    arc_receiver_address: str = ""
+    next_public_arc_receiver_address: str = ""
+    next_public_agora_solana_ready: bool = False
     base_sepolia_usdc: str = ""
     base_sepolia_vault_adapter: str = ""
     solana_devnet_usdc: str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
