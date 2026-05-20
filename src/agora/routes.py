@@ -470,11 +470,17 @@ def _decisions(user: str | None, limit: int = 10) -> AgoraAgentPayload:
     except Exception:
         rows = []
     wanted = user.lower()
+    user_intent_ids = {
+        str(row.get("id"))
+        for row in _query_intents(user, limit=500)
+        if row.get("id") is not None
+    }
     rows = [
         row
         for row in rows
         if str(row.get("user_address", "")).lower() == wanted
         or str(row.get("receiver", "")).lower() == wanted
+        or str(row.get("intent_id", "")) in user_intent_ids
     ]
     decisions = [_decision_from_row(row) for row in rows]
     return AgoraAgentPayload(
