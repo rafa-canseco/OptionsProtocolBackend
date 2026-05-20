@@ -251,6 +251,153 @@ class TestCapitalIntentCreate:
         assert bridge_insert["receiver"] == BASE_ADDR
         mock_enqueue.assert_called_once_with("bridge-job-arc")
 
+    def test_base_to_arc_bridge_job_uses_burn_scoped_idempotency_key(self):
+        """Prepared allocation ids may repeat; bridge quote_id must not."""
+        onchain_intent_id = "0x" + "ab" * 32
+        burn_tx = "0x" + "b2" * 32
+        idempotency_key = f"alloc_base_repeat:{burn_tx}"
+        mock_db = MagicMock()
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_db.table.return_value.insert.return_value.execute.side_effect = [
+            MagicMock(
+                data=[
+                    _capital_row(
+                        intent_type="deposit",
+                        movement_reason="user_deposit",
+                        receiver=BASE_ADDR,
+                        source_chain="base",
+                        source_account=BASE_ADDR,
+                        source_tx=burn_tx,
+                        destination_chain="arc",
+                        destination_account="arc-metavault",
+                        status="pending",
+                        bridge_job_id=None,
+                        idempotency_key=idempotency_key,
+                        onchain_intent_id=onchain_intent_id,
+                    )
+                ]
+            ),
+            MagicMock(data=[{"id": "bridge-job-arc"}]),
+        ]
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[
+                _capital_row(
+                    intent_type="deposit",
+                    movement_reason="user_deposit",
+                    receiver=BASE_ADDR,
+                    source_chain="base",
+                    source_account=BASE_ADDR,
+                    source_tx=burn_tx,
+                    destination_chain="arc",
+                    destination_account="arc-metavault",
+                    status="bridging",
+                    bridge_job_id="bridge-job-arc",
+                    idempotency_key=idempotency_key,
+                    onchain_intent_id=onchain_intent_id,
+                )
+            ]
+        )
+
+        with (
+            patch("src.capital_intents.routes.get_client", return_value=mock_db),
+            patch("src.capital_intents.routes.enqueue_job"),
+        ):
+            resp = client.post(
+                "/api/capital-intents",
+                json={
+                    "intent_type": "deposit",
+                    "receiver": BASE_ADDR,
+                    "source_chain": "base",
+                    "source_account": BASE_ADDR,
+                    "source_tx": burn_tx,
+                    "destination_chain": "arc",
+                    "destination_account": "arc-metavault",
+                    "amount_usdc": "1000000",
+                    "onchain_intent_id": onchain_intent_id,
+                    "create_bridge_job": True,
+                    "user_id": "did:privy:test",
+                    "quote_id": "alloc_base_repeat",
+                    "idempotency_key": idempotency_key,
+                },
+            )
+
+        assert resp.status_code == 200
+        bridge_insert = mock_db.table.return_value.insert.call_args_list[1].args[0]
+        assert bridge_insert["quote_id"] == idempotency_key
+
+    def test_base_to_arc_bridge_job_falls_back_to_quote_id_plus_burn_tx(self):
+        onchain_intent_id = "0x" + "ab" * 32
+        burn_tx = "0x" + "b2" * 32
+        mock_db = MagicMock()
+        mock_db.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_db.table.return_value.insert.return_value.execute.side_effect = [
+            MagicMock(
+                data=[
+                    _capital_row(
+                        intent_type="deposit",
+                        movement_reason="user_deposit",
+                        receiver=BASE_ADDR,
+                        source_chain="base",
+                        source_account=BASE_ADDR,
+                        source_tx=burn_tx,
+                        destination_chain="arc",
+                        destination_account="arc-metavault",
+                        status="pending",
+                        bridge_job_id=None,
+                        onchain_intent_id=onchain_intent_id,
+                    )
+                ]
+            ),
+            MagicMock(data=[{"id": "bridge-job-arc"}]),
+        ]
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[
+                _capital_row(
+                    intent_type="deposit",
+                    movement_reason="user_deposit",
+                    receiver=BASE_ADDR,
+                    source_chain="base",
+                    source_account=BASE_ADDR,
+                    source_tx=burn_tx,
+                    destination_chain="arc",
+                    destination_account="arc-metavault",
+                    status="bridging",
+                    bridge_job_id="bridge-job-arc",
+                    onchain_intent_id=onchain_intent_id,
+                )
+            ]
+        )
+
+        with (
+            patch("src.capital_intents.routes.get_client", return_value=mock_db),
+            patch("src.capital_intents.routes.enqueue_job"),
+        ):
+            resp = client.post(
+                "/api/capital-intents",
+                json={
+                    "intent_type": "deposit",
+                    "receiver": BASE_ADDR,
+                    "source_chain": "base",
+                    "source_account": BASE_ADDR,
+                    "source_tx": burn_tx,
+                    "destination_chain": "arc",
+                    "destination_account": "arc-metavault",
+                    "amount_usdc": "1000000",
+                    "onchain_intent_id": onchain_intent_id,
+                    "create_bridge_job": True,
+                    "user_id": "did:privy:test",
+                    "quote_id": "alloc_base_repeat",
+                },
+            )
+
+        assert resp.status_code == 200
+        bridge_insert = mock_db.table.return_value.insert.call_args_list[1].args[0]
+        assert bridge_insert["quote_id"] == f"alloc_base_repeat:{burn_tx.lower()}"
+
 
 class TestCapitalIntentRead:
     def test_get_syncs_completed_bridge_to_deployed(self):
@@ -286,3 +433,48 @@ class TestCapitalIntentRead:
         assert body["status"] == "deployed"
         assert body["destination_tx"] == "sol-mint-sig"
         assert body["ux_status"] == "Deployed on Solana"
+
+
+class TestCapitalIntentUpdate:
+    def test_patch_accepts_agent_deployment_metadata(self):
+        mock_db = MagicMock()
+        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=[
+                _capital_row(
+                    status="deployed",
+                    destination_chain="base",
+                    destination_tx="0xdeploy",
+                    deployment_onchain_intent_id="0x" + "cd" * 32,
+                    selected_chain="base",
+                    selected_asset="eth",
+                    selected_strategy="CSP",
+                    selected_quote_id="quote-1",
+                    agent_decision_hash="hash-1",
+                )
+            ]
+        )
+
+        with patch("src.capital_intents.routes.get_client", return_value=mock_db):
+            resp = client.patch(
+                "/api/capital-intents/intent-1",
+                json={
+                    "status": "deployed",
+                    "destination_tx": "0xdeploy",
+                    "deployment_onchain_intent_id": "0x" + "cd" * 32,
+                    "selected_chain": "base",
+                    "selected_asset": "eth",
+                    "selected_strategy": "CSP",
+                    "selected_quote_id": "quote-1",
+                    "agent_decision_hash": "hash-1",
+                },
+            )
+
+        assert resp.status_code == 200
+        update_fields = mock_db.table.return_value.update.call_args.args[0]
+        assert update_fields["deployment_onchain_intent_id"] == "0x" + "cd" * 32
+        assert update_fields["selected_chain"] == "base"
+        assert update_fields["selected_quote_id"] == "quote-1"
+        body = resp.json()
+        assert body["status"] == "deployed"
+        assert body["selected_chain"] == "base"
+        assert body["agent_decision_hash"] == "hash-1"

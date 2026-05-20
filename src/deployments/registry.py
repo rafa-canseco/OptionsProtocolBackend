@@ -27,6 +27,10 @@ class SolanaDevnetDeployment(BaseModel):
     cluster: str
     cctp_domain: int
     usdc: str
+    vault_adapter_program_id: str = ""
+    vault_adapter_config: str = ""
+    vault_authority: str = ""
+    vault_token_account: str = ""
 
 
 class DeploymentRegistry(BaseModel):
@@ -56,5 +60,9 @@ def get_deployment_registry() -> DeploymentRegistry:
             cluster=settings.solana_cluster,
             cctp_domain=settings.cctp_domain_solana,
             usdc=settings.solana_devnet_usdc or settings.solana_usdc_mint,
+            vault_adapter_program_id=settings.solana_devnet_vault_adapter_program_id,
+            vault_adapter_config=settings.solana_devnet_vault_adapter_config,
+            vault_authority=settings.solana_devnet_vault_authority,
+            vault_token_account=settings.solana_devnet_vault_token_account,
         ),
     )

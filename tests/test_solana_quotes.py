@@ -254,6 +254,50 @@ class TestSolanaQuoteSubmission:
         assert data["rejected"] == 0
 
 
+class TestQuoteCancellation:
+    def test_cancel_quotes_filters_by_chain_when_provided(self):
+        mock_client = MagicMock()
+        update_chain = mock_client.table.return_value.update.return_value
+        chain_filtered_query = update_chain.eq.return_value.eq.return_value.eq.return_value
+        chain_filtered_query.execute.return_value = MagicMock(data=[{}])
+
+        app.dependency_overrides[require_mm_api_key] = lambda: BASE_MM_ADDRESS
+        try:
+            with patch("src.api.mm_routes.get_client", return_value=mock_client):
+                resp = client.delete(
+                    "/mm/quotes?chain=base",
+                    headers={"X-API-Key": "fake"},
+                )
+        finally:
+            app.dependency_overrides.pop(require_mm_api_key, None)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["cancelled"] == 1
+        update_chain.eq.assert_called_once_with("mm_address", BASE_MM_ADDRESS)
+        update_chain.eq.return_value.eq.assert_called_once_with("is_active", True)
+        update_chain.eq.return_value.eq.return_value.eq.assert_called_once_with(
+            "chain", "base"
+        )
+
+    def test_cancel_quotes_rejects_invalid_chain(self):
+        mock_client = MagicMock()
+        app.dependency_overrides[require_mm_api_key] = lambda: BASE_MM_ADDRESS
+        try:
+            with patch("src.api.mm_routes.get_client", return_value=mock_client):
+                resp = client.delete(
+                    "/mm/quotes?chain=ethereum",
+                    headers={"X-API-Key": "fake"},
+                )
+        finally:
+            app.dependency_overrides.pop(require_mm_api_key, None)
+
+        assert resp.status_code == 400
+        unfiltered_query = (
+            mock_client.table.return_value.update.return_value.eq.return_value.eq.return_value
+        )
+        assert unfiltered_query.execute.call_count == 0
+
+
 class TestQuoteSubmissionValidation:
     """Model validation for chain-specific fields."""
 

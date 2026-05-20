@@ -85,6 +85,35 @@ ARC_METAVAULT_ABI = [
     },
 ]
 
+BASE_VAULT_ADAPTER_ABI = [
+    {
+        "name": "positions",
+        "type": "function",
+        "stateMutability": "view",
+        "inputs": [{"name": "intentId", "type": "bytes32"}],
+        "outputs": [
+            {
+                "type": "tuple",
+                "components": [
+                    {"name": "exists", "type": "bool"},
+                    {"name": "mode", "type": "uint8"},
+                    {"name": "status", "type": "uint8"},
+                    {"name": "oToken", "type": "address"},
+                    {"name": "underlying", "type": "address"},
+                    {"name": "strikeAsset", "type": "address"},
+                    {"name": "collateralAsset", "type": "address"},
+                    {"name": "expiry", "type": "uint256"},
+                    {"name": "amount", "type": "uint256"},
+                    {"name": "collateral", "type": "uint256"},
+                    {"name": "premium", "type": "uint256"},
+                    {"name": "vaultId", "type": "uint256"},
+                    {"name": "openedAt", "type": "uint256"},
+                ],
+            }
+        ],
+    },
+]
+
 
 class AgoraRegistry(BaseModel):
     arcChain: str
@@ -125,6 +154,24 @@ class AgoraHistoryItem(BaseModel):
     selectedChain: str | None
     selectedAsset: str | None
     selectedStrategy: str | None
+    deploymentTxHash: str | None = None
+    destinationTxHash: str | None = None
+    oTokenAddress: str | None = None
+    strike: float | None = None
+    expiry: int | None = None
+    expiryDate: str | None = None
+    expectedPremium: float | None = None
+    grossPremium: float | None = None
+    netPremium: float | None = None
+    protocolFee: float | None = None
+    premiumAsset: str | None = None
+    premiumAssetSymbol: str | None = None
+    premiumChain: str | None = None
+    premiumLocation: str | None = None
+    premiumClaimStatus: str | None = None
+    positionSize: float | None = None
+    collateral: float | None = None
+    vaultId: int | None = None
     failureReason: str | None
 
 
@@ -141,6 +188,10 @@ class AgoraAgentDecision(BaseModel):
     quoteId: str | None
     size: float | None
     expectedPremium: float | None
+    strike: float | None = None
+    expiry: int | None = None
+    expiryDate: str | None = None
+    oTokenAddress: str | None = None
     score: float | None
     decisionHash: str | None
     trace: list[str]
@@ -346,11 +397,22 @@ def _query_intents(user: str | None, limit: int = 100) -> list[dict]:
     result = query.execute()
     rows = result.data or []
     wanted = user.lower()
+    def is_hidden(row: dict) -> bool:
+        status = str(row.get("status") or "").lower()
+        reason = str(row.get("failure_reason") or "")
+        return status in {"voided", "ignored", "archived"} or (
+            status == CapitalIntentStatus.FAILED.value
+            and reason.startswith("Voided demo cleanup:")
+        )
+
     return [
         row
         for row in rows
-        if str(row.get("source_account", "")).lower() == wanted
-        or str(row.get("receiver", "")).lower() == wanted
+        if not is_hidden(row)
+        and (
+            str(row.get("source_account", "")).lower() == wanted
+            or str(row.get("receiver", "")).lower() == wanted
+        )
     ]
 
 
@@ -361,10 +423,123 @@ def _latest_deposit(rows: list[dict]) -> dict | None:
     return rows[0] if rows else None
 
 
-def _history_item(row: dict) -> AgoraHistoryItem:
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decision_details(row: dict | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    opportunity = _json_dict(row.get("opportunity"))
+    return {
+        "otoken_address": opportunity.get("otoken_address")
+        or row.get("otoken_address"),
+        "strike": opportunity.get("strike")
+        or row.get("selected_strike")
+        or row.get("strike_price"),
+        "expiry": opportunity.get("expiry")
+        or row.get("selected_expiry")
+        or row.get("expiry"),
+        "expiry_date": opportunity.get("expiry_date")
+        or row.get("expiry_date"),
+        "expected_premium": row.get("expected_premium_usdc")
+        or row.get("expected_premium"),
+        "quote_id": row.get("quote_id"),
+    }
+
+
+def _read_base_adapter_position(intent_id: str | None) -> dict[str, Any]:
+    if not intent_id or not settings.rpc_url or not settings.base_sepolia_vault_adapter:
+        return {}
+    try:
+        from web3 import Web3
+
+        w3 = Web3(Web3.HTTPProvider(settings.rpc_url, request_kwargs={"timeout": 6}))
+        adapter = w3.eth.contract(
+            address=Web3.to_checksum_address(settings.base_sepolia_vault_adapter),
+            abi=BASE_VAULT_ADAPTER_ABI,
+        )
+        position = adapter.functions.positions(intent_id).call()
+    except Exception:
+        return {}
+
+    if not position or not bool(position[0]):
+        return {}
+
+    gross_premium = int(position[10])
+    protocol_fee = gross_premium * int(settings.protocol_fee_bps) // 10_000
+    net_premium = max(gross_premium - protocol_fee, 0)
+    return {
+        "mode": int(position[1]),
+        "status": int(position[2]),
+        "otoken_address": position[3],
+        "underlying": position[4],
+        "strike_asset": position[5],
+        "collateral_asset": position[6],
+        "expiry": int(position[7]),
+        "amount": int(position[8]),
+        "collateral": int(position[9]),
+        "gross_premium": gross_premium,
+        "protocol_fee": protocol_fee,
+        "net_premium": net_premium,
+        "vault_id": int(position[11]),
+        "opened_at": int(position[12]),
+    }
+
+
+def _history_item(
+    row: dict,
+    decisions_by_intent: dict[str, dict] | None = None,
+) -> AgoraHistoryItem:
     source_chain = row.get("source_chain") or "base"
     if source_chain not in {"base", "solana"}:
         source_chain = "base"
+    decision = (
+        (decisions_by_intent or {}).get(str(row.get("id")))
+        or (decisions_by_intent or {}).get(str(row.get("agent_decision_hash")))
+    )
+    details = _decision_details(decision)
+    quote_id = (
+        row.get("selected_quote_id")
+        or row.get("quote_id")
+        or details.get("quote_id")
+    )
+    deployment_tx = (
+        row.get("deployment_tx_hash")
+        or row.get("destination_tx")
+        or row.get("base_execute_tx_hash")
+    )
+    position = _read_base_adapter_position(
+        row.get("deployment_onchain_intent_id")
+        if row.get("selected_chain") == "base" or row.get("destination_chain") == "base"
+        else None
+    )
     return AgoraHistoryItem(
         id=str(row["id"]),
         createdAt=str(row.get("created_at") or ""),
@@ -376,10 +551,56 @@ def _history_item(row: dict) -> AgoraHistoryItem:
         arcReceiveTxHash=row.get("arc_receive_tx_hash"),
         finalizeTxHash=row.get("arc_finalize_tx_hash") or row.get("destination_tx"),
         agentDecisionHash=row.get("agent_decision_hash"),
-        selectedQuoteId=row.get("selected_quote_id") or row.get("quote_id"),
+        selectedQuoteId=quote_id,
         selectedChain=row.get("selected_chain"),
         selectedAsset=row.get("selected_asset"),
         selectedStrategy=row.get("selected_strategy"),
+        deploymentTxHash=deployment_tx,
+        destinationTxHash=row.get("destination_tx"),
+        oTokenAddress=(
+            position.get("otoken_address")
+            or row.get("otoken_address")
+            or details.get("otoken_address")
+        ),
+        strike=_float_or_none(row.get("selected_strike") or details.get("strike")),
+        expiry=_int_or_none(
+            position.get("expiry") or row.get("selected_expiry") or details.get("expiry")
+        ),
+        expiryDate=row.get("expiry_date") or details.get("expiry_date"),
+        expectedPremium=_raw_usdc_to_float(
+            row.get("expected_premium_usdc") or details.get("expected_premium")
+        ),
+        grossPremium=(
+            _raw_usdc_to_float(position["gross_premium"])
+            if "gross_premium" in position
+            else None
+        ),
+        netPremium=(
+            _raw_usdc_to_float(position["net_premium"])
+            if "net_premium" in position
+            else None
+        ),
+        protocolFee=(
+            _raw_usdc_to_float(position["protocol_fee"])
+            if "protocol_fee" in position
+            else None
+        ),
+        premiumAsset=position.get("strike_asset") or position.get("collateral_asset"),
+        premiumAssetSymbol="USDC" if position else None,
+        premiumChain="base" if position else None,
+        premiumLocation="base_adapter" if position else None,
+        premiumClaimStatus="accrued_not_claimable" if position else None,
+        positionSize=(
+            _raw_usdc_to_float(position["amount"])
+            if "amount" in position
+            else None
+        ),
+        collateral=(
+            _raw_usdc_to_float(position["collateral"])
+            if "collateral" in position
+            else None
+        ),
+        vaultId=_int_or_none(position.get("vault_id") or row.get("vault_id")),
         failureReason=row.get("failure_reason"),
     )
 
@@ -436,6 +657,14 @@ def _vault_state(user: str | None, rows: list[dict] | None = None) -> AgoraVault
         int(row.get("amount_usdc") or 0)
         for row in rows
         if row.get("intent_type") == "deposit"
+        and row.get("status")
+        in {
+            CapitalIntentStatus.WAITING_TO_BE_DEPLOYED.value,
+            CapitalIntentStatus.DEPLOYMENT_IN_FLIGHT.value,
+            CapitalIntentStatus.DEPLOYED.value,
+            CapitalIntentStatus.CLAIMABLE.value,
+            CapitalIntentStatus.COMPLETED.value,
+        }
     )
     status = _camel_status(str(latest.get("status"))) if latest else "allocation_created"
     return AgoraVaultState(
@@ -483,10 +712,45 @@ def _decisions(user: str | None, limit: int = 10) -> AgoraAgentPayload:
         or str(row.get("intent_id", "")) in user_intent_ids
     ]
     decisions = [_decision_from_row(row) for row in rows]
+    latest = next(
+        (
+            decision
+            for decision in decisions
+            if decision.selectedChain and decision.quoteId and (decision.size or 0) > 0
+        ),
+        decisions[0] if decisions else None,
+    )
     return AgoraAgentPayload(
-        latest=decisions[0] if decisions else None,
+        latest=latest,
         decisions=decisions,
     )
+
+
+def _decision_rows_for_intents(intent_ids: set[str]) -> dict[str, dict]:
+    if not intent_ids:
+        return {}
+    client = get_client()
+    try:
+        result = (
+            client.table("agent_deployment_decisions")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+        )
+    except Exception:
+        return {}
+
+    by_intent: dict[str, dict] = {}
+    by_hash: dict[str, dict] = {}
+    for row in result.data or []:
+        intent_id = str(row.get("intent_id") or "")
+        if intent_id in intent_ids and intent_id not in by_intent:
+            by_intent[intent_id] = row
+        decision_hash = str(row.get("decision_hash") or "")
+        if decision_hash:
+            by_hash[decision_hash] = row
+    return {**by_hash, **by_intent}
 
 
 def _decision_from_row(row: dict) -> AgoraAgentDecision:
@@ -502,6 +766,7 @@ def _decision_from_row(row: dict) -> AgoraAgentDecision:
             rejections = json.loads(rejections)
         except json.JSONDecodeError:
             rejections = {}
+    details = _decision_details(row)
     return AgoraAgentDecision(
         id=str(row.get("id") or row.get("decision_hash") or ""),
         createdAt=str(row.get("created_at") or ""),
@@ -517,6 +782,10 @@ def _decision_from_row(row: dict) -> AgoraAgentDecision:
         expectedPremium=_raw_usdc_to_float(
             row.get("expected_premium_usdc") or row.get("expected_premium")
         ),
+        strike=_float_or_none(details.get("strike")),
+        expiry=_int_or_none(details.get("expiry")),
+        expiryDate=details.get("expiry_date"),
+        oTokenAddress=details.get("otoken_address"),
         score=float(row["score"]) if row.get("score") is not None else None,
         decisionHash=row.get("decision_hash"),
         trace=list(trace) if isinstance(trace, list) else [],
@@ -595,7 +864,11 @@ async def agora_vault(user: str | None = Query(default=None)):
 
 @router.get("/history", response_model=list[AgoraHistoryItem])
 async def agora_history(user: str | None = Query(default=None)):
-    return [_history_item(row) for row in _query_intents(user)]
+    rows = _query_intents(user)
+    decisions = _decision_rows_for_intents(
+        {str(row.get("id")) for row in rows if row.get("id") is not None}
+    )
+    return [_history_item(row, decisions) for row in rows]
 
 
 @router.get("/agent/decisions", response_model=AgoraAgentPayload)
@@ -606,10 +879,13 @@ async def agora_agent_decisions(user: str | None = Query(default=None)):
 @router.get("/snapshot", response_model=AgoraSnapshot)
 async def agora_snapshot(user: str | None = Query(default=None)):
     rows = _query_intents(user)
+    decisions = _decision_rows_for_intents(
+        {str(row.get("id")) for row in rows if row.get("id") is not None}
+    )
     return AgoraSnapshot(
         registry=_registry(),
         vault=_vault_state(user, rows),
-        history=[_history_item(row) for row in rows],
+        history=[_history_item(row, decisions) for row in rows],
         agent=_decisions(user),
     )
 

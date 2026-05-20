@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     base_sepolia_usdc: str = ""
     base_sepolia_vault_adapter: str = ""
     solana_devnet_usdc: str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+    solana_devnet_vault_adapter_program_id: str = ""
+    solana_devnet_vault_adapter_config: str = ""
+    solana_devnet_vault_authority: str = ""
+    solana_devnet_vault_token_account: str = ""
     cctp_domain_arc: int = 26
     cctp_domain_base: int = 6
     cctp_domain_solana: int = 5

@@ -144,6 +144,12 @@ class CapitalIntentPatch(BaseModel):
     destination_tx: str | None = None
     bridge_job_id: str | None = None
     onchain_intent_id: str | None = None
+    deployment_onchain_intent_id: str | None = None
+    selected_chain: str | None = None
+    selected_asset: str | None = None
+    selected_strategy: str | None = None
+    selected_quote_id: str | None = None
+    agent_decision_hash: str | None = None
     arc_receive_tx_hash: str | None = None
     arc_finalize_tx_hash: str | None = None
     gross_amount_usdc: str | None = None
@@ -170,6 +176,12 @@ class CapitalIntentResponse(BaseModel):
     status: CapitalIntentStatus
     ux_status: str
     bridge_job_id: str | None = None
+    deployment_onchain_intent_id: str | None = None
+    selected_chain: str | None = None
+    selected_asset: str | None = None
+    selected_strategy: str | None = None
+    selected_quote_id: str | None = None
+    agent_decision_hash: str | None = None
     arc_receive_tx_hash: str | None = None
     arc_finalize_tx_hash: str | None = None
     gross_amount_usdc: str | None = None

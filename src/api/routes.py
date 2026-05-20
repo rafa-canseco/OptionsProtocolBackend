@@ -18,7 +18,7 @@ from src.models.waitlist import WaitlistRequest, WaitlistResponse
 from src.chains import Chain
 from src.chains.address import detect_chain, ETH_ADDRESS_RE, is_valid_solana_address
 from src.chains.explorer import tx_explorer_url
-from src.pricing.assets import Asset, get_chain_for_asset
+from src.pricing.assets import Asset, get_asset_config, get_chain_for_asset
 from src.pricing.circuit_breaker import circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -465,17 +465,9 @@ async def get_spot(
 ):
     """Return the live spot price for a given asset (Chainlink or Pyth)."""
     _ensure_asset_visible(asset)
-    chain = get_chain_for_asset(asset)
 
     try:
-        if chain == Chain.SOLANA:
-            from src.chains.solana.oracle import get_spot_price
-
-            price, updated_at = get_spot_price(asset)
-        else:
-            from src.pricing.chainlink import get_asset_price
-
-            price, updated_at = get_asset_price(asset)
+        price, updated_at = await _read_spot_price(asset)
     except Exception:
         logger.exception("Failed to fetch %s spot price", asset.value)
         raise HTTPException(502, f"Could not fetch {asset.value.upper()} spot")
@@ -485,6 +477,31 @@ async def get_spot(
         "spot": price,
         "updated_at": updated_at,
     }
+
+
+async def _read_spot_price(asset: Asset) -> tuple[float, int]:
+    chain = get_chain_for_asset(asset)
+    if chain == Chain.SOLANA:
+        from src.chains.solana.oracle import get_spot_price
+
+        return get_spot_price(asset)
+
+    from src.pricing.chainlink import get_asset_price
+
+    try:
+        return get_asset_price(asset)
+    except Exception:
+        cfg = get_asset_config(asset)
+        if not cfg.has_deribit:
+            raise
+        from src.pricing.deribit import get_index_price
+
+        logger.warning(
+            "Chainlink spot unavailable for %s, falling back to Deribit index",
+            asset.value,
+            exc_info=True,
+        )
+        return await get_index_price(asset), int(time.time())
 
 
 @router.get(
@@ -513,15 +530,7 @@ async def get_prices(
     spot = 0.0
     spot_ok = False
     try:
-        chain = get_chain_for_asset(asset)
-        if chain == Chain.SOLANA:
-            from src.chains.solana.oracle import get_spot_price
-
-            spot, _ = get_spot_price(asset)
-        else:
-            from src.pricing.chainlink import get_asset_price
-
-            spot, _ = get_asset_price(asset)
+        spot, _ = await _read_spot_price(asset)
         spot_ok = True
     except Exception:
         logger.warning("Could not fetch spot price for enrichment", exc_info=True)

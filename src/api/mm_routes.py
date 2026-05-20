@@ -333,21 +333,31 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
     "/quotes",
     summary="Cancel all active quotes",
 )
-async def cancel_quotes(mm_address: str = Depends(require_mm_api_key)):
+async def cancel_quotes(
+    chain: str | None = Query(default=None, description="Optional chain filter"),
+    mm_address: str = Depends(require_mm_api_key),
+):
     """Set is_active=false for all quotes belonging to this MM.
 
     This immediately stops the backend from serving these quotes in GET /prices.
     On-chain, the quotes remain valid until the MM calls incrementMakerNonce().
     """
+    if chain is not None:
+        chain = chain.lower()
+        if chain not in {"base", "solana"}:
+            raise HTTPException(status_code=400, detail="Invalid chain")
+
     try:
         client = get_client()
-        result = (
+        query = (
             client.table("mm_quotes")
             .update({"is_active": False})
             .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
-            .execute()
         )
+        if chain is not None:
+            query = query.eq("chain", chain)
+        result = query.execute()
         cancelled = len(result.data) if result.data else 0
     except Exception:
         logger.exception("Failed to cancel quotes for %s", mm_address)

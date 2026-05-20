@@ -17,6 +17,7 @@ from src.capital_intents.models import (
     MovementReason,
     UXStatus,
 )
+from src.capital_intents.reconcile import reconcile_settled_positions
 from src.capital_intents.sync import bridge_status_to_intent_status
 from src.db.database import get_client
 
@@ -95,6 +96,26 @@ def _read_existing_by_idempotency(idempotency_key: str) -> dict | None:
     return result.data[0] if result.data else None
 
 
+def _bridge_job_quote_id(body: CapitalIntentCreate) -> str | None:
+    """Return the bridge_jobs quote/idempotency key.
+
+    Base -> Arc deposits can reuse the same prepared allocation id across
+    multiple real burns. The bridge job must therefore be keyed by the actual
+    burn tx, not only by the prepared allocation id.
+    """
+    is_base_to_arc_deposit = (
+        body.intent_type == CapitalIntentType.DEPOSIT
+        and body.source_chain == CapitalChain.BASE
+        and body.destination_chain == CapitalChain.ARC
+    )
+    if is_base_to_arc_deposit:
+        if body.idempotency_key:
+            return body.idempotency_key
+        if body.quote_id and body.source_tx:
+            return f"{body.quote_id}:{body.source_tx.lower()}"
+    return body.quote_id or body.idempotency_key
+
+
 def _create_bridge_job(body: CapitalIntentCreate) -> str:
     is_base_to_arc_deposit = (
         body.intent_type == CapitalIntentType.DEPOSIT
@@ -119,7 +140,7 @@ def _create_bridge_job(body: CapitalIntentCreate) -> str:
         "burn_tx_hash": body.source_tx,
         "burn_amount": body.amount_usdc,
         "mint_recipient": body.destination_account,
-        "quote_id": body.quote_id or body.idempotency_key,
+        "quote_id": _bridge_job_quote_id(body),
         "signed_trade_tx": body.signed_trade_tx,
         "gross_amount_usdc": body.amount_usdc,
         "receiver": body.receiver,
@@ -325,6 +346,18 @@ async def list_capital_intents(
         logger.exception("Failed to list capital intents")
         raise HTTPException(502, "Could not list capital intents") from exc
     return [_to_response(row) for row in result.data]
+
+
+@router.post("/reconcile-settled")
+async def reconcile_settled_capital_intents(
+    limit: int = Query(100, ge=1, le=250),
+):
+    """Turn settled option outcomes into next-cycle deployable intents."""
+    try:
+        return reconcile_settled_positions(limit=limit).to_dict()
+    except Exception as exc:
+        logger.exception("Failed to reconcile settled capital intents")
+        raise HTTPException(502, "Could not reconcile settled capital intents") from exc
 
 
 @router.patch("/{intent_id}", response_model=CapitalIntentResponse)

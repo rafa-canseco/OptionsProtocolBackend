@@ -90,6 +90,21 @@ def test_agora_snapshot_composes_registry_vault_history_and_agent(monkeypatch):
             "auto_compound": True,
         },
     )
+    monkeypatch.setattr(
+        agora_routes,
+        "_read_base_adapter_position",
+        lambda _intent_id: {
+            "otoken_address": "0xadapterotoken",
+            "expiry": 1779350400,
+            "amount": 8_333,
+            "collateral": 1_000_000,
+            "gross_premium": 833,
+            "protocol_fee": 33,
+            "net_premium": 800,
+            "strike_asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            "vault_id": 1,
+        },
+    )
     db = _DB(
         {
             "capital_movement_intents": [
@@ -105,8 +120,12 @@ def test_agora_snapshot_composes_registry_vault_history_and_agent(monkeypatch):
                     "source_tx": "0xburn",
                     "arc_receive_tx_hash": "0xreceive",
                     "arc_finalize_tx_hash": "0xfinalize",
+                    "destination_tx": "0xdeploy",
                     "destination_chain": "arc",
+                    "deployment_onchain_intent_id": "0xintent",
+                    "selected_chain": "base",
                     "selected_strategy": "csp",
+                    "selected_quote_id": "quote-1",
                     "created_at": "2026-05-19T00:00:00Z",
                     "updated_at": "2026-05-19T00:01:00Z",
                 }
@@ -128,6 +147,12 @@ def test_agora_snapshot_composes_registry_vault_history_and_agent(monkeypatch):
                     "expected_premium_usdc": "10000",
                     "score": 0.91,
                     "decision_hash": "hash-1",
+                    "opportunity": {
+                        "otoken_address": "0xotoken",
+                        "strike": 2400,
+                        "expiry": 1779350400,
+                        "expiry_date": "2026-05-21",
+                    },
                     "reasoning_trace": ["selected best score"],
                 }
             ],
@@ -147,7 +172,86 @@ def test_agora_snapshot_composes_registry_vault_history_and_agent(monkeypatch):
     assert body["vault"]["pendingShares"] == 5
     assert body["history"][0]["status"] == "waiting_to_be_deployed"
     assert body["history"][0]["burnTxHash"] == "0xburn"
+    assert body["history"][0]["deploymentTxHash"] == "0xdeploy"
+    assert body["history"][0]["selectedQuoteId"] == "quote-1"
+    assert body["history"][0]["oTokenAddress"] == "0xadapterotoken"
+    assert body["history"][0]["strike"] == 2400
+    assert body["history"][0]["expiry"] == 1779350400
+    assert body["history"][0]["expiryDate"] == "2026-05-21"
+    assert body["history"][0]["expectedPremium"] == 0.01
+    assert body["history"][0]["grossPremium"] == 0.000833
+    assert body["history"][0]["netPremium"] == 0.0008
+    assert body["history"][0]["protocolFee"] == 0.000033
+    assert body["history"][0]["premiumAssetSymbol"] == "USDC"
+    assert body["history"][0]["premiumChain"] == "base"
+    assert body["history"][0]["premiumLocation"] == "base_adapter"
+    assert body["history"][0]["premiumClaimStatus"] == "accrued_not_claimable"
+    assert body["history"][0]["positionSize"] == 0.008333
+    assert body["history"][0]["collateral"] == 1
+    assert body["history"][0]["vaultId"] == 1
     assert body["agent"]["latest"]["decisionHash"] == "hash-1"
+    assert body["agent"]["latest"]["strike"] == 2400
+    assert body["agent"]["latest"]["expiry"] == 1779350400
+
+
+def test_agora_agent_latest_prefers_actionable_decision_over_latest_wait(monkeypatch):
+    _configure_agora(monkeypatch)
+    user = "0x1111111111111111111111111111111111111111"
+    db = _DB(
+        {
+            "capital_movement_intents": [
+                {
+                    "id": "intent-1",
+                    "intent_type": "deposit",
+                    "source_chain": "base",
+                    "source_account": user,
+                    "receiver": user,
+                    "amount_usdc": "1000000",
+                    "status": "waiting_to_be_deployed",
+                    "created_at": "2026-05-19T00:00:00Z",
+                    "updated_at": "2026-05-19T00:01:00Z",
+                }
+            ],
+            "agent_deployment_decisions": [
+                {
+                    "id": "wait-decision",
+                    "intent_id": "intent-1",
+                    "created_at": "2026-05-19T00:03:00Z",
+                    "policy_profile": "demo",
+                    "status": "wait",
+                    "size_usdc": 0,
+                    "expected_premium_usdc": 0,
+                    "score": 0,
+                    "decision_hash": "wait-hash",
+                    "reasoning_trace": ["No eligible quote."],
+                },
+                {
+                    "id": "actionable-decision",
+                    "intent_id": "intent-1",
+                    "created_at": "2026-05-19T00:02:00Z",
+                    "policy_profile": "demo",
+                    "selected_chain": "base",
+                    "asset": "ETH",
+                    "strategy_type": "CSP",
+                    "quote_id": "quote-1",
+                    "size_usdc": "1000000",
+                    "expected_premium_usdc": "10000",
+                    "score": 91,
+                    "decision_hash": "actionable-hash",
+                    "reasoning_trace": ["Selected Base CSP."],
+                },
+            ],
+        }
+    )
+    monkeypatch.setattr(agora_routes, "get_client", lambda: db)
+
+    resp = client.get(f"/agora/agent/decisions?user={user}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["decisions"][0]["decisionHash"] == "wait-hash"
+    assert body["latest"]["decisionHash"] == "actionable-hash"
+    assert body["latest"]["selectedChain"] == "base"
 
 
 def test_agora_snapshot_without_user_does_not_expose_global_rows(monkeypatch):

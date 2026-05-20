@@ -54,6 +54,29 @@ def test_get_tslax_spot_uses_solana_oracle():
     }
 
 
+def test_get_eth_spot_falls_back_to_deribit_when_chainlink_unavailable(monkeypatch):
+    from src.pricing import chainlink, deribit
+
+    def fail_chainlink(asset):
+        raise RuntimeError("chainlink unavailable")
+
+    async def fake_index_price(asset):
+        return 2131.5
+
+    monkeypatch.setattr(chainlink, "get_asset_price", fail_chainlink)
+    monkeypatch.setattr(deribit, "get_index_price", fake_index_price)
+    monkeypatch.setattr(routes_module.time, "time", lambda: 1_700_000_123)
+
+    response = client.get("/spot?asset=eth")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "asset": "eth",
+        "spot": 2131.5,
+        "updated_at": 1_700_000_123,
+    }
+
+
 def test_get_prices_strips_execution_fields_for_read_only_asset(monkeypatch):
     now = 1_900_000_000
 
