@@ -114,7 +114,7 @@ def test_agora_snapshot_composes_registry_vault_history_and_agent(monkeypatch):
             "agent_deployment_decisions": [
                 {
                     "id": "decision-1",
-                    "user_address": user,
+                    "intent_id": "intent-1",
                     "created_at": "2026-05-19T00:02:00Z",
                     "policy_profile": "staging",
                     "opportunities_evaluated": 4,
