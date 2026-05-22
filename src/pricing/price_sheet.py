@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
-from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
+from src.pricing.utils import cutoff_hours_for_expiry, get_target_expiries
 
 
 @dataclass
@@ -63,12 +63,12 @@ def generate_otoken_specs(
         spot: Current price (used to center strikes).
         asset: Which underlying asset this is for.
         expiry_timestamps: Fixed 08:00 UTC timestamps.
-            Defaults to get_expiries().
+            Defaults to get_target_expiries(asset=asset).
         num_strikes: Override number of strikes (defaults to asset config).
     """
     cfg = get_asset_config(asset)
     if expiry_timestamps is None:
-        expiry_timestamps = get_expiries()
+        expiry_timestamps = get_target_expiries(asset=asset, chain=cfg.chain)
     else:
         now_ts = int(time.time())
         expiry_timestamps = [

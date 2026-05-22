@@ -3,8 +3,10 @@
 Used by the otoken_manager bot for on-chain oToken creation.
 """
 
+import os
 import time
 from datetime import datetime, timezone, timedelta
+from typing import Any
 
 from src.config import settings
 
@@ -53,6 +55,104 @@ def _next_0800_utc(after: datetime) -> datetime:
     if candidate <= after:
         candidate += timedelta(days=1)
     return candidate
+
+
+def parse_custom_expiry_timestamps(raw: str | None = None) -> list[int] | None:
+    """Parse CUSTOM_EXPIRY_TIMESTAMPS into integer timestamps.
+
+    Returns None when unset or malformed so callers can fall back to the
+    dynamic policy. This keeps the env var as an emergency override without
+    making it the normal production scheduler.
+    """
+    value = settings.custom_expiry_timestamps if raw is None else raw
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        timestamps = [int(t.strip()) for t in value.split(",") if t.strip()]
+    except ValueError:
+        return None
+    return timestamps or None
+
+
+def _normalise_key_part(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = getattr(value, "value", value)
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    return "".join(ch if ch.isalnum() else "_" for ch in text).upper()
+
+
+def _configured_tenors(
+    asset: Any = None,
+    chain: Any = None,
+    product: str | None = "options",
+) -> set[str]:
+    parts = {
+        "asset": _normalise_key_part(asset),
+        "chain": _normalise_key_part(chain),
+        "product": _normalise_key_part(product),
+    }
+    env_names = []
+    if parts["product"] and parts["chain"] and parts["asset"]:
+        env_names.append(
+            f"TARGET_EXPIRY_TENORS_{parts['product']}_{parts['chain']}_{parts['asset']}"
+        )
+    if parts["chain"] and parts["asset"]:
+        env_names.append(f"TARGET_EXPIRY_TENORS_{parts['chain']}_{parts['asset']}")
+    if parts["asset"]:
+        env_names.append(f"TARGET_EXPIRY_TENORS_{parts['asset']}")
+    if parts["product"]:
+        env_names.append(f"TARGET_EXPIRY_TENORS_{parts['product']}")
+    env_names.append("TARGET_EXPIRY_TENORS")
+
+    raw = next((os.getenv(name) for name in env_names if os.getenv(name)), None)
+    raw = raw if raw is not None else settings.target_expiry_tenors
+    tenors = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    if settings.weekly_expiries_enabled:
+        tenors.add("weekly")
+    return tenors
+
+
+def get_target_expiries(
+    asset: Any = None,
+    chain: Any = None,
+    product: str | None = "options",
+    now: datetime | None = None,
+) -> list[int]:
+    """Return active target expiries for oToken creation and MM market surface.
+
+    Defaults are intentionally short-dated: 1D and 2D only. Weekly expiries are
+    opt-in via TARGET_EXPIRY_TENORS or WEEKLY_EXPIRIES_ENABLED; biweekly/15D is
+    excluded unless explicitly configured.
+    """
+    custom = parse_custom_expiry_timestamps()
+    if custom is not None:
+        return custom
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    short_cutoff = now + timedelta(hours=settings.short_expiry_cutoff_hours)
+    standard_cutoff = now + timedelta(hours=settings.expiry_cutoff_hours)
+    tenors = _configured_tenors(asset=asset, chain=chain, product=product)
+
+    expiries: set[datetime] = set()
+    exp_1d = _next_0800_utc(short_cutoff)
+    if "1d" in tenors or "daily" in tenors:
+        expiries.add(exp_1d)
+    if "2d" in tenors or "daily2" in tenors:
+        expiries.add(exp_1d + timedelta(days=1))
+    if "weekly" in tenors or "7d" in tenors:
+        expiries.add(_next_friday_8am(standard_cutoff))
+    if "biweekly" in tenors or "14d" in tenors or "15d" in tenors:
+        expiries.add(_next_friday_8am(standard_cutoff) + timedelta(weeks=1))
+
+    cutoff_ts = int(short_cutoff.timestamp())
+    result = sorted(int(exp.timestamp()) for exp in expiries)
+    return [ts for ts in result if ts > cutoff_ts]
 
 
 def get_expiries(

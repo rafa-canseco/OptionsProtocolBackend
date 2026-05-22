@@ -57,8 +57,16 @@ class Settings(BaseSettings):
     treasury_address: str = "0x0744e5Abb82A0337B2F6ac65aC83D1e9861C9740"
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
-    # e.g. "1773950400,1774123200". If empty, get_expiries() is used.
+    # e.g. "1773950400,1774123200". If empty, dynamic target expiry policy is used.
     custom_expiry_timestamps: str = ""
+    # Dynamic expiry policy used by oToken creation and MM market surfaces.
+    # Supported tenors: 1d, 2d, weekly/7d, biweekly/14d/15d.
+    # Asset/product/chain-specific overrides can be provided with env vars:
+    # TARGET_EXPIRY_TENORS_<PRODUCT>_<CHAIN>_<ASSET>, then less-specific
+    # TARGET_EXPIRY_TENORS_<CHAIN>_<ASSET>, TARGET_EXPIRY_TENORS_<ASSET>,
+    # TARGET_EXPIRY_TENORS_<PRODUCT>, and TARGET_EXPIRY_TENORS.
+    target_expiry_tenors: str = "1d,2d"
+    weekly_expiries_enabled: bool = False
 
     # Hours before expiry to stop showing/creating options
     expiry_cutoff_hours: int = 48  # standard (3d/7d/14d)
