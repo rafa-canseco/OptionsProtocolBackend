@@ -42,7 +42,7 @@ from src.db.database import get_client
 from src.pricing.assets import Asset, get_asset_config, get_solana_assets
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import strike_to_8_decimals
+from src.pricing.utils import get_target_expiries, strike_to_8_decimals
 
 logger = logging.getLogger(__name__)
 
@@ -700,14 +700,6 @@ async def publish_once():
     global _publish_cycle_count
     _publish_cycle_count += 1
 
-    custom_expiries = None
-    raw = settings.custom_expiry_timestamps.strip()
-    if raw:
-        try:
-            custom_expiries = [int(t.strip()) for t in raw.split(",") if t.strip()]
-        except ValueError:
-            logger.error("CUSTOM_EXPIRY_TIMESTAMPS malformed: %r", raw)
-
     for asset in get_solana_assets():
         try:
             spot, _ = get_spot_price(asset)
@@ -715,9 +707,9 @@ async def publish_once():
             logger.exception("Failed to fetch %s spot price, skipping", asset.value)
             continue
 
-        specs = generate_otoken_specs(
-            spot=spot, asset=asset, expiry_timestamps=custom_expiries
-        )
+        expiries = get_target_expiries(asset=asset, chain="solana", product="options")
+        logger.info("Target Solana expiries for %s: %s", asset.value, expiries)
+        specs = generate_otoken_specs(spot=spot, asset=asset, expiry_timestamps=expiries)
 
         if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
             existing_by_key = {}

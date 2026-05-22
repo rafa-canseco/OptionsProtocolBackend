@@ -1,6 +1,12 @@
 from datetime import datetime, timezone, timedelta
 
-from src.pricing.utils import cutoff_hours_for_expiry, get_expiries, FRIDAY_WEEKDAY
+from src.config import settings
+from src.pricing.utils import (
+    FRIDAY_WEEKDAY,
+    cutoff_hours_for_expiry,
+    get_expiries,
+    get_target_expiries,
+)
 
 
 def test_returns_at_least_three():
@@ -126,3 +132,87 @@ def test_tuesday_includes_this_friday():
     result = get_expiries(now=tue)
     this_friday_ts = int(datetime(2026, 3, 6, 8, 0, 0, tzinfo=timezone.utc).timestamp())
     assert this_friday_ts in result
+
+
+class TestTargetExpiriesPolicy:
+    def test_default_policy_returns_1d_and_2d_only(self, monkeypatch):
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", "")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+        monkeypatch.setattr(settings, "weekly_expiries_enabled", False)
+
+        now = datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc)
+        result = get_target_expiries(asset="eth", chain="base", now=now)
+
+        assert result == [
+            int(datetime(2026, 3, 3, 8, 0, tzinfo=timezone.utc).timestamp()),
+            int(datetime(2026, 3, 4, 8, 0, tzinfo=timezone.utc).timestamp()),
+        ]
+
+    def test_friday_edge_case_stays_daily_2d_not_biweekly(self, monkeypatch):
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", "")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+        monkeypatch.setattr(settings, "weekly_expiries_enabled", False)
+
+        now = datetime(2026, 3, 6, 7, 59, 0, tzinfo=timezone.utc)
+        result = get_target_expiries(asset="eth", chain="base", now=now)
+
+        assert result == [
+            int(datetime(2026, 3, 7, 8, 0, tzinfo=timezone.utc).timestamp()),
+            int(datetime(2026, 3, 8, 8, 0, tzinfo=timezone.utc).timestamp()),
+        ]
+        assert all(
+            datetime.fromtimestamp(ts, tz=timezone.utc)
+            < datetime(2026, 3, 13, 8, 0, tzinfo=timezone.utc)
+            for ts in result
+        )
+
+    def test_cutoff_pushes_daily_to_next_0800(self, monkeypatch):
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", "")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+        monkeypatch.setattr(settings, "weekly_expiries_enabled", False)
+
+        now = datetime(2026, 3, 5, 4, 1, 0, tzinfo=timezone.utc)
+        result = get_target_expiries(asset="btc", chain="base", now=now)
+
+        assert result[0] == int(
+            datetime(2026, 3, 6, 8, 0, tzinfo=timezone.utc).timestamp()
+        )
+        assert result[1] == int(
+            datetime(2026, 3, 7, 8, 0, tzinfo=timezone.utc).timestamp()
+        )
+
+    def test_weekly_is_feature_flagged(self, monkeypatch):
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", "")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+        monkeypatch.setattr(settings, "weekly_expiries_enabled", True)
+
+        now = datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc)
+        result = get_target_expiries(asset="sol", chain="solana", now=now)
+
+        friday = int(datetime(2026, 3, 6, 8, 0, tzinfo=timezone.utc).timestamp())
+        assert friday in result
+
+    def test_14d_is_absent_by_default(self, monkeypatch):
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", "")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+        monkeypatch.setattr(settings, "weekly_expiries_enabled", False)
+
+        now = datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc)
+        result = get_target_expiries(asset="tslax", chain="solana", now=now)
+
+        biweekly = int(datetime(2026, 3, 13, 8, 0, tzinfo=timezone.utc).timestamp())
+        assert biweekly not in result
+
+    def test_custom_expiry_override_still_wins(self, monkeypatch):
+        ts1 = int(datetime(2026, 5, 23, 8, 0, tzinfo=timezone.utc).timestamp())
+        ts2 = int(datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc).timestamp())
+        monkeypatch.setattr(settings, "custom_expiry_timestamps", f"{ts1},{ts2}")
+        monkeypatch.setattr(settings, "target_expiry_tenors", "1d,2d")
+
+        result = get_target_expiries(
+            asset="eth",
+            chain="base",
+            now=datetime(2026, 3, 2, 12, 0, 0, tzinfo=timezone.utc),
+        )
+
+        assert result == [ts1, ts2]

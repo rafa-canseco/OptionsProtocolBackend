@@ -24,7 +24,7 @@ from src.db.database import get_client
 from src.pricing.assets import Asset, get_asset_config, get_base_assets
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import strike_to_8_decimals
+from src.pricing.utils import get_target_expiries, strike_to_8_decimals
 from src.pricing.chainlink import get_asset_price
 
 logger = logging.getLogger(__name__)
@@ -367,33 +367,12 @@ def _upsert_available_otokens(
     logger.info("Upserted %d oTokens to available_otokens", len(rows))
 
 
-def _parse_custom_expiries() -> list[int] | None:
-    """Parse CUSTOM_EXPIRY_TIMESTAMPS env var into a list of ints, or None if unset."""
-    raw = settings.custom_expiry_timestamps.strip()
-    if not raw:
-        return None
-    try:
-        timestamps = [int(t.strip()) for t in raw.split(",") if t.strip()]
-    except ValueError:
-        logger.error(
-            "CUSTOM_EXPIRY_TIMESTAMPS is malformed: %r — using default expiries",
-            raw,
-        )
-        return None
-    if not timestamps:
-        return None
-    logger.info("Using custom expiry timestamps: %s", timestamps)
-    return timestamps
-
-
 async def publish_once():
     """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
     global _publish_cycle_count
     _publish_cycle_count += 1
 
     _prune_near_expiry_otokens()
-
-    custom_expiries = _parse_custom_expiries()
 
     for asset in get_base_assets():
         try:
@@ -402,9 +381,9 @@ async def publish_once():
             logger.exception("Failed to fetch %s price, skipping asset", asset.value)
             continue
 
-        specs = generate_otoken_specs(
-            spot=spot, asset=asset, expiry_timestamps=custom_expiries
-        )
+        expiries = get_target_expiries(asset=asset, chain="base", product="options")
+        logger.info("Target expiries for %s: %s", asset.value, expiries)
+        specs = generate_otoken_specs(spot=spot, asset=asset, expiry_timestamps=expiries)
 
         if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
             existing_by_key = {}
