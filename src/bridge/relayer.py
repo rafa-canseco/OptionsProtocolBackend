@@ -369,6 +369,9 @@ async def _process_arc_deposit_job(
         return
 
     if initial_status in (
+        BridgeJobState.PENDING.value,
+        BridgeJobState.ATTESTING.value,
+        BridgeJobState.MINTING.value,
         BridgeJobState.PENDING,
         BridgeJobState.ATTESTING,
         BridgeJobState.MINTING,

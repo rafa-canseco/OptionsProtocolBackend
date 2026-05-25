@@ -183,3 +183,34 @@ class TestArcBridgeRelayer:
         mock_finalize.assert_called_once_with(ONCHAIN_INTENT_ID, RECEIVER, 999_870)
         final_fields = mock_update.call_args_list[-1].args[1]
         assert final_fields["status"] == BridgeJobState.MINT_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_retry_minting_without_mint_tx_replays_receive_then_finalize(self):
+        from src.bridge import relayer
+
+        retry_job = _job(
+            status=BridgeJobState.MINTING.value,
+            attestation_message=_message(),
+            attestation_signature="0xatt",
+            mint_tx_hash=None,
+            gross_amount_usdc="1000000",
+        )
+        mock_update = MagicMock()
+        with (
+            patch("src.bridge.relayer._get_job", return_value=retry_job),
+            patch("src.bridge.relayer._update_job", mock_update),
+            patch("src.bridge.relayer.poll_attestation", new=AsyncMock()) as mock_poll,
+            patch("src.bridge.relayer.receive_message_arc", return_value=RECEIVE_TX) as mock_receive,
+            patch("src.bridge.relayer._get_linked_capital_intent", return_value=_intent()),
+            patch("src.bridge.relayer.finalize_arc_metavault_deposit", return_value=FINALIZE_TX) as mock_finalize,
+        ):
+            await relayer.process_bridge_job("bridge-job-1")
+
+        mock_poll.assert_not_called()
+        mock_receive.assert_called_once_with(_message(), "0xatt")
+        mock_finalize.assert_called_once_with(ONCHAIN_INTENT_ID, RECEIVER, 999_870)
+        mint_fields = mock_update.call_args_list[-2].args[1]
+        assert mint_fields["status"] == BridgeJobState.TRADING
+        assert mint_fields["arc_receive_tx_hash"] == RECEIVE_TX
+        final_fields = mock_update.call_args_list[-1].args[1]
+        assert final_fields["status"] == BridgeJobState.MINT_COMPLETED
