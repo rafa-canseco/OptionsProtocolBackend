@@ -172,6 +172,15 @@ class Settings(BaseSettings):
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC
     eth_staking_apy: float = 0.035  # 3.5% annualized
 
+    # Dynerox fiat on-ramp/off-ramp integration.
+    # Stage: https://api-stage.dynerox.com
+    # Production: https://api.dynerox.com
+    dynerox_api_url: str = "https://api-stage.dynerox.com"
+    dynerox_api_key: str = ""
+    dynerox_webhook_secret: str = ""
+    dynerox_onramp_network: str = "base"
+    dynerox_onramp_currency: str = "USDC"
+
     # Email notifications (Resend)
     resend_api_key: str = ""
     email_from: str = "b1nary <notifications@b1nary.app>"
