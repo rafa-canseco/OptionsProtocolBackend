@@ -15,6 +15,7 @@ from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
+from src.api.csp_vault import router as csp_vault_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
     settings,
@@ -254,6 +255,7 @@ app.include_router(leaderboard_router)
 app.include_router(notifications_router)
 app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
+app.include_router(csp_vault_router)
 app.include_router(bridge_router)
 
 if settings.beta_mode:
