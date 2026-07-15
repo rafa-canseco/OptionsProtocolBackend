@@ -93,6 +93,22 @@ class Settings(BaseSettings):
     # Base chain
     chain_id: int = 8453  # Base mainnet
 
+    # v2 CSP vault (Milestone 1 — Base Sepolia only)
+    # Use a dedicated RPC so a Base mainnet provider can never be used with
+    # the Base Sepolia deployment addresses by accident.
+    csp_rpc_url: str = ""
+    csp_chain_id: int = 84532
+    csp_vault_key: str = "base-sepolia:eth-usdc-csp"
+    csp_vault_address: str = "0xcf2c5b2e065bB7ADD2a29ed4d3A61910e6a59645"
+    csp_multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    csp_usdc_address: str = "0xAB51a471493832C1D70cef8ff937A850cf37c860"
+    csp_weth_address: str = "0x8A6Aa2304797898d46eC1d342Fedc817D3a973B6"
+    csp_snapshot_ttl_seconds: int = 15
+    csp_snapshot_stale_seconds: int = 60
+    csp_recent_batch_limit: int = 20
+    csp_max_batch_scan: int = 100
+    csp_user_cache_size: int = 512
+
     # ── Solana ──
     solana_rpc_url: str = ""
     solana_wss_rpc_url: str = ""
@@ -244,6 +260,18 @@ def has_bridge_config() -> bool:
     return bool(
         has_base_message_transmitter
         and has_relayer_key
+    )
+
+
+def has_csp_vault_config() -> bool:
+    """True when the isolated Base Sepolia CSP read path is configured."""
+    return bool(
+        settings.csp_rpc_url
+        and settings.csp_chain_id == 84532
+        and settings.csp_vault_address
+        and settings.csp_multicall3_address
+        and settings.csp_usdc_address
+        and settings.csp_weth_address
     )
 
 
