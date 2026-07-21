@@ -1,6 +1,10 @@
 # B1N-338: v2 CSP vault read model and RPC cost plan
 
-Status: design only. This ticket does not implement the indexer or API.
+Status: superseded by B1N-340. This document describes the retired
+`EthCspVault` model and is retained only as historical context. The tokenized
+fund indexer uses `src/fund_indexer` and
+`supabase/migrations/20260721_tokenized_fund_indexer.sql`; it does not project
+per-user assigned underlying or share generations.
 
 ## Scope and sources
 
