@@ -241,6 +241,80 @@ def test_partial_redemption_cancellation_and_claim() -> None:
     assert projection.fund["share_supply"] == "700"
 
 
+def test_redemption_batch_state_is_projected_per_controller() -> None:
+    other = "0xf000000000000000000000000000000000000009"
+    projection = project_events(
+        [
+            event(
+                "RedeemRequest",
+                {"controller": USER, "owner": USER, "shares": 20},
+                0,
+            ),
+            event("RedeemBatchSealed", {"batchId": 1, "pendingShares": 20}, 1),
+            event(
+                "RedeemRequest",
+                {"controller": other, "owner": other, "shares": 10},
+                2,
+            ),
+            event(
+                "RedeemBatchStarted",
+                {
+                    "batchId": 1,
+                    "shares": 20,
+                    "processingNav": 100,
+                    "reservedAssets": 20,
+                    "marginalExitCost": 0,
+                },
+                3,
+            ),
+        ],
+        USDC,
+        WETH,
+    )
+
+    assert projection.redemptions[USER]["latest_batch_processing"] is True
+    assert projection.redemptions[USER]["latest_batch_unwind_committed"] is True
+    assert projection.redemptions[other]["latest_batch_processing"] is False
+    states = projection.export()["redemption_batch_states"]
+    assert {row["controller_address"]: row["latest_batch_id"] for row in states} == {
+        USER: 1,
+        other: 2,
+    }
+
+
+def test_completed_redemption_round_clears_latest_batch_state() -> None:
+    projection = project_events(
+        [
+            event(
+                "RedeemRequest",
+                {"controller": USER, "owner": USER, "shares": 20},
+                0,
+            ),
+            event(
+                "RedeemBatchStarted",
+                {
+                    "batchId": 1,
+                    "shares": 10,
+                    "processingNav": 100,
+                    "reservedAssets": 10,
+                    "marginalExitCost": 0,
+                },
+                1,
+            ),
+            event(
+                "RedeemBatchProcessed",
+                {"batchId": 1, "controllers": 1, "roundComplete": True},
+                2,
+            ),
+        ],
+        USDC,
+        WETH,
+    )
+
+    assert projection.redemptions[USER]["latest_batch_processing"] is False
+    assert projection.redemptions[USER]["latest_batch_unwind_committed"] is False
+
+
 @pytest.mark.parametrize(
     ("lifecycle", "activity"),
     [(3, "csp_settled_otm"), (4, "csp_assigned"), (5, "csp_cash_fallback")],

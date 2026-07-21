@@ -1,565 +1,516 @@
-"""Cached product-level snapshots for the Base Sepolia CSP vault."""
+"""DB-first product service for tokenized CSP funds."""
 
-from __future__ import annotations
-
-import logging
-import threading
-import time
-from collections import OrderedDict
-from dataclasses import dataclass
+import base64
+import json
+import re
 from datetime import datetime, timezone
-from typing import Any, Callable
-
-from web3 import Web3
+from typing import Any, Protocol
 
 from src.config import settings
+from src.db.database import get_client
 from src.models.csp_vault import (
     ActionAvailability,
-    CspBatchView,
-    CurrentCycle,
+    ActivityItem,
+    ActivityResponse,
+    FundActions,
+    FundComposition,
+    FundConfigResponse,
+    FundListResponse,
+    FundPositionResponse,
+    FundRegistryItem,
+    FundStatus,
+    FundSummaryResponse,
+    NavWindow,
+    RedemptionView,
     TokenMetadata,
-    UserActions,
-    UserPosition,
-    UserPositionResponse,
-    VaultAssets,
-    VaultResponse,
-    VaultSummary,
-    WithdrawalPosition,
+    TrustedContract,
 )
-from src.vaults.csp_reader import CspVaultReader, RpcRead, build_csp_reader
 
-logger = logging.getLogger(__name__)
+PROXY_ROLES = {
+    "fund_vault",
+    "fund_share",
+    "fund_accounting",
+    "fund_flow_manager",
+    "strategy_manager",
+    "csp_adapter",
+    "controller",
+    "batch_settler",
+}
+REQUIRED_TRUSTED_ROLES = PROXY_ROLES | {
+    "claim_escrow",
+    "access_manager",
+    "address_book",
+    "csp_valuator",
+    "margin_pool",
+    "nav_verifier",
+    "oracle",
+    "otoken_factory",
+    "swap_router",
+    "whitelist",
+}
 
-_SHARE_INDEX_SCALE = 10**18
-_USDC_DECIMALS = 6
-_WETH_DECIMALS = 18
+
+class UnknownFundError(LookupError):
+    """The requested fund key is not registered."""
 
 
-class UnknownCspVaultError(LookupError):
-    """The requested product key is not registered by this service."""
+class FundRepository(Protocol):
+    def registries(self) -> list[dict[str, Any]]: ...
+    def state(self, chain_id: int, fund: str) -> dict[str, Any] | None: ...
+    def inventory(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def position(self, chain_id: int, fund: str, wallet: str) -> dict[str, Any]: ...
+    def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def confirmed_head(self, chain_id: int) -> dict[str, Any] | None: ...
+    def activity(
+        self, chain_id: int, fund: str, cursor: tuple[int, int] | None, limit: int
+    ) -> list[dict[str, Any]]: ...
 
 
-@dataclass
-class _CacheEntry:
-    value: Any
-    cached_at: float
+class SupabaseFundRepository:
+    def registries(self) -> list[dict[str, Any]]:
+        result = get_client().table("v2_fund_registry").select("*").execute()
+        return result.data or []
 
+    def state(self, chain_id: int, fund: str) -> dict[str, Any] | None:
+        rows = self._fund_query("v2_fund_state", chain_id, fund).limit(1).execute()
+        return rows.data[0] if rows.data else None
 
-@dataclass
-class _VaultState:
-    response: VaultResponse
-    global_values: dict[str, Any]
-    current_epoch: dict[str, Any]
+    def inventory(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
+        return (
+            self._fund_query("v2_fund_inventory", chain_id, fund).execute().data or []
+        )
 
-
-class CspVaultService:
-    """Builds coherent CSP responses and coalesces repeated RPC reads."""
-
-    def __init__(
-        self,
-        reader: CspVaultReader | Any,
-        *,
-        vault_key: str,
-        chain_id: int,
-        vault_address: str,
-        usdc_address: str,
-        weth_address: str,
-        ttl_seconds: int = 15,
-        stale_seconds: int = 60,
-        recent_batch_limit: int = 20,
-        max_batch_scan: int = 100,
-        user_cache_size: int = 512,
-        clock: Callable[[], float] = time.monotonic,
-        utcnow: Callable[[], datetime] | None = None,
-    ) -> None:
-        self.reader = reader
-        self.vault_key = vault_key
-        self.chain_id = chain_id
-        self.vault_address = Web3.to_checksum_address(vault_address)
-        self.usdc_address = Web3.to_checksum_address(usdc_address)
-        self.weth_address = Web3.to_checksum_address(weth_address)
-        self.ttl_seconds = max(1, ttl_seconds)
-        self.stale_seconds = max(self.ttl_seconds, stale_seconds)
-        self.recent_batch_limit = max(1, recent_batch_limit)
-        self.max_batch_scan = max(self.recent_batch_limit, max_batch_scan)
-        self.user_cache_size = max(1, user_cache_size)
-        self.clock = clock
-        self.utcnow = utcnow or (lambda: datetime.now(timezone.utc))
-
-        self._lock = threading.RLock()
-        self._vault_cache: _CacheEntry | None = None
-        self._user_cache: OrderedDict[str, _CacheEntry] = OrderedDict()
-        self._epoch_cache: dict[tuple[int, int], dict[str, Any]] = {}
-        self._generation_cache: dict[tuple[int, int], int] = {}
-        self._option_cache: dict[str, dict[str, Any]] = {}
-
-    def clear_cache(self) -> None:
-        with self._lock:
-            self._vault_cache = None
-            self._user_cache.clear()
-            self._epoch_cache.clear()
-            self._generation_cache.clear()
-            self._option_cache.clear()
-
-    def get_vault(self, vault_key: str) -> VaultResponse:
-        with self._lock:
-            self._validate_vault_key(vault_key)
-            return self._get_vault_state_locked().response
-
-    def get_user_position(self, vault_key: str, address: str) -> UserPositionResponse:
-        with self._lock:
-            self._validate_vault_key(vault_key)
-            checksum = Web3.to_checksum_address(address)
-            cache_key = checksum.lower()
-            state = self._get_vault_state_locked()
-            now = self.clock()
-            cached = self._user_cache.get(cache_key)
-
-            if (
-                cached is not None
-                and cached.value.as_of_block == state.response.as_of_block
-                and now - cached.cached_at < self.ttl_seconds
-            ):
-                self._user_cache.move_to_end(cache_key)
-                response = cached.value
-                if state.response.stale:
-                    return self._stale_user_response(response)
-                return response
-
-            try:
-                response = self._build_user_response(state, checksum)
-            except Exception:
-                if cached is None or now - cached.cached_at > self.stale_seconds:
-                    raise
-                logger.warning(
-                    "Serving stale CSP user snapshot for %s after refresh failure",
-                    checksum,
-                    exc_info=True,
-                )
-                return self._stale_user_response(cached.value)
-
-            self._user_cache[cache_key] = _CacheEntry(response, self.clock())
-            self._user_cache.move_to_end(cache_key)
-            while len(self._user_cache) > self.user_cache_size:
-                self._user_cache.popitem(last=False)
-
-            if state.response.stale:
-                return self._stale_user_response(response)
-            return response
-
-    def _validate_vault_key(self, vault_key: str) -> None:
-        if vault_key != self.vault_key:
-            raise UnknownCspVaultError(vault_key)
-
-    def _get_vault_state_locked(self) -> _VaultState:
-        now = self.clock()
-        cached = self._vault_cache
-        if cached is not None and now - cached.cached_at < self.ttl_seconds:
-            return cached.value
-
-        try:
-            state = self._build_vault_state()
-        except Exception:
-            if cached is None or now - cached.cached_at > self.stale_seconds:
-                raise
-            logger.warning("Serving stale CSP vault snapshot", exc_info=True)
-            stale_response = cached.value.response.model_copy(update={"stale": True})
-            return _VaultState(
-                response=stale_response,
-                global_values=cached.value.global_values,
-                current_epoch=cached.value.current_epoch,
+    def position(self, chain_id: int, fund: str, wallet: str) -> dict[str, Any]:
+        balance = (
+            self._fund_query("v2_share_balances", chain_id, fund)
+            .eq("wallet_address", wallet)
+            .limit(1)
+            .execute()
+        )
+        redemption = (
+            self._fund_query("v2_redemptions", chain_id, fund)
+            .eq("controller_address", wallet)
+            .limit(1)
+            .execute()
+        )
+        redemption_row = dict(redemption.data[0]) if redemption.data else {}
+        batch_state = (
+            self._fund_query("v2_redemption_batch_states", chain_id, fund)
+            .eq("controller_address", wallet)
+            .limit(1)
+            .execute()
+        )
+        if batch_state.data:
+            state = batch_state.data[0]
+            redemption_row.update(
+                latest_batch_id=state["latest_batch_id"],
+                latest_batch_processing=state["processing"],
+                latest_batch_unwind_committed=state["unwind_committed"],
             )
-
-        self._vault_cache = _CacheEntry(state, self.clock())
-        self._epoch_cache = {
-            key: value
-            for key, value in self._epoch_cache.items()
-            if key[0] == state.response.as_of_block
+        return {
+            "shares": balance.data[0]["shares"] if balance.data else 0,
+            "redemption": redemption_row,
         }
-        self._generation_cache = {
-            key: value
-            for key, value in self._generation_cache.items()
-            if key[0] == state.response.as_of_block
-        }
-        return state
 
-    def _build_vault_state(self) -> _VaultState:
-        global_read: RpcRead = self.reader.read_global()
-        values = global_read.values
-        block_number = global_read.block_number
-        epoch_id = int(values["currentEpoch"])
-        epoch = self._get_epoch(epoch_id, block_number)
+    def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
+        query = self._fund_query("v2_fund_contracts", chain_id, fund)
+        return query.execute().data or []
 
-        batches, truncated = self._read_visible_batches(values, block_number)
-        option_addresses = {
-            str(batch["oToken"]).lower()
-            for batch in batches
-            if int(batch["protocolVaultId"]) != 0
-        }
-        missing_options = sorted(option_addresses - self._option_cache.keys())
-        if missing_options:
-            option_read = self.reader.read_option_series(
-                missing_options, block_identifier=block_number
+    def confirmed_head(self, chain_id: int) -> dict[str, Any] | None:
+        result = (
+            get_client()
+            .table("v2_confirmed_chain_heads")
+            .select("*")
+            .eq("chain_id", chain_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    def activity(
+        self, chain_id: int, fund: str, cursor: tuple[int, int] | None, limit: int
+    ) -> list[dict[str, Any]]:
+        query = self._fund_query("v2_fund_activity", chain_id, fund)
+        if cursor:
+            block, log = cursor
+            query = query.or_(
+                f"block_number.lt.{block},and(block_number.eq.{block},log_index.lt.{log})"
             )
-            self._option_cache.update(option_read.values["series"])
+        result = query.order("block_number", desc=True).order("log_index", desc=True)
+        return result.limit(limit).execute().data or []
 
-        prepared_batch_id = int(values["preparedSettlementBatchId"])
-        batch_views = [
-            self._batch_view(batch, prepared_batch_id)
-            for batch in sorted(
-                batches, key=lambda item: int(item["batchId"]), reverse=True
-            )
-        ]
-        status = self._vault_status(values)
-        total_managed = int(values["totalManagedAssets"])
-        total_shares = int(values["totalShares"])
-        active_collateral = int(values["activeCollateral"])
+    @staticmethod
+    def _fund_query(table: str, chain_id: int, fund: str):
+        return (
+            get_client()
+            .table(table)
+            .select("*")
+            .eq("chain_id", chain_id)
+            .eq("fund_address", fund)
+        )
+
+
+class FundService:
+    def __init__(self, repository: FundRepository, now=None):
+        self.repository = repository
+        self.now = now or (lambda: datetime.now(timezone.utc))
+
+    def list_funds(self) -> FundListResponse:
+        return FundListResponse(
+            funds=[self._registry(row) for row in self.repository.registries()]
+        )
+
+    def summary(self, fund_key: str) -> FundSummaryResponse:
+        row = self._find(fund_key)
+        state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
+        inventory = self.repository.inventory(int(row["chain_id"]), row["fund_address"])
+        context = self._write_context(row, state)
+        stale = context["stale"]
+        actions = self._actions(row, state, common=context["reason"])
+        net_assets = int(state.get("net_assets", 0))
+        supply = int(state.get("share_supply", 0))
+        virtual = int(state.get("virtual_shares", 0))
+        denominator = supply + virtual
         share_price = (
-            total_managed * (10**_USDC_DECIMALS) // total_shares
-            if total_shares
-            else 10**_USDC_DECIMALS
+            (net_assets + 1) * 10 ** int(row["share_decimals"]) // denominator
+            if denominator
+            else 0
         )
-        utilization = (
-            active_collateral * 10_000 // total_managed if total_managed else 0
-        )
-
-        response = VaultResponse(
-            vault_key=self.vault_key,
-            chain_id=self.chain_id,
-            vault_address=self.vault_address,
-            assets=VaultAssets(
-                deposit=TokenMetadata(
-                    symbol="USDC", address=self.usdc_address, decimals=_USDC_DECIMALS
+        amounts = {
+            (item["asset_address"], item["bucket"]): item["amount"]
+            for item in inventory
+        }
+        return FundSummaryResponse(
+            fund=self._registry(row),
+            net_assets=str(net_assets),
+            share_supply=str(supply),
+            virtual_shares=str(virtual),
+            share_price_assets=str(share_price),
+            composition=FundComposition(
+                idle_assets=str(state.get("accounted_idle_assets", 0)),
+                strategy_accounting_assets=str(
+                    amounts.get((row["accounting_asset"], "strategy_accounted"), 0)
                 ),
-                assigned=TokenMetadata(
-                    symbol="WETH", address=self.weth_address, decimals=_WETH_DECIMALS
-                ),
+                assigned_weth=str(amounts.get((row["weth"], "assigned"), 0)),
+                reserved_claim_assets=str(state.get("reserved_claim_assets", 0)),
             ),
-            status=status,
-            summary=VaultSummary(
-                total_managed_assets=str(total_managed),
-                total_shares=str(total_shares),
-                share_price_assets=str(share_price),
-                available_idle_assets=str(int(values["availableIdleAssets"])),
-                active_collateral=str(active_collateral),
-                active_batch_count=int(values["activeBatches"]),
-                utilization_bps=utilization,
-                pending_deposit_assets=str(int(values["totalPendingDepositAssets"])),
-                pending_withdrawal_shares=str(
-                    int(values["totalPendingWithdrawalShares"])
-                ),
-                accounted_underlying_assets=str(
-                    int(values["accountedUnderlyingAssets"])
-                ),
+            nav=NavWindow(
+                report_nonce=int(state.get("last_report_nonce", 0)),
+                valid_after_block=state.get("nav_valid_after_block"),
+                valid_until_block=state.get("nav_valid_until_block"),
+                stale=stale,
             ),
-            current_cycle=CurrentCycle(
-                epoch_id=epoch_id,
-                status="closed" if epoch["closed"] else status,
-                started_at=int(epoch["startedAt"]),
-                ended_at=int(epoch["endedAt"]) or None,
-                premium_earned=str(int(epoch["premiumEarned"])),
-                performance_fee=str(int(epoch["performanceFee"])),
-                assignment_shortfall=str(int(epoch["assignmentShortfall"])),
-                closed=bool(epoch["closed"]),
-                batches_truncated=truncated,
-                batches=batch_views,
-            ),
-            as_of_block=block_number,
-            indexed_at=self._timestamp(),
-            stale=False,
-        )
-        return _VaultState(response=response, global_values=values, current_epoch=epoch)
-
-    def _read_visible_batches(
-        self, global_values: dict[str, Any], block_number: int
-    ) -> tuple[list[dict[str, Any]], bool]:
-        batch_count = int(global_values["batchCount"])
-        active_target = int(global_values["activeBatches"])
-        if batch_count == 0:
-            return [], False
-
-        collected: dict[int, dict[str, Any]] = {}
-        active_found = 0
-        scanned = 0
-        end = batch_count
-        while end > 0 and scanned < self.max_batch_scan:
-            remaining = self.max_batch_scan - scanned
-            chunk_size = min(self.recent_batch_limit, remaining, end)
-            start = end - chunk_size + 1
-            read = self.reader.read_batches(
-                range(start, end + 1), block_identifier=block_number
-            )
-            chunk = read.values["batches"]
-            collected.update(chunk)
-            active_found += sum(not bool(batch["settled"]) for batch in chunk.values())
-            scanned += chunk_size
-            end = start - 1
-            if scanned >= self.recent_batch_limit and active_found >= active_target:
-                break
-
-        truncated = len(collected) < batch_count or active_found < active_target
-        return list(collected.values()), truncated
-
-    def _batch_view(
-        self, batch: dict[str, Any], prepared_batch_id: int
-    ) -> CspBatchView:
-        batch_id = int(batch["batchId"])
-        collateral = int(batch["collateral"])
-        returned = int(batch["collateralReturned"])
-        underlying_received = int(batch["underlyingReceived"])
-        settled = bool(batch["settled"])
-
-        if not settled:
-            status = "prepared" if batch_id == prepared_batch_id else "open"
-        elif underlying_received > 0:
-            status = "physical_delivered"
-        elif collateral > returned:
-            status = "default_cash_settled"
-        else:
-            status = "otm_settled"
-
-        option = self._option_cache.get(str(batch["oToken"]).lower(), {})
-        return CspBatchView(
-            batch_id=batch_id,
-            protocol_vault_id=int(batch["protocolVaultId"]),
-            epoch_id=int(batch["epochId"]),
-            status=status,
-            o_token=Web3.to_checksum_address(batch["oToken"]),
-            strike_price=str(int(option.get("strikePrice", 0))),
-            expiry=int(option.get("expiry", 0)),
-            amount=str(int(batch["amount"])),
-            collateral=str(collateral),
-            premium_earned=str(int(batch["premiumEarned"])),
-            collateral_returned=str(returned),
-            underlying_received=str(underlying_received),
-            assignment_shortfall=str(collateral - returned if settled else 0),
-        )
-
-    def _build_user_response(
-        self, state: _VaultState, checksum_address: str
-    ) -> UserPositionResponse:
-        block_number = state.response.as_of_block
-        read: RpcRead = self.reader.read_user(
-            checksum_address, block_identifier=block_number
-        )
-        raw = read.values
-        global_values = state.global_values
-
-        raw_shares = int(raw["sharesOf"])
-        user_generation = int(raw["shareGeneration"])
-        current_generation = int(global_values["currentShareGeneration"])
-        paid = int(raw["underlyingPerSharePaid"])
-        stored_claim = int(raw["claimableAssignedUnderlying"])
-
-        if user_generation == current_generation:
-            cutoff = int(global_values["cumulativeUnderlyingPerShare"])
-            active_shares = raw_shares
-        elif raw_shares:
-            cutoff = self._get_generation_cutoff(user_generation, block_number)
-            active_shares = 0
-        else:
-            cutoff = paid
-            active_shares = 0
-        virtual_accrued = (
-            raw_shares * (cutoff - paid) // _SHARE_INDEX_SCALE if cutoff > paid else 0
-        )
-        claimable_weth = stored_claim + virtual_accrued
-
-        pending_withdrawal_shares = int(raw["pendingWithdrawalShares"])
-        pending_withdrawal_epoch = int(raw["pendingWithdrawalEpoch"])
-        withdrawal = WithdrawalPosition(
-            epoch_id=pending_withdrawal_epoch or None,
-            shares=str(pending_withdrawal_shares),
-            claimable=False,
-            usdc_assets="0",
-            weth_assets="0",
-        )
-        if pending_withdrawal_shares:
-            epoch = self._get_epoch(pending_withdrawal_epoch, block_number)
-            if bool(epoch["closed"]) and int(epoch["remainingWithdrawalClaims"]) > 0:
-                remaining_claims = int(epoch["remainingWithdrawalClaims"])
-                if remaining_claims == 1:
-                    usdc_claim = int(epoch["withdrawalAssetsRemaining"])
-                    weth_claim = int(epoch["withdrawalUnderlyingRemaining"])
-                else:
-                    usdc_claim = (
-                        pending_withdrawal_shares
-                        * int(epoch["withdrawalAssetsPerShare"])
-                        // _SHARE_INDEX_SCALE
-                    )
-                    weth_claim = (
-                        pending_withdrawal_shares
-                        * int(epoch["withdrawalUnderlyingPerShare"])
-                        // _SHARE_INDEX_SCALE
-                    )
-                withdrawal = WithdrawalPosition(
-                    epoch_id=pending_withdrawal_epoch,
-                    shares=str(pending_withdrawal_shares),
-                    claimable=True,
-                    usdc_assets=str(usdc_claim),
-                    weth_assets=str(weth_claim),
-                )
-
-        total_shares = int(global_values["totalShares"])
-        total_managed = int(global_values["totalManagedAssets"])
-        active_assets = (
-            total_managed * active_shares // total_shares
-            if total_shares
-            else active_shares
-        )
-        pending_deposit = int(raw["pendingDepositAssets"])
-        actions = self._actions(
-            global_values=global_values,
-            active_shares=active_shares,
-            pending_deposit=pending_deposit,
-            pending_withdrawal_shares=pending_withdrawal_shares,
-            withdrawal_claimable=withdrawal.claimable,
-            claimable_weth=claimable_weth,
-        )
-
-        return UserPositionResponse(
-            vault_key=self.vault_key,
-            chain_id=self.chain_id,
-            vault_address=self.vault_address,
-            address=checksum_address,
-            position=UserPosition(
-                active_shares=str(active_shares),
-                active_assets=str(active_assets),
-                pending_deposit_assets=str(pending_deposit),
-                withdrawal=withdrawal,
-                claimable_assigned_weth=str(claimable_weth),
-            ),
+            status=self._status(state),
             actions=actions,
-            as_of_block=block_number,
-            indexed_at=self._timestamp(),
-            stale=False,
+            as_of_block=state.get("as_of_block"),
+            as_of_block_hash=state.get("as_of_block_hash"),
+            indexed_at=state.get("indexed_at"),
+            stale=stale,
+        )
+
+    def position(self, fund_key: str, wallet: str) -> FundPositionResponse:
+        row = self._find(fund_key)
+        state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
+        position = self.repository.position(
+            int(row["chain_id"]), row["fund_address"], wallet
+        )
+        shares = int(position.get("shares", 0))
+        denominator = int(state.get("share_supply", 0)) + int(
+            state.get("virtual_shares", 0)
+        )
+        value = (
+            shares * (int(state.get("net_assets", 0)) + 1) // denominator
+            if denominator
+            else 0
+        )
+        redemption = self._redemption(position.get("redemption", {}))
+        context = self._write_context(row, state)
+        stale = context["stale"]
+        return FundPositionResponse(
+            fund_key=fund_key,
+            address=wallet,
+            shares=str(shares),
+            accounting_value=str(value),
+            redemption=redemption,
+            actions=self._actions(
+                row,
+                state,
+                common=context["reason"],
+                shares=shares,
+                redemption=redemption,
+            ),
+            as_of_block=state.get("as_of_block"),
+            indexed_at=state.get("indexed_at"),
+            stale=stale,
+        )
+
+    def config(self, fund_key: str) -> FundConfigResponse:
+        row = self._find(fund_key)
+        state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
+        context = self._write_context(row, state)
+        actions = self._actions(row, state, common=context["reason"])
+        reason = actions.deposit.reason_code or actions.request_redemption.reason_code
+        contracts = [
+            TrustedContract(
+                role=item["contract_role"],
+                address=item["contract_address"],
+                implementation_address=item.get("implementation_address"),
+                interface_version=int(item["interface_version"]),
+            )
+            for item in context["active_contracts"]
+        ]
+        return FundConfigResponse(
+            fund_key=fund_key,
+            deployment_status=row["deployment_status"],
+            contracts=contracts,
+            capabilities=actions,
+            writes_enabled=reason is None,
+            blocked_reason_code=reason,
+        )
+
+    def activity(
+        self, fund_key: str, cursor: str | None, limit: int
+    ) -> ActivityResponse:
+        row = self._find(fund_key)
+        decoded = self._decode_cursor(cursor) if cursor else None
+        rows = self.repository.activity(
+            int(row["chain_id"]), row["fund_address"], decoded, limit + 1
+        )
+        visible = rows[:limit]
+        items = [
+            ActivityItem(
+                activity_type=item["activity_type"],
+                transaction_hash=item["transaction_hash"],
+                block_number=int(item["block_number"]),
+                log_index=int(item["log_index"]),
+                wallet_address=item.get("wallet_address"),
+                details=self._safe_details(item),
+            )
+            for item in visible
+        ]
+        next_cursor = self._encode_cursor(visible[-1]) if len(rows) > limit else None
+        return ActivityResponse(items=items, next_cursor=next_cursor, limit=limit)
+
+    def _find(self, fund_key: str) -> dict[str, Any]:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9:_-]{0,127}", fund_key):
+            raise ValueError("Invalid fund key")
+        rows = [
+            row for row in self.repository.registries() if row["fund_key"] == fund_key
+        ]
+        if not rows:
+            raise UnknownFundError(fund_key)
+        return rows[0]
+
+    @staticmethod
+    def _registry(row: dict[str, Any]) -> FundRegistryItem:
+        return FundRegistryItem(
+            fund_key=row["fund_key"],
+            chain_id=int(row["chain_id"]),
+            fund_address=row["fund_address"],
+            deployment_status=row["deployment_status"],
+            share_token=TokenMetadata(
+                address=row["share_token"],
+                symbol=row["share_symbol"],
+                decimals=int(row["share_decimals"]),
+            ),
+            accounting_asset=TokenMetadata(
+                address=row["accounting_asset"],
+                symbol=row["accounting_asset_symbol"],
+                decimals=int(row["accounting_asset_decimals"]),
+            ),
+        )
+
+    @staticmethod
+    def _status(state: dict[str, Any]) -> FundStatus:
+        return FundStatus(
+            reconciled=bool(state.get("reconciled", False)),
+            deposits_paused=bool(state.get("deposits_paused", True)),
+            redemptions_paused=bool(state.get("redemptions_paused", True)),
+            execution_locked=bool(state.get("execution_lock_owner")),
+            flow_processing=bool(state.get("has_active_processing", False)),
         )
 
     def _actions(
-        self,
-        *,
-        global_values: dict[str, Any],
-        active_shares: int,
-        pending_deposit: int,
-        pending_withdrawal_shares: int,
-        withdrawal_claimable: bool,
-        claimable_weth: int,
-    ) -> UserActions:
-        active_batches = int(global_values["activeBatches"])
-        available_underlying = int(global_values["availableUnderlyingAssets"])
-        deposit_is_immediate = (
-            active_batches == 0
-            and int(global_values["totalPendingWithdrawalShares"]) == 0
-            and available_underlying == 0
+        self, registry, state, *, common, shares=None, redemption=None
+    ) -> FundActions:
+        redemption = redemption or RedemptionView()
+        deposit_reason = common or (
+            "DEPOSITS_PAUSED" if state.get("deposits_paused", True) else None
         )
-
-        if active_shares == 0:
-            withdraw_idle = ActionAvailability(
-                available=False, reason="NO_ACTIVE_SHARES"
-            )
-        elif active_batches:
-            withdraw_idle = ActionAvailability(available=False, reason="ACTIVE_BATCHES")
-        elif available_underlying:
-            withdraw_idle = ActionAvailability(
-                available=False, reason="ASSIGNED_UNDERLYING"
-            )
-        else:
-            withdraw_idle = ActionAvailability(available=True)
-
-        if pending_withdrawal_shares:
-            request_withdraw = ActionAvailability(
-                available=False, reason="PENDING_WITHDRAWAL"
-            )
-        elif active_shares == 0:
-            request_withdraw = ActionAvailability(
-                available=False, reason="NO_ACTIVE_SHARES"
-            )
-        else:
-            request_withdraw = ActionAvailability(available=True)
-
-        return UserActions(
-            deposit=ActionAvailability(
-                available=True, mode="immediate" if deposit_is_immediate else "queued"
-            ),
-            cancel_pending_deposit=ActionAvailability(
-                available=pending_deposit > 0,
-                reason=None if pending_deposit > 0 else "NO_PENDING_DEPOSIT",
-            ),
-            withdraw_idle=withdraw_idle,
-            request_withdraw=request_withdraw,
-            claim_withdraw=ActionAvailability(
-                available=withdrawal_claimable,
-                reason=None if withdrawal_claimable else "NO_CLOSED_WITHDRAWAL",
-            ),
-            claim_assigned_weth=ActionAvailability(
-                available=claimable_weth > 0,
-                reason=None if claimable_weth > 0 else "NOTHING_TO_CLAIM",
-            ),
+        redeem_reason = common or (
+            "REDEMPTIONS_PAUSED" if state.get("redemptions_paused", True) else None
         )
-
-    def _get_epoch(self, epoch_id: int, block_number: int) -> dict[str, Any]:
-        key = (block_number, epoch_id)
-        cached = self._epoch_cache.get(key)
-        if cached is not None:
-            return cached
-        read: RpcRead = self.reader.read_epoch(epoch_id, block_identifier=block_number)
-        self._epoch_cache[key] = read.values
-        return read.values
-
-    def _get_generation_cutoff(self, generation: int, block_number: int) -> int:
-        key = (block_number, generation)
-        cached = self._generation_cache.get(key)
-        if cached is not None:
-            return cached
-        read: RpcRead = self.reader.read_generation_cutoff(
-            generation, block_identifier=block_number
+        request_reason = redeem_reason or (
+            "NO_SHARES" if shares is not None and shares == 0 else None
         )
-        cutoff = int(read.values["cutoff"])
-        self._generation_cache[key] = cutoff
-        return cutoff
+        cancel_reason = None if common == "FLOW_PROCESSING" else common
+        if cancel_reason is None and int(redemption.claimable_shares) > 0:
+            cancel_reason = "CLAIMABLE_REDEMPTION_EXISTS"
+        if cancel_reason is None and int(redemption.pending_shares) == 0:
+            cancel_reason = "NO_PENDING_REDEMPTION"
+        if cancel_reason is None and (
+            redemption.latest_batch_processing
+            or redemption.latest_batch_unwind_committed
+        ):
+            cancel_reason = "FLOW_PROCESSING"
+        claim_reason = common or (
+            "NO_CLAIMABLE_REDEMPTION" if int(redemption.claimable_assets) == 0 else None
+        )
+        return FundActions(
+            deposit=self._availability(deposit_reason),
+            request_redemption=self._availability(request_reason),
+            cancel_redemption=self._availability(cancel_reason),
+            claim_redemption=self._availability(claim_reason),
+        )
 
     @staticmethod
-    def _vault_status(values: dict[str, Any]) -> str:
-        if int(values["preparedSettlementBatchId"]):
-            return "settling"
-        if int(values["activeBatches"]):
-            return "active"
-        if int(values["accountedUnderlyingAssets"]):
-            return "assigned"
-        return "idle"
+    def _state_reason(registry, state, stale) -> str | None:
+        if registry["deployment_status"] != "DEPLOYED":
+            return "MISSING_TRUSTED_DEPLOYMENT"
+        if not state.get("reconciled", False):
+            return "UNRECONCILED"
+        if stale:
+            return "STALE_SNAPSHOT"
+        if state.get("execution_lock_owner"):
+            return "EXECUTION_LOCKED"
+        if state.get("has_active_processing"):
+            return "FLOW_PROCESSING"
+        return None
+
+    def _write_context(self, registry, state) -> dict[str, Any]:
+        chain_id = int(registry["chain_id"])
+        contracts = self.repository.contracts(chain_id, registry["fund_address"])
+        head = self.repository.confirmed_head(chain_id)
+        active = self._active_contracts(contracts, state.get("as_of_block"))
+        trust_reason = self._binding_reason(registry, state, active)
+        stale_reason = self._freshness_reason(state, head)
+        stale = bool(trust_reason or stale_reason or state.get("nav_stale", True))
+        reason = trust_reason or self._state_reason(registry, state, stale)
+        if reason == "STALE_SNAPSHOT" and stale_reason:
+            reason = stale_reason
+        return {"reason": reason, "stale": stale, "active_contracts": active}
 
     @staticmethod
-    def _stale_user_response(response: UserPositionResponse) -> UserPositionResponse:
-        disabled = ActionAvailability(available=False, reason="STALE_SNAPSHOT")
-        return response.model_copy(
-            update={
-                "stale": True,
-                "actions": UserActions(
-                    deposit=disabled,
-                    cancel_pending_deposit=disabled,
-                    withdraw_idle=disabled,
-                    request_withdraw=disabled,
-                    claim_withdraw=disabled,
-                    claim_assigned_weth=disabled,
-                ),
-            }
+    def _active_contracts(contracts, as_of_block) -> list[dict[str, Any]]:
+        if as_of_block is None:
+            return []
+        block = int(as_of_block)
+        return [
+            row
+            for row in contracts
+            if int(row["valid_from_block"]) <= block
+            and (
+                row.get("valid_to_block") is None or block <= int(row["valid_to_block"])
+            )
+        ]
+
+    @staticmethod
+    def _binding_reason(registry, state, active) -> str | None:
+        if registry.get("deployment_status") != "DEPLOYED" or not state:
+            return "MISSING_TRUSTED_DEPLOYMENT"
+        by_role = {row["contract_role"]: row for row in active}
+        if len(by_role) != len(active):
+            return "AMBIGUOUS_BINDING"
+        if not REQUIRED_TRUSTED_ROLES.issubset(by_role):
+            return "MISSING_TRUSTED_DEPLOYMENT"
+        if any(int(row["interface_version"]) not in {1} for row in by_role.values()):
+            return "UNSUPPORTED_INTERFACE"
+        if any(not by_role[role].get("implementation_address") for role in PROXY_ROLES):
+            return "UNTRUSTED_IMPLEMENTATION"
+        return None
+
+    def _freshness_reason(self, state, head) -> str | None:
+        if not head:
+            return "UNKNOWN_CONFIRMED_HEAD"
+        if (
+            self._age(head.get("observed_at"))
+            > settings.confirmed_head_freshness_seconds
+        ):
+            return "STALE_CONFIRMED_HEAD"
+        if self._age(state.get("indexed_at")) > settings.fund_state_freshness_seconds:
+            return "STALE_INDEXER_LEASE"
+        block = int(head["block_number"])
+        if state.get("as_of_block") is None or int(state["as_of_block"]) > block:
+            return "INCOHERENT_CONFIRMED_HEAD"
+        if int(state["as_of_block"]) == block and state.get(
+            "as_of_block_hash"
+        ) != head.get("block_hash"):
+            return "REORGED_SNAPSHOT"
+        valid_after = state.get("nav_valid_after_block")
+        valid_until = state.get("nav_valid_until_block")
+        if valid_after is None or block < int(valid_after):
+            return "NAV_NOT_ACTIVE"
+        if valid_until is None or block > int(valid_until):
+            return "STALE_NAV_WINDOW"
+        return None
+
+    def _age(self, value: str | None) -> float:
+        if not value:
+            return float("inf")
+        observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return (self.now() - observed).total_seconds()
+
+    @staticmethod
+    def _availability(reason: str | None) -> ActionAvailability:
+        return ActionAvailability(available=reason is None, reason_code=reason)
+
+    @staticmethod
+    def _redemption(row: dict[str, Any]) -> RedemptionView:
+        pending = int(row.get("pending_shares", 0))
+        claimable = int(row.get("claimable_assets", 0))
+        next_action = "claim" if claimable else "cancel_or_wait" if pending else "none"
+        return RedemptionView(
+            pending_shares=str(pending),
+            claimable_shares=str(row.get("claimable_shares", 0)),
+            claimable_assets=str(claimable),
+            status=row.get("status", "none"),
+            next_action=next_action,
+            latest_batch_id=int(row.get("latest_batch_id", 0)),
+            latest_batch_processing=bool(row.get("latest_batch_processing", False)),
+            latest_batch_unwind_committed=bool(
+                row.get("latest_batch_unwind_committed", False)
+            ),
         )
 
-    def _timestamp(self) -> str:
-        return self.utcnow().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    @staticmethod
+    def _safe_details(row: dict[str, Any]) -> dict[str, str | int | bool | None]:
+        allowed = {
+            "assets",
+            "shares",
+            "amount",
+            "positionId",
+            "protocolVaultId",
+            "lifecycle",
+            "premiumEarned",
+            "collateral",
+            "assignedWeth",
+            "reportNonce",
+        }
+        return {
+            key: value
+            for key, value in row.get("payload", {}).items()
+            if key in allowed
+        }
+
+    @staticmethod
+    def _encode_cursor(row: dict[str, Any]) -> str:
+        raw = json.dumps(
+            [int(row["block_number"]), int(row["log_index"])], separators=(",", ":")
+        )
+        return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> tuple[int, int]:
+        try:
+            values = json.loads(
+                base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
+            )
+            if len(values) != 2 or min(values) < 0:
+                raise ValueError
+            return int(values[0]), int(values[1])
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid activity cursor") from exc
 
 
-def build_csp_service() -> CspVaultService:
-    return CspVaultService(
-        build_csp_reader(),
-        vault_key=settings.csp_vault_key,
-        chain_id=settings.csp_chain_id,
-        vault_address=settings.csp_vault_address,
-        usdc_address=settings.csp_usdc_address,
-        weth_address=settings.csp_weth_address,
-        ttl_seconds=settings.csp_snapshot_ttl_seconds,
-        stale_seconds=settings.csp_snapshot_stale_seconds,
-        recent_batch_limit=settings.csp_recent_batch_limit,
-        max_batch_scan=settings.csp_max_batch_scan,
-        user_cache_size=settings.csp_user_cache_size,
-    )
+def build_fund_service() -> FundService:
+    return FundService(SupabaseFundRepository())

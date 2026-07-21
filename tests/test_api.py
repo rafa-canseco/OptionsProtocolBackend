@@ -364,6 +364,67 @@ def test_fund_indexer_rpc_validation_precedes_task_creation(monkeypatch):
             pass
 
 
+@pytest.mark.parametrize(
+    ("rpc_url", "private_keys", "message"),
+    [
+        ("", "0x" + f"{1:064x}", "RPC_URL"),
+        ("https://rpc.example", "", "PRIVATE_KEYS"),
+        ("https://rpc.example", "malformed", "Invalid.*PRIVATE_KEYS"),
+        ("https://rpc.example", ", ,", "contains no keys"),
+        (
+            "https://rpc.example",
+            ",".join(["0x" + f"{1:064x}"] * 2),
+            "duplicate reporters",
+        ),
+    ],
+)
+def test_nav_reporter_validation_precedes_task_creation(
+    monkeypatch, rpc_url, private_keys, message
+):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", rpc_url)
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_reporter_private_keys", private_keys
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        with TestClient(main_module.app):
+            pass
+
+
+def test_nav_reporter_lease_is_bounded_before_task_creation(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_reporter_private_keys",
+        "0x" + f"{1:064x}",
+    )
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_lease_seconds", 14)
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match="LEASE_SECONDS must be between 15 and 900"):
+        with TestClient(main_module.app):
+            pass
+
+
 # --- Rate limiting ---
 
 

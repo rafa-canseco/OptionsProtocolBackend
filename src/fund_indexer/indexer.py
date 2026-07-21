@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from web3 import Web3
@@ -336,6 +337,7 @@ def _persist_window(
             block_hash,
         )
         reconciliation = reconcile(projected, snapshot)
+        indexed_at = _block_timestamp(w3, to_block)
         snapshot_state = dict(
             positions_hash=snapshot.strategy_positions_hash,
             reporter_set_version=snapshot.reporter_set_version,
@@ -347,6 +349,22 @@ def _persist_window(
             performance_fee_bps=snapshot.performance_fee_bps,
             high_water_mark=str(snapshot.high_water_mark),
             last_report_nonce=snapshot.last_report_nonce,
+            accounted_idle_assets=str(snapshot.accounted_idle_assets),
+            virtual_shares=str(snapshot.virtual_shares),
+            deposits_paused=snapshot.deposits_paused,
+            redemptions_paused=snapshot.redemptions_paused,
+            execution_lock_owner=(
+                None
+                if int(snapshot.execution_lock_owner, 16) == 0
+                else snapshot.execution_lock_owner
+            ),
+            has_active_processing=snapshot.has_active_processing,
+            fund_flow_nonce=snapshot.fund_flow_nonce,
+            idle_state_hash=snapshot.idle_state_hash,
+            as_of_block=snapshot.block_number,
+            as_of_block_hash=snapshot.block_hash,
+            reconciled=reconciliation["passed"],
+            indexed_at=indexed_at,
         )
         projected.fund.update(snapshot_state)
         projection["fund_state"][0].update(snapshot_state)
@@ -424,6 +442,20 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
                 "performance_fee_bps": 0,
                 "high_water_mark": "0",
                 "last_report_nonce": 0,
+                "accounted_idle_assets": "0",
+                "virtual_shares": "0",
+                "deposits_paused": True,
+                "redemptions_paused": True,
+                "execution_lock_owner": None,
+                "has_active_processing": False,
+                "fund_flow_nonce": 0,
+                "idle_state_hash": None,
+                "as_of_block": block_number,
+                "as_of_block_hash": None,
+                "reconciled": False,
+                "indexed_at": datetime.fromtimestamp(
+                    block_number, timezone.utc
+                ).isoformat(),
                 "nav_valid_after_block": None,
                 "nav_valid_until_block": None,
                 "last_event_block": block_number,
@@ -561,6 +593,26 @@ def _verify_terminal_hash(w3: Web3, block_number: int, expected: str) -> None:
         )
 
 
+def _block_timestamp(w3: Web3, block_number: int) -> str:
+    block = w3.eth.get_block(block_number)
+    timestamp = int(block.get("timestamp", block_number))
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _store_confirmed_head(w3: Web3, chain_id: int) -> None:
+    block_number = int(w3.eth.block_number) - CONFIRMATIONS
+    block = w3.eth.get_block(block_number)
+    get_client().table("v2_confirmed_chain_heads").upsert(
+        {
+            "chain_id": chain_id,
+            "block_number": block_number,
+            "block_hash": Web3.to_hex(block["hash"]),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="chain_id",
+    ).execute()
+
+
 async def run() -> None:
     if not settings.rpc_url:
         raise RuntimeError("RPC_URL is required for the tokenized fund indexer")
@@ -568,6 +620,7 @@ async def run() -> None:
     while True:
         try:
             for registry in _load_registries():
+                _store_confirmed_head(w3, registry.chain_id)
                 index_registry_once(w3, registry)
         except asyncio.CancelledError:
             return

@@ -40,6 +40,14 @@ class OnchainFundSnapshot:
     performance_fee_bps: int = 0
     high_water_mark: int = 0
     last_report_nonce: int = 0
+    accounted_idle_assets: int = 0
+    virtual_shares: int = 0
+    deposits_paused: bool = True
+    redemptions_paused: bool = True
+    execution_lock_owner: str = "0x0000000000000000000000000000000000000000"
+    has_active_processing: bool = False
+    fund_flow_nonce: int = 0
+    idle_state_hash: str = "0x" + "00" * 32
 
 
 def reconcile(
