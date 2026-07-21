@@ -52,6 +52,11 @@ async def lifespan(app: FastAPI):
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
+    if settings.tokenized_fund_indexer_enabled and not settings.rpc_url:
+        raise RuntimeError(
+            "RPC_URL is required when TOKENIZED_FUND_INDEXER_ENABLED=true"
+        )
+
     tasks = []
 
     has_on_chain_config = (
@@ -76,6 +81,12 @@ async def lifespan(app: FastAPI):
         logger.info(
             "On-chain bots not started: contract addresses or operator key not configured"
         )
+
+    if settings.tokenized_fund_indexer_enabled:
+        from src.fund_indexer import indexer as fund_indexer
+
+        tasks.append(asyncio.create_task(fund_indexer.run()))
+        logger.info("Tokenized fund indexer started")
 
     # Yield indexer needs controller + margin pool addresses
     if settings.controller_address and settings.margin_pool_address:

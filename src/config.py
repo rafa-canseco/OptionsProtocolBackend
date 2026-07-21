@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Bot intervals
     otoken_publish_interval_seconds: int = 300  # 5 minutes
     event_poll_interval_seconds: int = 30
+    tokenized_fund_indexer_enabled: bool = False
+    multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
     circuit_breaker_poll_seconds: int = 10
 
     # Circuit breaker
