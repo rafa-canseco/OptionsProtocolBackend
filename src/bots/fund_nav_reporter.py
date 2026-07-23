@@ -12,9 +12,9 @@ async def run() -> None:
     """Run the configured reporter factory at the configured interval."""
     from src.fund_nav.runtime import build_reporter
 
-    reporter = build_reporter()
     while True:
         try:
+            reporter = build_reporter()
             result = await asyncio.to_thread(reporter.run_once)
             logger.info(
                 "Fund NAV reporter run status=%s reason=%s",

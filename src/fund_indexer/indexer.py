@@ -600,6 +600,11 @@ def _block_timestamp(w3: Web3, block_number: int) -> str:
 
 
 def _store_confirmed_head(w3: Web3, chain_id: int) -> None:
+    observed_chain_id = int(w3.eth.chain_id)
+    if observed_chain_id != chain_id:
+        raise ValueError(
+            f"RPC chain mismatch: registry={chain_id}, rpc={observed_chain_id}"
+        )
     block_number = int(w3.eth.block_number) - CONFIRMATIONS
     block = w3.eth.get_block(block_number)
     get_client().table("v2_confirmed_chain_heads").upsert(

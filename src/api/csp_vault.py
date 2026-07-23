@@ -30,17 +30,30 @@ def get_fund_service() -> FundService:
     return _service
 
 
-def _headers(model, private: bool = False) -> dict[str, str]:
+def _headers(
+    model, private: bool = False, revalidate: bool = False
+) -> dict[str, str]:
     payload = model.model_dump_json(by_alias=True).encode()
     visibility = "private" if private else "public"
+    cache_control = (
+        f"{visibility}, no-cache"
+        if revalidate
+        else f"{visibility}, max-age=60, stale-while-revalidate=300"
+    )
     return {
         "ETag": f'W/"{hashlib.sha256(payload).hexdigest()}"',
-        "Cache-Control": f"{visibility}, max-age=60, stale-while-revalidate=300",
+        "Cache-Control": cache_control,
     }
 
 
-def _respond(model, request: Request, response: Response, private: bool = False):
-    headers = _headers(model, private)
+def _respond(
+    model,
+    request: Request,
+    response: Response,
+    private: bool = False,
+    revalidate: bool = False,
+):
+    headers = _headers(model, private, revalidate)
     if request.headers.get("if-none-match") == headers["ETag"]:
         return Response(status_code=304, headers=headers)
     for name, value in headers.items():
@@ -66,7 +79,7 @@ async def list_funds(request: Request, response: Response):
 @router.get("/{fund_key}", response_model=FundSummaryResponse)
 async def get_fund(fund_key: str, request: Request, response: Response):
     model = await _call(get_fund_service().summary, fund_key)
-    return _respond(model, request, response)
+    return _respond(model, request, response, revalidate=True)
 
 
 @router.get("/{fund_key}/positions/{address}", response_model=FundPositionResponse)
@@ -76,7 +89,7 @@ async def get_position(
     if not Web3.is_address(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
     model = await _call(get_fund_service().position, fund_key, address.lower())
-    return _respond(model, request, response, private=True)
+    return _respond(model, request, response, private=True, revalidate=True)
 
 
 @router.get("/{fund_key}/redemptions/{address}", response_model=FundPositionResponse)
@@ -89,7 +102,7 @@ async def get_redemptions(
 @router.get("/{fund_key}/config", response_model=FundConfigResponse)
 async def get_config(fund_key: str, request: Request, response: Response):
     model = await _call(get_fund_service().config, fund_key)
-    return _respond(model, request, response)
+    return _respond(model, request, response, revalidate=True)
 
 
 @router.get("/{fund_key}/activity", response_model=ActivityResponse)

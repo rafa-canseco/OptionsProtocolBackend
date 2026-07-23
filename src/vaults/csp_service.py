@@ -68,7 +68,13 @@ class FundRepository(Protocol):
 
 class SupabaseFundRepository:
     def registries(self) -> list[dict[str, Any]]:
-        result = get_client().table("v2_fund_registry").select("*").execute()
+        result = (
+            get_client()
+            .table("v2_fund_registry")
+            .select("*")
+            .eq("enabled", True)
+            .execute()
+        )
         return result.data or []
 
     def state(self, chain_id: int, fund: str) -> dict[str, Any] | None:
@@ -157,7 +163,11 @@ class FundService:
 
     def list_funds(self) -> FundListResponse:
         return FundListResponse(
-            funds=[self._registry(row) for row in self.repository.registries()]
+            funds=[
+                self._registry(row)
+                for row in self.repository.registries()
+                if row.get("enabled", False)
+            ]
         )
 
     def summary(self, fund_key: str) -> FundSummaryResponse:
@@ -295,7 +305,9 @@ class FundService:
         if not re.fullmatch(r"[a-z0-9][a-z0-9:_-]{0,127}", fund_key):
             raise ValueError("Invalid fund key")
         rows = [
-            row for row in self.repository.registries() if row["fund_key"] == fund_key
+            row
+            for row in self.repository.registries()
+            if row.get("enabled", False) and row["fund_key"] == fund_key
         ]
         if not rows:
             raise UnknownFundError(fund_key)
@@ -413,6 +425,15 @@ class FundService:
             return "AMBIGUOUS_BINDING"
         if not REQUIRED_TRUSTED_ROLES.issubset(by_role):
             return "MISSING_TRUSTED_DEPLOYMENT"
+        expected_addresses = {
+            "fund_vault": registry["fund_address"],
+            "fund_share": registry["share_token"],
+        }
+        if any(
+            by_role[role]["contract_address"].lower() != address.lower()
+            for role, address in expected_addresses.items()
+        ):
+            return "UNTRUSTED_BINDING"
         if any(int(row["interface_version"]) not in {1} for row in by_role.values()):
             return "UNSUPPORTED_INTERFACE"
         if any(not by_role[role].get("implementation_address") for role in PROXY_ROLES):

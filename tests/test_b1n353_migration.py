@@ -34,6 +34,15 @@ def test_coherent_state_payload_columns_match_python() -> None:
     assert "v2_ingest_fund_window_b1n340" in MIGRATION
 
 
+def test_replayed_window_returns_before_new_projection_writes() -> None:
+    replay_guard = MIGRATION.index("IF expected_block = p_to_block + 1")
+    replay_return = MIGRATION.index("RETURN;", replay_guard)
+    predecessor_call = MIGRATION.index("PERFORM v2_ingest_fund_window_b1n340")
+    state_update = MIGRATION.index("UPDATE v2_fund_state SET", predecessor_call)
+
+    assert replay_guard < replay_return < predecessor_call < state_update
+
+
 def test_report_runs_are_idempotent_and_record_blocked_status() -> None:
     assert "CREATE TABLE v2_nav_report_runs" in MIGRATION
     assert "'building', 'blocked', 'simulated', 'reconciling'," in MIGRATION
@@ -59,6 +68,14 @@ def test_signed_transaction_material_is_service_only_and_paired() -> None:
     assert "(transaction_hash IS NULL) = (signed_transaction IS NULL)" in MIGRATION
     assert ") FROM PUBLIC" in MIGRATION
     assert ") TO service_role" in MIGRATION
+
+
+def test_operational_tables_and_legacy_ingest_are_service_only() -> None:
+    assert "v2_confirmed_chain_heads ENABLE ROW LEVEL SECURITY" in MIGRATION
+    assert "v2_csp_option_observations ENABLE ROW LEVEL SECURITY" in MIGRATION
+    assert "v2_redemption_batch_states ENABLE ROW LEVEL SECURITY" in MIGRATION
+    assert "REVOKE EXECUTE ON FUNCTION v2_ingest_fund_window_b1n340" in MIGRATION
+    assert "SECURITY DEFINER" in MIGRATION
 
 
 def test_confirmed_revert_finalization_is_guarded_and_forensic() -> None:

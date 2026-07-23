@@ -95,6 +95,17 @@ def test_confirmed_head_checkpoint_is_persisted_without_api_rpc(monkeypatch) -> 
     assert client.conflict == "chain_id"
 
 
+def test_confirmed_head_rejects_wrong_rpc_chain_before_persistence(monkeypatch) -> None:
+    w3 = FakeWeb3()
+    w3.eth.chain_id = 1
+    monkeypatch.setattr(
+        indexer, "get_client", lambda: pytest.fail("head must not be persisted")
+    )
+
+    with pytest.raises(ValueError, match="RPC chain mismatch"):
+        indexer._store_confirmed_head(w3, 84532)
+
+
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(
         indexer,

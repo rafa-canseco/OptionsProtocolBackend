@@ -28,6 +28,7 @@ class FakeRepository:
             "accounting_asset": USDC,
             "weth": WETH,
             "deployment_status": "DEPLOYED",
+            "enabled": True,
             "share_symbol": "b1CSP",
             "share_decimals": 18,
             "accounting_asset_symbol": "USDC",
@@ -62,7 +63,7 @@ class FakeRepository:
         self.bindings = [
             {
                 "contract_role": role,
-                "contract_address": FUND,
+                "contract_address": SHARE if role == "fund_share" else FUND,
                 "interface_version": 1,
                 "implementation_address": FUND if role in PROXY_ROLES else None,
                 "valid_from_block": 1,
@@ -109,6 +110,35 @@ def test_registry_summary_and_fund_inventory() -> None:
     assert summary.composition.assigned_weth == "2"
     assert summary.composition.strategy_accounting_assets == "1500"
     assert summary.actions.deposit.available is True
+
+
+def test_disabled_incomplete_funds_are_not_listed_or_addressable() -> None:
+    repository = FakeRepository()
+    repository.registry.update(
+        enabled=False,
+        share_symbol=None,
+        share_decimals=None,
+        accounting_asset_symbol=None,
+        accounting_asset_decimals=None,
+    )
+    service = FundService(repository)
+
+    assert service.list_funds().funds == []
+    with pytest.raises(LookupError):
+        service.summary("base-sepolia:csp")
+
+
+def test_registry_binding_mismatch_disables_writes() -> None:
+    repository = FakeRepository()
+    fund_vault = next(
+        row for row in repository.bindings if row["contract_role"] == "fund_vault"
+    )
+    fund_vault["contract_address"] = USER
+
+    config = FundService(repository).config("base-sepolia:csp")
+
+    assert config.writes_enabled is False
+    assert config.blocked_reason_code == "UNTRUSTED_BINDING"
 
 
 def test_empty_fund_is_displayable_without_division_by_zero() -> None:
@@ -325,7 +355,7 @@ def test_compact_routes_validate_addresses_and_cache(monkeypatch) -> None:
     invalid_key = client.get("/v2/vaults/INVALID!")
 
     assert first.status_code == 200 and cached.status_code == 304
-    assert first.headers["cache-control"].startswith("public, max-age=60")
-    assert position.headers["cache-control"].startswith("private, max-age=60")
+    assert first.headers["cache-control"] == "public, no-cache"
+    assert position.headers["cache-control"] == "private, no-cache"
     assert invalid.status_code == 400
     assert invalid_key.status_code == 400

@@ -55,6 +55,8 @@ CREATE TABLE v2_confirmed_chain_heads (
     observed_at TIMESTAMPTZ NOT NULL
 );
 
+ALTER TABLE v2_confirmed_chain_heads ENABLE ROW LEVEL SECURITY;
+
 CREATE TABLE v2_csp_option_observations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     chain_id BIGINT NOT NULL,
@@ -83,6 +85,8 @@ CREATE TABLE v2_csp_option_observations (
     ),
     UNIQUE (chain_id, valuator_address, digest)
 );
+
+ALTER TABLE v2_csp_option_observations ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX v2_csp_option_observations_snapshot_idx
     ON v2_csp_option_observations (
@@ -122,6 +126,7 @@ CREATE TABLE v2_nav_report_runs (
 );
 
 ALTER TABLE v2_nav_report_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE v2_redemption_batch_states ENABLE ROW LEVEL SECURITY;
 
 CREATE UNIQUE INDEX v2_nav_report_runs_attempt_idx
     ON v2_nav_report_runs (chain_id, fund_address, report_nonce);
@@ -334,12 +339,37 @@ CREATE OR REPLACE FUNCTION v2_ingest_fund_window(
     p_projection JSONB
 ) RETURNS VOID
 LANGUAGE plpgsql
-SECURITY INVOKER
+SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
     state JSONB;
+    expected_block BIGINT;
+    committed_from_block BIGINT;
+    committed_to_block BIGINT;
+    committed_block_hash TEXT;
 BEGIN
+    SELECT
+        next_block, last_window_from_block, last_window_to_block, last_block_hash
+    INTO
+        expected_block, committed_from_block, committed_to_block,
+        committed_block_hash
+    FROM v2_indexer_checkpoints
+    WHERE chain_id = p_chain_id
+      AND fund_address = p_fund_address
+      AND indexer_name = p_indexer_name
+    FOR UPDATE;
+
+    IF expected_block = p_to_block + 1
+       AND committed_from_block = p_from_block
+       AND committed_to_block = p_to_block THEN
+        IF committed_block_hash IS DISTINCT FROM p_last_block_hash THEN
+            RAISE EXCEPTION 'Replayed fund window hash mismatch: expected %, received %',
+                committed_block_hash, p_last_block_hash;
+        END IF;
+        RETURN;
+    END IF;
+
     PERFORM v2_ingest_fund_window_b1n340(
         p_chain_id, p_fund_address, p_indexer_name, p_from_block,
         p_to_block, p_last_block_hash, p_events, p_projection
@@ -382,3 +412,20 @@ BEGIN
         unwind_committed = EXCLUDED.unwind_committed;
 END;
 $$;
+
+REVOKE EXECUTE ON FUNCTION v2_ingest_fund_window_b1n340(
+    BIGINT, TEXT, TEXT, BIGINT, BIGINT, TEXT, JSONB, JSONB
+) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION v2_ingest_fund_window(
+    BIGINT, TEXT, TEXT, BIGINT, BIGINT, TEXT, JSONB, JSONB
+) FROM PUBLIC;
+
+DO $access$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+        GRANT EXECUTE ON FUNCTION v2_ingest_fund_window(
+            BIGINT, TEXT, TEXT, BIGINT, BIGINT, TEXT, JSONB, JSONB
+        ) TO service_role;
+    END IF;
+END;
+$access$;

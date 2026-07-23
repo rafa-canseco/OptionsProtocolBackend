@@ -1,9 +1,12 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from eth_account import Account
 from web3 import Web3
 
+from src.bots import fund_nav_reporter
+from src.fund_nav import runtime
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
@@ -82,6 +85,38 @@ def test_registry_loader_requires_complete_supported_bindings() -> None:
     assert trusted.trust_reason is None
     assert missing.trust_reason == "MISSING_TRUSTED_DEPLOYMENT"
     assert unsupported.trust_reason == "UNSUPPORTED_INTERFACE"
+
+
+@pytest.mark.asyncio
+async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> None:
+    built = []
+    sleeps = 0
+
+    class Reporter:
+        def __init__(self, snapshot_block):
+            self.snapshot_block = snapshot_block
+
+        def run_once(self):
+            return ReportRun(status="confirmed", reason_code=str(self.snapshot_block))
+
+    def build_reporter():
+        reporter = Reporter(len(built) + 100)
+        built.append(reporter.snapshot_block)
+        return reporter
+
+    async def sleep(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(runtime, "build_reporter", build_reporter)
+    monkeypatch.setattr(fund_nav_reporter.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await fund_nav_reporter.run()
+
+    assert built == [100, 101]
 
 
 def test_blocked_and_runtime_reporters_record_without_rpc_send() -> None:
