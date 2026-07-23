@@ -104,6 +104,14 @@ def read_onchain_snapshot(
         performance_fee_bps=values["performance_fee_bps"],
         high_water_mark=values["high_water_mark"],
         last_report_nonce=values["last_report_nonce"],
+        accounted_idle_assets=values["accounted_idle_assets"],
+        virtual_shares=values["virtual_shares"],
+        deposits_paused=values["deposits_paused"],
+        redemptions_paused=values["redemptions_paused"],
+        execution_lock_owner=values["execution_lock_owner"],
+        has_active_processing=values["has_active_processing"],
+        fund_flow_nonce=values["fund_flow_nonce"],
+        idle_state_hash=values["idle_state_hash"],
         position_ledgers=tuple(values["position_ledgers"]),
     )
 
@@ -157,6 +165,12 @@ def _base_calls(addresses: dict[str, str], asset: str) -> list[tuple[str, bool, 
         _call(addresses["fund_accounting"], "reporterSetVersion()"),
         _call(addresses["fund_accounting"], "reporterThreshold()"),
         _call(addresses["fund_accounting"], "lastReportNonce()"),
+        _call(addresses["fund_vault"], "accountedIdleAssets()"),
+        _call(addresses["fund_vault"], "virtualShares()"),
+        _call(addresses["fund_vault"], "depositsPaused()"),
+        _call(addresses["fund_vault"], "redemptionsPaused()"),
+        _call(addresses["fund_vault"], "executionLockOwner()"),
+        _call(addresses["fund_flow_manager"], "hasActiveProcessing()"),
     ]
 
 
@@ -206,7 +220,7 @@ def _decode_results(
     adapters: list[str],
     reporter_count: int,
 ) -> dict[str, Any]:
-    expected_count = 12 + len(adapters) + 3 * len(positions) + reporter_count
+    expected_count = 18 + len(adapters) + 3 * len(positions) + reporter_count
     if len(results) != expected_count or not all(success for success, _ in results):
         raise RuntimeError("A required fund reconciliation Multicall read failed")
     output = {
@@ -242,6 +256,8 @@ def _decode_results(
         results[5][1],
     )
     output["nav_positions_hash"] = Web3.to_hex(nav[10])
+    output["fund_flow_nonce"] = nav[13]
+    output["idle_state_hash"] = Web3.to_hex(nav[14])
     output["strategy_positions_hash"] = Web3.to_hex(
         decode(["bytes32"], results[6][1])[0]
     )
@@ -261,8 +277,14 @@ def _decode_results(
         reporter_threshold=decode(["uint16"], results[10][1])[0],
         active_reporter_count=reporter_count,
         last_report_nonce=decode(["uint64"], results[11][1])[0],
+        accounted_idle_assets=decode(["uint256"], results[12][1])[0],
+        virtual_shares=decode(["uint256"], results[13][1])[0],
+        deposits_paused=decode(["bool"], results[14][1])[0],
+        redemptions_paused=decode(["bool"], results[15][1])[0],
+        execution_lock_owner=decode(["address"], results[16][1])[0].lower(),
+        has_active_processing=decode(["bool"], results[17][1])[0],
     )
-    offset = 12
+    offset = 18
     output["adapter_nonces"] = [
         (adapter, decode(["uint64"], results[offset + index][1])[0])
         for index, adapter in enumerate(adapters)

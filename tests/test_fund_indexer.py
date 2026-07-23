@@ -83,6 +83,29 @@ def test_event_topics_use_rpc_hex_format() -> None:
     assert all(topic.startswith("0x") for topic in EVENTS_BY_TOPIC)
 
 
+def test_confirmed_head_checkpoint_is_persisted_without_api_rpc(monkeypatch) -> None:
+    client = HeadClient()
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+
+    indexer._store_confirmed_head(FakeWeb3(), 84532)
+
+    assert client.table_name == "v2_confirmed_chain_heads"
+    assert client.row["chain_id"] == 84532
+    assert client.row["block_number"] == 2_995
+    assert client.conflict == "chain_id"
+
+
+def test_confirmed_head_rejects_wrong_rpc_chain_before_persistence(monkeypatch) -> None:
+    w3 = FakeWeb3()
+    w3.eth.chain_id = 1
+    monkeypatch.setattr(
+        indexer, "get_client", lambda: pytest.fail("head must not be persisted")
+    )
+
+    with pytest.raises(ValueError, match="RPC chain mismatch"):
+        indexer._store_confirmed_head(w3, 84532)
+
+
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(
         indexer,
@@ -403,6 +426,16 @@ def test_authoritative_accounting_state_is_reconciled_then_persisted(
         performance_fee_bps=0,
         high_water_mark=1,
         last_report_nonce=7,
+        accounted_idle_assets=12,
+        virtual_shares=10**18,
+        deposits_paused=False,
+        redemptions_paused=True,
+        execution_lock_owner="0x0000000000000000000000000000000000000000",
+        has_active_processing=False,
+        fund_flow_nonce=4,
+        idle_state_hash="0x03",
+        block_number=100,
+        block_hash=f"0x{100:064x}",
     )
     observed_projected_state = []
 
@@ -426,6 +459,9 @@ def test_authoritative_accounting_state_is_reconciled_then_persisted(
     assert observed_projected_state == [([reporter], 0)]
     assert state["active_reporters"] == [replacement]
     assert state["last_report_nonce"] == 7
+    assert state["accounted_idle_assets"] == "12"
+    assert state["as_of_block"] == 100
+    assert state["reconciled"] is False
 
 
 def test_ambiguous_rpc_response_retries_exact_window(monkeypatch, registry) -> None:
@@ -537,6 +573,20 @@ class CapturingRpcClient:
     def rpc(self, name, params):
         assert name == "v2_ingest_fund_window"
         self.params = params
+        return self
+
+    def execute(self):
+        return None
+
+
+class HeadClient:
+    def table(self, name):
+        self.table_name = name
+        return self
+
+    def upsert(self, row, on_conflict):
+        self.row = row
+        self.conflict = on_conflict
         return self
 
     def execute(self):

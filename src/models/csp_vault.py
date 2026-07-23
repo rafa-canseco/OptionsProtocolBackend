@@ -1,122 +1,131 @@
-"""Product-level API models for the v2 ETH/USDC CSP vault."""
+"""Product models for tokenized CSP funds."""
 
-from __future__ import annotations
-
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 
-class CspModel(BaseModel):
+class FundModel(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class TokenMetadata(CspModel):
-    symbol: str
+class TokenMetadata(FundModel):
     address: str
+    symbol: str
     decimals: int
 
 
-class VaultAssets(CspModel):
-    deposit: TokenMetadata
-    assigned: TokenMetadata
-
-
-class VaultSummary(CspModel):
-    total_managed_assets: str
-    total_shares: str
-    share_price_assets: str
-    available_idle_assets: str
-    active_collateral: str
-    active_batch_count: int
-    utilization_bps: int
-    pending_deposit_assets: str
-    pending_withdrawal_shares: str
-    accounted_underlying_assets: str
-
-
-class CspBatchView(CspModel):
-    batch_id: int
-    protocol_vault_id: int
-    epoch_id: int
-    status: str
-    settlement_classification: str = "provisional"
-    o_token: str
-    strike_price: str
-    expiry: int
-    amount: str
-    collateral: str
-    premium_earned: str
-    collateral_returned: str
-    underlying_received: str
-    assignment_shortfall: str
-
-
-class CurrentCycle(CspModel):
-    epoch_id: int
-    status: str
-    started_at: int
-    ended_at: int | None
-    premium_earned: str
-    performance_fee: str
-    assignment_shortfall: str
-    closed: bool
-    batches_truncated: bool
-    batches: list[CspBatchView]
-
-
-class VaultResponse(CspModel):
-    vault_key: str
-    chain_id: int
-    vault_address: str
-    assets: VaultAssets
-    status: str
-    summary: VaultSummary
-    current_cycle: CurrentCycle
-    as_of_block: int
-    indexed_at: str
-    finality: str = "head"
-    stale: bool = False
-
-
-class WithdrawalPosition(CspModel):
-    epoch_id: int | None
-    shares: str
-    claimable: bool
-    usdc_assets: str
-    weth_assets: str
-
-
-class UserPosition(CspModel):
-    active_shares: str
-    active_assets: str
-    pending_deposit_assets: str
-    withdrawal: WithdrawalPosition
-    claimable_assigned_weth: str
-
-
-class ActionAvailability(CspModel):
+class ActionAvailability(FundModel):
     available: bool
-    reason: str | None = None
-    mode: str | None = None
+    reason_code: str | None = None
 
 
-class UserActions(CspModel):
-    deposit: ActionAvailability
-    cancel_pending_deposit: ActionAvailability
-    withdraw_idle: ActionAvailability
-    request_withdraw: ActionAvailability
-    claim_withdraw: ActionAvailability
-    claim_assigned_weth: ActionAvailability
-
-
-class UserPositionResponse(CspModel):
-    vault_key: str
+class FundRegistryItem(FundModel):
+    fund_key: str
     chain_id: int
-    vault_address: str
+    fund_address: str
+    share_token: TokenMetadata
+    accounting_asset: TokenMetadata
+    deployment_status: str
+
+
+class FundListResponse(FundModel):
+    funds: list[FundRegistryItem]
+
+
+class FundComposition(FundModel):
+    idle_assets: str
+    strategy_accounting_assets: str
+    assigned_weth: str
+    reserved_claim_assets: str
+
+
+class NavWindow(FundModel):
+    report_nonce: int
+    valid_after_block: int | None
+    valid_until_block: int | None
+    stale: bool
+
+
+class FundStatus(FundModel):
+    reconciled: bool
+    deposits_paused: bool
+    redemptions_paused: bool
+    execution_locked: bool
+    flow_processing: bool
+
+
+class FundActions(FundModel):
+    deposit: ActionAvailability
+    request_redemption: ActionAvailability
+    cancel_redemption: ActionAvailability
+    claim_redemption: ActionAvailability
+
+
+class FundSummaryResponse(FundModel):
+    fund: FundRegistryItem
+    net_assets: str
+    share_supply: str
+    virtual_shares: str
+    share_price_assets: str
+    composition: FundComposition
+    nav: NavWindow
+    status: FundStatus
+    actions: FundActions
+    as_of_block: int | None
+    as_of_block_hash: str | None
+    indexed_at: str | None
+    stale: bool
+
+
+class RedemptionView(FundModel):
+    pending_shares: str = "0"
+    claimable_shares: str = "0"
+    claimable_assets: str = "0"
+    status: str = "none"
+    next_action: str = "none"
+    latest_batch_id: int = 0
+    latest_batch_processing: bool = False
+    latest_batch_unwind_committed: bool = False
+
+
+class FundPositionResponse(FundModel):
+    fund_key: str
     address: str
-    position: UserPosition
-    actions: UserActions
-    as_of_block: int
-    indexed_at: str
-    finality: str = "head"
-    stale: bool = False
+    shares: str
+    accounting_value: str
+    redemption: RedemptionView
+    actions: FundActions
+    as_of_block: int | None
+    indexed_at: str | None
+    stale: bool
+
+
+class TrustedContract(FundModel):
+    role: str
+    address: str
+    implementation_address: str | None = None
+    interface_version: int
+
+
+class FundConfigResponse(FundModel):
+    fund_key: str
+    deployment_status: str
+    contracts: list[TrustedContract]
+    capabilities: FundActions
+    writes_enabled: bool
+    blocked_reason_code: str | None
+
+
+class ActivityItem(FundModel):
+    activity_type: str
+    transaction_hash: str
+    block_number: int
+    log_index: int
+    wallet_address: str | None
+    details: dict[str, str | int | bool | None]
+
+
+class ActivityResponse(FundModel):
+    items: list[ActivityItem]
+    next_cursor: str | None = None
+    limit: int = Field(ge=1, le=100)

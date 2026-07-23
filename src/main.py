@@ -18,6 +18,7 @@ from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
+    get_fund_nav_reporter_private_keys,
     settings,
     has_solana_config,
     has_bridge_config,
@@ -56,6 +57,25 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "RPC_URL is required when TOKENIZED_FUND_INDEXER_ENABLED=true"
         )
+    if settings.fund_nav_reporter_enabled and not settings.rpc_url:
+        raise RuntimeError("RPC_URL is required when FUND_NAV_REPORTER_ENABLED=true")
+    if (
+        settings.fund_nav_reporter_enabled
+        and not settings.fund_nav_reporter_private_keys
+    ):
+        raise RuntimeError(
+            "FUND_NAV_REPORTER_PRIVATE_KEYS is required when "
+            "FUND_NAV_REPORTER_ENABLED=true"
+        )
+    if settings.fund_nav_reporter_enabled:
+        if not 15 <= settings.fund_nav_reporter_lease_seconds <= 900:
+            raise RuntimeError(
+                "FUND_NAV_REPORTER_LEASE_SECONDS must be between 15 and 900"
+            )
+        try:
+            get_fund_nav_reporter_private_keys()
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     tasks = []
 
@@ -87,6 +107,12 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(fund_indexer.run()))
         logger.info("Tokenized fund indexer started")
+
+    if settings.fund_nav_reporter_enabled:
+        from src.bots import fund_nav_reporter
+
+        tasks.append(asyncio.create_task(fund_nav_reporter.run()))
+        logger.info("Fund NAV reporter started")
 
     # Yield indexer needs controller + margin pool addresses
     if settings.controller_address and settings.margin_pool_address:
@@ -131,9 +157,7 @@ async def lifespan(app: FastAPI):
                 ", ".join(started_solana_bots),
             )
         else:
-            logger.info(
-                "Solana runtime enabled but no Solana bots selected by flags"
-            )
+            logger.info("Solana runtime enabled but no Solana bots selected by flags")
     elif has_solana_config():
         logger.info(
             "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true or enable an individual bot flag to opt in)",

@@ -71,6 +71,21 @@ The stored model contains current fund/component state, transferable share
 balances, redemption claims, CSP position lifecycle, fund-level USDC/WETH
 composition, NAV history, product activity, and reconciliation history.
 
+B1N-353 additionally stores `accounted_idle_assets`, `virtual_shares`, pause
+flags, execution lock owner, active processing state, flow nonce, idle hash,
+`as_of_block`, `as_of_block_hash`, `reconciled`, and `indexed_at` in the same
+ingestion transaction. Reads are pinned to the terminal block; its hash is
+checked around Multicall and before persistence. Exact terminal-hash replay
+remains idempotent.
+
+`v2_redemption_batch_states` stores each controller's latest batch ID and its
+processing and unwind-committed flags. Cancellation uses this controller-level
+projection rather than the fund-wide active-processing flag.
+
+The indexer also persists `v2_confirmed_chain_heads` once per polling cycle.
+Product action gating consumes this short-lived checkpoint rather than issuing
+an RPC request per API request.
+
 CSP position identity is `(adapter_address, position_id)`. V1 Controller and
 BatchSettler reads use that adapter as the vault owner, so IDs may safely repeat
 across adapter generations.
@@ -78,10 +93,8 @@ across adapter generations.
 Assigned WETH belongs to the fund. There is no per-holder WETH entitlement or
 share-generation projection.
 
-## Remaining validation
+## Migration validation
 
-The migration has static semantic assertions and mocked ambiguous-response
-retry coverage. This worktree has no local Postgres/Supabase integration
-harness, so the ingest function's exact replay, gap, overlap, and hash-mismatch
-branches still require execution against a disposable Supabase database before
-deployment.
+Static semantic assertions cover replay identity and payload agreement. The
+B1N-340 and B1N-353 migrations are also applied in filename order to a clean
+disposable PostgreSQL database during backend verification.

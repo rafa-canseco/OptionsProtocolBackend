@@ -26,6 +26,7 @@ class FundProjection:
     activities: list[dict[str, Any]] = field(default_factory=list)
     adapters: set[str] = field(default_factory=set)
     adapter_nonces: dict[str, int] = field(default_factory=dict)
+    open_redemption_batch_id: int = 1
 
     def export(self) -> dict[str, list[dict[str, Any]]]:
         chain_id = self.fund["chain_id"]
@@ -40,6 +41,16 @@ class FundProjection:
             ],
             "redemptions": [
                 {**common, "controller_address": controller, **row}
+                for controller, row in sorted(self.redemptions.items())
+            ],
+            "redemption_batch_states": [
+                {
+                    **common,
+                    "controller_address": controller,
+                    "latest_batch_id": row["latest_batch_id"],
+                    "processing": row["latest_batch_processing"],
+                    "unwind_committed": row["latest_batch_unwind_committed"],
+                }
                 for controller, row in sorted(self.redemptions.items())
             ],
             "positions": [
@@ -143,8 +154,9 @@ def _apply(projection: FundProjection, event: FundEvent) -> None:
         "PendingCancelled": _pending_cancelled,
         "ClaimReserved": _claim_reserved,
         "ClaimConsumed": _claim_consumed,
-        "RedeemBatchStarted": _activity_only("redemption_processing"),
-        "RedeemBatchProcessed": _activity_only("redemption_processed"),
+        "RedeemBatchSealed": _redeem_batch_sealed,
+        "RedeemBatchStarted": _redeem_batch_started,
+        "RedeemBatchProcessed": _redeem_batch_processed,
         "PositionOpened": _position_opened,
         "PositionTransitioned": _position_transitioned,
         "StrategyAllocated": _strategy_allocated,
@@ -327,6 +339,9 @@ def _redemption(projection: FundProjection, controller: str) -> dict[str, Any]:
             "claimable_assets": 0,
             "status": "none",
             "last_event_block": 0,
+            "latest_batch_id": 0,
+            "latest_batch_processing": False,
+            "latest_batch_unwind_committed": False,
         },
     )
 
@@ -342,6 +357,7 @@ def _redemption_status(row: dict[str, Any], terminal: str) -> str:
 def _redeem_requested(projection: FundProjection, event: FundEvent) -> None:
     row = _redemption(projection, event.args["controller"])
     row["pending_shares"] += integer(event.args["shares"])
+    row["latest_batch_id"] = projection.open_redemption_batch_id
     row["status"] = _redemption_status(row, "pending")
     row["last_event_block"] = event.block_number
     _activity(projection, event, "redemption_requested")
@@ -352,6 +368,8 @@ def _pending_cancelled(projection: FundProjection, event: FundEvent) -> None:
     row["pending_shares"] -= integer(event.args["shares"])
     if row["pending_shares"] < 0:
         raise ValueError("Pending redemption share underflow")
+    if row["pending_shares"] == 0:
+        _clear_latest_batch(row)
     row["status"] = _redemption_status(row, "cancelled")
     row["last_event_block"] = event.block_number
     _activity(projection, event, "redemption_cancelled")
@@ -366,6 +384,8 @@ def _claim_reserved(projection: FundProjection, event: FundEvent) -> None:
         raise ValueError("Pending redemption share underflow")
     row["claimable_shares"] += shares
     row["claimable_assets"] += assets
+    if row["pending_shares"] == 0:
+        _clear_latest_batch(row)
     row["status"] = _redemption_status(row, "claimable")
     row["last_event_block"] = event.block_number
     projection.fund["reserved_claim_assets"] = str(
@@ -391,6 +411,37 @@ def _claim_consumed(projection: FundProjection, event: FundEvent) -> None:
     row["status"] = _redemption_status(row, "claimed")
     row["last_event_block"] = event.block_number
     _activity(projection, event, "redemption_claimed")
+
+
+def _redeem_batch_sealed(projection: FundProjection, event: FundEvent) -> None:
+    batch_id = integer(event.args["batchId"])
+    projection.open_redemption_batch_id = batch_id + 1
+
+
+def _redeem_batch_started(projection: FundProjection, event: FundEvent) -> None:
+    _set_latest_batch_state(projection, integer(event.args["batchId"]), True)
+    _activity(projection, event, "redemption_processing")
+
+
+def _redeem_batch_processed(projection: FundProjection, event: FundEvent) -> None:
+    if event.args["roundComplete"]:
+        _set_latest_batch_state(projection, integer(event.args["batchId"]), False)
+    _activity(projection, event, "redemption_processed")
+
+
+def _set_latest_batch_state(
+    projection: FundProjection, batch_id: int, active: bool
+) -> None:
+    for row in projection.redemptions.values():
+        if row["latest_batch_id"] == batch_id:
+            row["latest_batch_processing"] = active
+            row["latest_batch_unwind_committed"] = active
+
+
+def _clear_latest_batch(row: dict[str, Any]) -> None:
+    row["latest_batch_id"] = 0
+    row["latest_batch_processing"] = False
+    row["latest_batch_unwind_committed"] = False
 
 
 def _position_opened(projection: FundProjection, event: FundEvent) -> None:

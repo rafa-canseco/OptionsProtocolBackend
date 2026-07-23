@@ -104,6 +104,12 @@ def test_multicall_result_decodes_adapter_and_v1_ledgers() -> None:
         (True, encode(["uint64"], [3])),
         (True, encode(["uint16"], [2])),
         (True, encode(["uint64"], [9])),
+        (True, encode(["uint256"], [700])),
+        (True, encode(["uint256"], [10**18])),
+        (True, encode(["bool"], [False])),
+        (True, encode(["bool"], [True])),
+        (True, encode(["address"], ["0x0000000000000000000000000000000000000000"])),
+        (True, encode(["bool"], [False])),
         (True, encode(["uint64"], [7])),
         (
             True,
@@ -138,6 +144,9 @@ def test_multicall_result_decodes_adapter_and_v1_ledgers() -> None:
     assert decoded["adapter_nonces"] == [(adapter, 7)]
     assert decoded["high_water_mark"] == 1_050_000
     assert decoded["last_report_nonce"] == 9
+    assert decoded["accounted_idle_assets"] == 700
+    assert decoded["virtual_shares"] == 10**18
+    assert decoded["redemptions_paused"] is True
     assert decoded["active_reporters"] == [
         target_address(),
         "0xf000000000000000000000000000000000000002",
@@ -321,6 +330,12 @@ def _base_snapshot_results() -> list[tuple[bool, bytes]]:
         (True, encode(["uint64"], [3])),
         (True, encode(["uint16"], [2])),
         (True, encode(["uint64"], [9])),
+        (True, encode(["uint256"], [700])),
+        (True, encode(["uint256"], [10**18])),
+        (True, encode(["bool"], [False])),
+        (True, encode(["bool"], [False])),
+        (True, encode(["address"], ["0x0000000000000000000000000000000000000000"])),
+        (True, encode(["bool"], [False])),
         (True, encode(["address"], [target_address()])),
         (
             True,
