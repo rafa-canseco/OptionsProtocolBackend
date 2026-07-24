@@ -308,7 +308,12 @@ def _persist_window(
         ),
     )
     projected = (
-        project_events(canonical, registry.accounting_asset, registry.weth)
+        project_events(
+            canonical,
+            registry.accounting_asset,
+            registry.weth,
+            to_block=to_block,
+        )
         if canonical
         else None
     )
@@ -317,17 +322,6 @@ def _persist_window(
         if projected is not None
         else _empty_projection(registry, to_block)
     )
-    if projection["fund_state"]:
-        fund_state = projection["fund_state"][0]
-        valid_after = fund_state.get("nav_valid_after_block")
-        valid_until = fund_state.get("nav_valid_until_block")
-        if (
-            valid_after is not None
-            and to_block < valid_after
-            or valid_until is not None
-            and to_block > valid_until
-        ):
-            fund_state["nav_stale"] = True
     if projected is not None:
         snapshot = read_onchain_snapshot(
             w3,

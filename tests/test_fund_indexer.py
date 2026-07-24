@@ -396,6 +396,42 @@ def test_terminal_hash_change_prevents_rpc_persistence(monkeypatch, registry) ->
         indexer._persist_window(w3, registry, 100, 100, "0x" + "aa".zfill(64), [])
 
 
+def test_persist_window_projects_nav_at_terminal_block(monkeypatch, registry) -> None:
+    event = indexer.FundEvent(
+        chain_id=registry.chain_id,
+        fund_address=registry.fund_address,
+        contract_address=registry.fund_address,
+        contract_role="fund_vault",
+        interface_version=1,
+        block_number=100,
+        block_hash=f"0x{100:064x}",
+        transaction_hash="0x01",
+        transaction_index=0,
+        log_index=0,
+        event_name="NavCommitted",
+        args={
+            "reportNonce": 1,
+            "netAssets": 1_000,
+            "validAfterBlock": 110,
+            "validUntilBlock": 120,
+        },
+    )
+    projected_blocks = []
+
+    def capture_projection(*_args, **kwargs):
+        projected_blocks.append(kwargs["to_block"])
+        return None
+
+    monkeypatch.setattr(indexer, "_load_events", lambda _: [event])
+    monkeypatch.setattr(indexer, "project_events", capture_projection)
+    monkeypatch.setattr(indexer, "get_client", lambda: CapturingRpcClient())
+    block_hash = f"0x{115:064x}"
+
+    indexer._persist_window(FakeWeb3(), registry, 101, 115, block_hash, [])
+
+    assert projected_blocks == [115]
+
+
 def test_authoritative_accounting_state_is_reconciled_then_persisted(
     monkeypatch, registry
 ) -> None:
