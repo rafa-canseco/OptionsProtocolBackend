@@ -45,6 +45,21 @@ class FakeEth:
         return b"" if (normalized, block_identifier) in self.missing_code else b"\x01"
 
 
+class AdvancingEth(FakeEth):
+    def __init__(self):
+        super().__init__()
+        self.current_block = 3_000
+        self.block_number_reads = 0
+
+    @property
+    def block_number(self):
+        self.block_number_reads += 1
+        return self.current_block
+
+    def mine_block(self):
+        self.current_block += 1
+
+
 class FakeWeb3:
     def __init__(
         self,
@@ -54,6 +69,14 @@ class FakeWeb3:
     ):
         self.eth = FakeEth(hashes, implementations, missing_code)
         self.codec = Web3().codec
+
+
+def _confirmed_head(block_number: int = 2_995) -> indexer.ConfirmedHead:
+    return indexer.ConfirmedHead(
+        chain_id=84532,
+        block_number=block_number,
+        block_hash=f"0x{block_number:064x}",
+    )
 
 
 @pytest.fixture
@@ -87,11 +110,13 @@ def test_confirmed_head_checkpoint_is_persisted_without_api_rpc(monkeypatch) -> 
     client = HeadClient()
     monkeypatch.setattr(indexer, "get_client", lambda: client)
 
-    indexer._store_confirmed_head(FakeWeb3(), 84532)
+    confirmed_head = indexer._capture_confirmed_head(FakeWeb3(), 84532)
+    indexer._store_confirmed_head(confirmed_head)
 
     assert client.table_name == "v2_confirmed_chain_heads"
     assert client.row["chain_id"] == 84532
     assert client.row["block_number"] == 2_995
+    assert client.row["block_hash"] == f"0x{2_995:064x}"
     assert client.conflict == "chain_id"
 
 
@@ -103,7 +128,38 @@ def test_confirmed_head_rejects_wrong_rpc_chain_before_persistence(monkeypatch) 
     )
 
     with pytest.raises(ValueError, match="RPC chain mismatch"):
-        indexer._store_confirmed_head(w3, 84532)
+        indexer._capture_confirmed_head(w3, 84532)
+
+
+def test_cycle_reuses_one_confirmed_head_when_rpc_advances(
+    monkeypatch, registry
+) -> None:
+    w3 = FakeWeb3()
+    w3.eth = AdvancingEth()
+    client = HeadClient(after_execute=w3.eth.mine_block)
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+    monkeypatch.setattr(
+        indexer,
+        "_checkpoint",
+        lambda _: {"next_block": 2_995, "last_block_hash": None},
+    )
+    monkeypatch.setattr(indexer, "_fetch_window", lambda *_: [])
+    projected_terminals = []
+    monkeypatch.setattr(
+        indexer,
+        "_persist_window",
+        lambda *_args: projected_terminals.append((_args[3], _args[4])),
+    )
+
+    indexer._index_cycle(w3, [registry, registry])
+
+    assert w3.eth.block_number_reads == 1
+    assert w3.eth.current_block == 3_001
+    assert client.row["block_number"] == 2_995
+    assert projected_terminals == [
+        (client.row["block_number"], client.row["block_hash"]),
+        (client.row["block_number"], client.row["block_hash"]),
+    ]
 
 
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:
@@ -120,7 +176,7 @@ def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> No
         lambda *_: pytest.fail("must not fetch before rewinding"),
     )
 
-    count = indexer.index_registry_once(FakeWeb3(), registry)
+    count = indexer.index_registry_once(FakeWeb3(), registry, _confirmed_head())
 
     assert count == 0
     assert rewinds == [100]
@@ -148,7 +204,7 @@ def test_rpc_range_error_reduces_window(monkeypatch, registry) -> None:
         lambda *args: persisted.append(args[2:]),
     )
 
-    count = indexer.index_registry_once(FakeWeb3(), registry)
+    count = indexer.index_registry_once(FakeWeb3(), registry, _confirmed_head())
 
     assert count == 0
     assert calls == [(100, 2_099), (100, 1_099)]
@@ -181,7 +237,7 @@ def test_window_stops_before_next_contract_binding(monkeypatch, registry) -> Non
     monkeypatch.setattr(indexer, "_persist_window", lambda *_: None)
     w3 = FakeWeb3()
 
-    indexer.index_registry_once(w3, registry)
+    indexer.index_registry_once(w3, registry, _confirmed_head())
 
     assert fetched == [(100, 199)]
     assert w3.eth.storage_blocks == [100, 199]
@@ -216,7 +272,7 @@ def test_window_stops_when_binding_expires_without_successor(
     )
     monkeypatch.setattr(indexer, "_persist_window", lambda *_: None)
 
-    indexer.index_registry_once(FakeWeb3(), registry)
+    indexer.index_registry_once(FakeWeb3(), registry, _confirmed_head())
 
     assert fetched == [(100, 199)]
 
@@ -254,7 +310,9 @@ def test_proxy_mismatch_at_terminal_or_new_binding_stops_ingestion(
 
     with pytest.raises(ValueError, match=f"at block {mismatch_block}"):
         indexer.index_registry_once(
-            FakeWeb3(implementations={mismatch_block: mismatch}), registry
+            FakeWeb3(implementations={mismatch_block: mismatch}),
+            registry,
+            _confirmed_head(),
         )
 
     assert fetched == ([(100, 199)] if mismatch_block == 199 else [])
@@ -286,7 +344,7 @@ def test_persistence_failure_does_not_run_another_window(monkeypatch, registry) 
     )
 
     with pytest.raises(RuntimeError, match="database unavailable"):
-        indexer.index_registry_once(FakeWeb3(), registry)
+        indexer.index_registry_once(FakeWeb3(), registry, _confirmed_head())
 
     assert checkpoint == {"next_block": 100, "last_block_hash": None}
 
@@ -299,7 +357,7 @@ def test_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) -> None:
     w3.eth.chain_id = 1
 
     with pytest.raises(ValueError, match="chain mismatch"):
-        indexer.index_registry_once(w3, registry)
+        indexer.index_registry_once(w3, registry, _confirmed_head())
 
 
 def test_settings_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) -> None:
@@ -309,7 +367,7 @@ def test_settings_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) 
     )
 
     with pytest.raises(ValueError, match="chain mismatch"):
-        indexer.index_registry_once(FakeWeb3(), registry)
+        indexer.index_registry_once(FakeWeb3(), registry, _confirmed_head())
 
 
 def test_proxy_binding_requires_registered_implementation() -> None:
@@ -339,7 +397,7 @@ def test_proxy_slot_mismatch_stops_before_log_fetch(monkeypatch, registry) -> No
     )
 
     with pytest.raises(ValueError, match="Proxy implementation mismatch"):
-        indexer.index_registry_once(w3, registry)
+        indexer.index_registry_once(w3, registry, _confirmed_head())
 
 
 @pytest.mark.parametrize(
@@ -360,7 +418,9 @@ def test_missing_registered_bytecode_stops_before_log_fetch(
 
     with pytest.raises(ValueError, match=f"Missing bytecode for {message}"):
         indexer.index_registry_once(
-            FakeWeb3(missing_code={(address.lower(), 100)}), registry
+            FakeWeb3(missing_code={(address.lower(), 100)}),
+            registry,
+            _confirmed_head(),
         )
 
 
@@ -616,6 +676,9 @@ class CapturingRpcClient:
 
 
 class HeadClient:
+    def __init__(self, after_execute=None):
+        self.after_execute = after_execute
+
     def table(self, name):
         self.table_name = name
         return self
@@ -626,4 +689,6 @@ class HeadClient:
         return self
 
     def execute(self):
+        if self.after_execute is not None:
+            self.after_execute()
         return None
