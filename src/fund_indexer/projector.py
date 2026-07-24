@@ -88,6 +88,8 @@ def project_events(
     events: list[FundEvent],
     accounting_asset: str | None = None,
     weth: str | None = None,
+    *,
+    to_block: int | None = None,
 ) -> FundProjection:
     if not events:
         raise ValueError("Cannot project an empty event stream")
@@ -119,6 +121,7 @@ def project_events(
         }
     )
     seen: set[tuple[int, str, int]] = set()
+    nav_invalidated = False
     for event in ordered:
         if event.identity in seen:
             continue
@@ -126,13 +129,40 @@ def project_events(
         if event.chain_id != first.chain_id or event.fund_address != first.fund_address:
             raise ValueError("A projection stream must belong to one fund")
         _apply(projection, event)
+        if event.event_name == "NavInvalidated":
+            nav_invalidated = True
+        elif event.event_name in {"NavCommitted", "NavWindowRestored"}:
+            nav_invalidated = False
         projection.fund["last_event_block"] = event.block_number
     negative_inventory = [
         key for key, value in projection.inventory.items() if value < 0
     ]
     if negative_inventory:
         raise ValueError(f"Inventory underflow for {negative_inventory[0]}")
+    _refresh_nav_staleness(
+        projection,
+        ordered[-1].block_number if to_block is None else to_block,
+        nav_invalidated=nav_invalidated,
+    )
     return projection
+
+
+def _refresh_nav_staleness(
+    projection: FundProjection,
+    to_block: int,
+    *,
+    nav_invalidated: bool,
+) -> None:
+    if nav_invalidated:
+        projection.fund["nav_stale"] = True
+        return
+    valid_after = projection.fund.get("nav_valid_after_block")
+    valid_until = projection.fund.get("nav_valid_until_block")
+    projection.fund["nav_stale"] = not (
+        valid_after is not None
+        and valid_until is not None
+        and valid_after <= to_block <= valid_until
+    )
 
 
 def _apply(projection: FundProjection, event: FundEvent) -> None:
@@ -232,7 +262,6 @@ def _nav_committed(projection: FundProjection, event: FundEvent) -> None:
     nonce = integer(args["reportNonce"])
     projection.fund.update(
         net_assets=str(integer(args["netAssets"])),
-        nav_stale=event.block_number < integer(args["validAfterBlock"]),
         last_report_nonce=nonce,
         nav_valid_after_block=integer(args["validAfterBlock"]),
         nav_valid_until_block=integer(args["validUntilBlock"]),

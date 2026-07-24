@@ -107,6 +107,30 @@ def test_nav_is_stale_before_activation() -> None:
     assert projection.fund["nav_stale"] is True
 
 
+def test_nav_staleness_tracks_projected_block_without_another_event() -> None:
+    events = [
+        event(
+            "NavCommitted",
+            {
+                "reportNonce": 1,
+                "netAssets": 1_000,
+                "validAfterBlock": 110,
+                "validUntilBlock": 120,
+            },
+            0,
+            block=100,
+        )
+    ]
+
+    before = project_events(events, USDC, WETH, to_block=109)
+    active = project_events(events, USDC, WETH, to_block=115)
+    expired = project_events(events, USDC, WETH, to_block=121)
+
+    assert before.fund["nav_stale"] is True
+    assert active.fund["nav_stale"] is False
+    assert expired.fund["nav_stale"] is True
+
+
 def test_nav_invalidation_preserves_stale_event_hash_as_history_only() -> None:
     projection = project_events(
         [event("NavInvalidated", {"positionsHash": "0xold"}, 0)], USDC, WETH
@@ -115,6 +139,35 @@ def test_nav_invalidation_preserves_stale_event_hash_as_history_only() -> None:
     assert projection.fund["nav_stale"] is True
     assert projection.fund["positions_hash"] is None
     assert projection.activities[0]["payload"] == {"positionsHash": "0xold"}
+
+
+def test_nav_invalidation_remains_stale_inside_previous_window() -> None:
+    projection = project_events(
+        [
+            event(
+                "NavCommitted",
+                {
+                    "reportNonce": 1,
+                    "netAssets": 1_000,
+                    "validAfterBlock": 100,
+                    "validUntilBlock": 120,
+                },
+                0,
+                block=100,
+            ),
+            event(
+                "NavInvalidated",
+                {"positionsHash": "0xold"},
+                1,
+                block=105,
+            ),
+        ],
+        USDC,
+        WETH,
+        to_block=110,
+    )
+
+    assert projection.fund["nav_stale"] is True
 
 
 def test_component_reconfiguration_preserves_state_nonce_and_hash() -> None:
