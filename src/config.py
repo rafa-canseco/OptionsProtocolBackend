@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # e.g. "1773950400,1774123200". If empty, get_expiries() is used.
     custom_expiry_timestamps: str = ""
 
+    # Functional CSP fund series (Base Sepolia only; disabled by default).
+    fund_csp_series_enabled: bool = False
+    fund_csp_strike_otm_bps: int = 1500
+    fund_csp_min_expiry_delay_hours: int = 36
+    fund_csp_max_expiry_delay_hours: int = 60
+
     # Hours before expiry to stop showing/creating options
     expiry_cutoff_hours: int = 48  # standard (3d/7d/14d)
     short_expiry_cutoff_hours: int = 4  # near-expiry (TTL <= 48h)

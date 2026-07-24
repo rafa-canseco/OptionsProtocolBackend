@@ -24,7 +24,7 @@ from src.db.database import get_client
 from src.pricing.assets import Asset, get_asset_config, get_base_assets
 from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
-from src.pricing.utils import strike_to_8_decimals
+from src.pricing.utils import csp_put_strike, get_csp_expiry, strike_to_8_decimals
 from src.pricing.chainlink import get_asset_price
 
 logger = logging.getLogger(__name__)
@@ -386,6 +386,35 @@ def _parse_custom_expiries() -> list[int] | None:
     return timestamps
 
 
+def _with_fund_csp_series(
+    specs: list[OTokenSpec],
+    spot: float,
+    *,
+    now: datetime | None = None,
+) -> list[OTokenSpec]:
+    """Add the single fixed-moneyness CSP series without duplicating a spec."""
+    if not settings.fund_csp_series_enabled:
+        return specs
+    expiry = get_csp_expiry(
+        now,
+        min_delay_hours=settings.fund_csp_min_expiry_delay_hours,
+        max_delay_hours=settings.fund_csp_max_expiry_delay_hours,
+    )
+    strike = csp_put_strike(
+        spot,
+        otm_bps=settings.fund_csp_strike_otm_bps,
+        tick=get_asset_config(Asset.ETH).short_expiry_strike_step,
+    )
+    candidate = OTokenSpec(
+        option_type=OptionType.PUT,
+        strike=strike,
+        expiry_ts=expiry,
+    )
+    if _spec_key(candidate) in {_spec_key(spec) for spec in specs}:
+        return specs
+    return [*specs, candidate]
+
+
 async def publish_once():
     """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
     global _publish_cycle_count
@@ -405,6 +434,8 @@ async def publish_once():
         specs = generate_otoken_specs(
             spot=spot, asset=asset, expiry_timestamps=custom_expiries
         )
+        if asset == Asset.ETH:
+            specs = _with_fund_csp_series(specs, spot)
 
         if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
             existing_by_key = {}

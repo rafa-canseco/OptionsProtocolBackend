@@ -49,7 +49,7 @@ from src.models.mm import (
 from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
-from src.pricing.utils import get_expiries
+from src.pricing.utils import get_csp_expiry, get_expiries
 from src.bots.otoken_manager import _parse_custom_expiries
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,9 @@ _MM_FILL_SELECT = (
     "protocol_fee,premium,collateral,user_address,vault_id,strike_price,expiry,"
     "is_put,indexed_at"
 )
-_MM_POSITION_SELECT = "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+_MM_POSITION_SELECT = (
+    "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+)
 
 
 def _normalize_mm_address(addr: str) -> str:
@@ -593,6 +595,16 @@ async def get_market(
 
     otokens: list[OTokenInfo] = []
     active_expiries = _parse_custom_expiries() or get_expiries()
+    if asset == Asset.ETH and settings.fund_csp_series_enabled:
+        active_expiries = sorted(
+            {
+                *active_expiries,
+                get_csp_expiry(
+                    min_delay_hours=settings.fund_csp_min_expiry_delay_hours,
+                    max_delay_hours=settings.fund_csp_max_expiry_delay_hours,
+                ),
+            }
+        )
     try:
         client = get_client()
         result = (
