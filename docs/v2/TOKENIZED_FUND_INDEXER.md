@@ -22,6 +22,45 @@ No registry seed is included. The worker remains deployment-disabled by
 default. B1N-352 must provide trusted addresses, implementation addresses, and
 the deployment block before `TOKENIZED_FUND_INDEXER_ENABLED` is set.
 
+### Deployment handoff
+
+Application environment variables do not carry tokenized-fund addresses. A
+replacement deployment is selected atomically through `v2_fund_registry` and
+`v2_fund_contracts`, so the API, indexer, snapshots, and NAV reporter consume
+the same binding set.
+
+After applying migrations, validate a finalized B1N-352 manifest without
+writing to Supabase:
+
+```bash
+uv run python -m scripts.configure_tokenized_fund /path/to/manifest.json \
+  --start-block <FIRST_DEPLOYMENT_BLOCK> \
+  --fund-key base-sepolia:csp-qa \
+  --share-symbol <SHARE_SYMBOL> \
+  --share-decimals <SHARE_DECIMALS> \
+  --accounting-asset-symbol <ASSET_SYMBOL> \
+  --accounting-asset-decimals <ASSET_DECIMALS>
+```
+
+The command rejects placeholders, non-`DEPLOYED` status, a non-Base-Sepolia
+chain, a V1 boundary other than `isolated-b1n-336`, changed V1
+Controller/BatchSettler implementations, missing proxy implementations, and
+incomplete trusted roles. `start-block` must match
+`network.deploymentBlocks.fundFirst`.
+
+The single final manifest must also declare `readiness.handoffReady=true`,
+completed initial and strict zero-delay reconciliation, an onboarded adapter,
+active strategy, and unpaused/authorized public deposits. Allocator-bot and
+mainnet authorization must remain false; strategy QA is manual. Pending-policy
+or partially reconciled manifests cannot produce an applicable payload.
+
+Review the emitted RPC payload, then repeat with `--apply` using service-role
+Supabase credentials. The database function retires the previous row with the
+same fund key, inserts all bindings, and enables the replacement in one
+transaction. Only enabled rows must have a unique fund key, so retired
+deployment history remains intact. It refuses to overwrite an already
+registered target because upgrades require versioned binding ranges.
+
 ## Guarantees
 
 - Raw log identity is `(chain_id, fund_address, transaction_hash, log_index)`.

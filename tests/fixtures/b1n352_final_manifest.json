@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "1.0.0",
+  "deploymentStatus": "DEPLOYED",
+  "issue": "B1N-352",
+  "network": {
+    "name": "base-sepolia",
+    "chainId": 84532,
+    "deploymentBlocks": {
+      "library": 100,
+      "fundFirst": 123,
+      "fundLast": 140
+    }
+  },
+  "source": {
+    "implementationVersion": 1,
+    "compatibilityVersion": 1
+  },
+  "v1Boundary": {
+    "stack": "isolated-b1n-336",
+    "activeStagingV1Touched": false,
+    "accountingAsset": "0x0000000000000000000000000000000000000032",
+    "weth": "0x0000000000000000000000000000000000000033",
+    "addressBook": {
+      "proxy": "0x000000000000000000000000000000000000001e",
+      "implementation": "0x0000000000000000000000000000000000000082",
+      "implementationCodehash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "unchanged": true
+    },
+    "controller": {
+      "proxy": "0x000000000000000000000000000000000000001f",
+      "implementation": "0x0000000000000000000000000000000000000083",
+      "implementationCodehash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "custodiedRedemptionOnly": true,
+      "unchanged": true
+    },
+    "marginPool": {
+      "proxy": "0x0000000000000000000000000000000000000020",
+      "implementation": "0x0000000000000000000000000000000000000084",
+      "unchanged": true
+    },
+    "oracle": {
+      "proxy": "0x0000000000000000000000000000000000000021",
+      "implementation": "0x0000000000000000000000000000000000000085",
+      "unchanged": true
+    },
+    "oTokenFactory": {
+      "proxy": "0x0000000000000000000000000000000000000022",
+      "implementation": "0x0000000000000000000000000000000000000086",
+      "unchanged": true
+    },
+    "whitelist": {
+      "proxy": "0x0000000000000000000000000000000000000023",
+      "implementation": "0x0000000000000000000000000000000000000087",
+      "unchanged": true
+    },
+    "batchSettler": {
+      "proxy": "0x0000000000000000000000000000000000000024",
+      "implementation": "0x0000000000000000000000000000000000000088",
+      "implementationCodehash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "physicalDeliveryVaultAuthorized": true,
+      "unchanged": true
+    }
+  },
+  "contracts": {
+    "accessManager": {
+      "address": "0x0000000000000000000000000000000000000015",
+      "type": "FundAccessManager"
+    },
+    "fundVault": {
+      "proxy": "0x0000000000000000000000000000000000000001",
+      "implementation": "0x0000000000000000000000000000000000000065"
+    },
+    "fundShare": {
+      "proxy": "0x0000000000000000000000000000000000000002",
+      "implementation": "0x0000000000000000000000000000000000000066"
+    },
+    "fundAccounting": {
+      "proxy": "0x0000000000000000000000000000000000000003",
+      "implementation": "0x0000000000000000000000000000000000000067"
+    },
+    "fundFlowManager": {
+      "proxy": "0x0000000000000000000000000000000000000004",
+      "implementation": "0x0000000000000000000000000000000000000068"
+    },
+    "strategyManager": {
+      "proxy": "0x0000000000000000000000000000000000000005",
+      "implementation": "0x0000000000000000000000000000000000000069"
+    },
+    "navReportVerifier": {
+      "address": "0x0000000000000000000000000000000000000017"
+    },
+    "claimEscrow": {
+      "address": "0x0000000000000000000000000000000000000014"
+    },
+    "cspFundAdapter": {
+      "proxy": "0x0000000000000000000000000000000000000006",
+      "implementation": "0x000000000000000000000000000000000000006a"
+    },
+    "cspFundValuator": "0x0000000000000000000000000000000000000016"
+  },
+  "policy": {
+    "status": "ACTIVE_POLICY",
+    "adapterRouter": "0x0000000000000000000000000000000000000034"
+  },
+  "readiness": {
+    "handoffReady": true,
+    "initialDeploymentReconciled": true,
+    "strictReconciliationComplete": true,
+    "depositsPaused": false,
+    "adapterOnboarded": true,
+    "strategyActive": true,
+    "publicDepositsAuthorized": true,
+    "allocatorBotAuthorized": false,
+    "mainnetAuthorized": false
+  }
+}

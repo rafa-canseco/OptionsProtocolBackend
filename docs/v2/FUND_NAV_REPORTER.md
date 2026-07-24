@@ -27,6 +27,18 @@ digest once per observer, position and snapshot. The runtime re-verifies stored
 digests, signatures, market-maker independence and exact quorum before passing
 `ValuationData` to `CspFundValuator.value`. It never computes option liability.
 
+The operational ingestion boundary is service-role only and intentionally not
+exposed as a public API. Submit one observer-produced JSON document with:
+
+```bash
+uv run python -m scripts.ingest_fund_observation /path/to/observation.json
+```
+
+The command resolves an enabled, reconciled trusted fund from the registry and
+revalidates the block hash, observation window, on-chain digest, approved
+observer, market maker and signature before storing the row. It requires the
+staging Supabase service role and Base Sepolia `RPC_URL`.
+
 Backend pricing and MM quotes are never substituted for observer evidence or
 valuator output. Attempts are idempotently recorded in `v2_nav_report_runs`,
 including blocked attempts and reason codes.
@@ -74,8 +86,8 @@ recovery and follow the database backup and operational data-retention policy.
 
 ## Current blocker
 
-B1N-352 is `NOT_DEPLOYED`. Its handoff has templates only: no real manifest,
-addresses, approved reporter key, or observer quorum. The indexer and reporter
-therefore remain disabled. If explicitly enabled now, the reporter records
-`MISSING_TRUSTED_DEPLOYMENT` and sends no transaction. No placeholder registry
-row or B1N-339 legacy address is seeded.
+The single no-timelock B1N-352 redeployment and its strict zero-delay
+reconciliation are pending. The indexer and reporter therefore remain
+disabled. If explicitly enabled without a final trusted registry row, the
+reporter records `MISSING_TRUSTED_DEPLOYMENT` and sends no transaction. No
+placeholder registry row or B1N-339 legacy address is seeded.
