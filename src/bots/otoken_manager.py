@@ -412,7 +412,9 @@ def _with_fund_csp_series(
     )
     if _spec_key(candidate) in {_spec_key(spec) for spec in specs}:
         return specs
-    return [*specs, candidate]
+    # Reconcile the fund's policy series first so allocator availability does
+    # not depend on the much larger general market universe completing.
+    return [candidate, *specs]
 
 
 async def publish_once():
