@@ -31,10 +31,14 @@ FINAL_READINESS = {
     "handoffReady": True,
     "initialDeploymentReconciled": True,
     "strictReconciliationComplete": True,
-    "depositsPaused": False,
+    "depositsPaused": True,
     "adapterOnboarded": True,
-    "strategyActive": True,
-    "publicDepositsAuthorized": True,
+    # The B1N-352 testnet handoff is intentionally safe-by-default: the
+    # strategy is not active and public deposits remain unauthorized until QA
+    # policy is approved.  These flags describe readiness of the handoff, not
+    # permission to start trading or accept deposits.
+    "strategyActive": False,
+    "publicDepositsAuthorized": False,
     "allocatorBotAuthorized": False,
     "mainnetAuthorized": False,
 }
@@ -78,6 +82,9 @@ def parse_fund_deployment(
     deployment_blocks = _object(network, "deploymentBlocks")
     if deployment_blocks.get("fundFirst") != start_block:
         raise ValueError("start_block must match network.deploymentBlocks.fundFirst")
+    fund_last = deployment_blocks.get("fundLast")
+    if not isinstance(fund_last, int) or fund_last < start_block:
+        raise ValueError("network.deploymentBlocks.fundLast must follow fundFirst")
 
     contracts = _object(manifest, "contracts")
     boundary = _object(manifest, "v1Boundary")
@@ -88,27 +95,66 @@ def parse_fund_deployment(
     policy = _object(manifest, "policy")
     _require_final_readiness(manifest)
     role_values = {
-        "fund_vault": _proxy(contracts, "fundVault"),
-        "fund_share": _proxy(contracts, "fundShare"),
-        "fund_accounting": _proxy(contracts, "fundAccounting"),
-        "fund_flow_manager": _proxy(contracts, "fundFlowManager"),
-        "strategy_manager": _proxy(contracts, "strategyManager"),
-        "csp_adapter": _proxy(contracts, "cspFundAdapter"),
-        "controller": _v1_proxy(boundary, "controller"),
-        "batch_settler": _v1_proxy(boundary, "batchSettler"),
-        "claim_escrow": (_address(contracts, "claimEscrow"), None),
-        "access_manager": (_address(contracts, "accessManager"), None),
-        "address_book": (_v1_address(boundary, "addressBook"), None),
-        "csp_valuator": (_address(contracts, "cspFundValuator"), None),
-        "margin_pool": (_v1_address(boundary, "marginPool"), None),
-        "nav_verifier": (_address(contracts, "navReportVerifier"), None),
-        "oracle": (_v1_address(boundary, "oracle"), None),
-        "otoken_factory": (_v1_address(boundary, "oTokenFactory"), None),
+        "fund_vault": (
+            *_proxy(contracts, "fundVault"),
+            _deployment_block(contracts, "fundVault", start_block, fund_last),
+        ),
+        "fund_share": (
+            *_proxy(contracts, "fundShare"),
+            _deployment_block(contracts, "fundShare", start_block, fund_last),
+        ),
+        "fund_accounting": (
+            *_proxy(contracts, "fundAccounting"),
+            _deployment_block(contracts, "fundAccounting", start_block, fund_last),
+        ),
+        "fund_flow_manager": (
+            *_proxy(contracts, "fundFlowManager"),
+            _deployment_block(contracts, "fundFlowManager", start_block, fund_last),
+        ),
+        "strategy_manager": (
+            *_proxy(contracts, "strategyManager"),
+            _deployment_block(contracts, "strategyManager", start_block, fund_last),
+        ),
+        "csp_adapter": (
+            *_proxy(contracts, "cspFundAdapter"),
+            _deployment_block(contracts, "cspFundAdapter", start_block, fund_last),
+        ),
+        "controller": (*_v1_proxy(boundary, "controller"), start_block),
+        "batch_settler": (*_v1_proxy(boundary, "batchSettler"), start_block),
+        "claim_escrow": (
+            _address(contracts, "claimEscrow"),
+            None,
+            _deployment_block(contracts, "claimEscrow", start_block, fund_last),
+        ),
+        "access_manager": (
+            _address(contracts, "accessManager"),
+            None,
+            _deployment_block(contracts, "accessManager", start_block, fund_last),
+        ),
+        "address_book": (_v1_address(boundary, "addressBook"), None, start_block),
+        "csp_valuator": (
+            _address(contracts, "cspFundValuator"),
+            None,
+            _deployment_block(contracts, "cspFundValuator", start_block, fund_last),
+        ),
+        "margin_pool": (_v1_address(boundary, "marginPool"), None, start_block),
+        "nav_verifier": (
+            _address(contracts, "navReportVerifier"),
+            None,
+            _deployment_block(contracts, "navReportVerifier", start_block, fund_last),
+        ),
+        "oracle": (_v1_address(boundary, "oracle"), None, start_block),
+        "otoken_factory": (
+            _v1_address(boundary, "oTokenFactory"),
+            None,
+            start_block,
+        ),
         "swap_router": (
             _plain_address(policy.get("adapterRouter"), "policy.adapterRouter"),
             None,
+            start_block,
         ),
-        "whitelist": (_v1_address(boundary, "whitelist"), None),
+        "whitelist": (_v1_address(boundary, "whitelist"), None, start_block),
     }
     if set(role_values) != REQUIRED_TRUSTED_ROLES:
         raise ValueError("Manifest mapping does not cover the backend trusted role set")
@@ -125,10 +171,12 @@ def parse_fund_deployment(
             "contract_address": address,
             "implementation_address": implementation,
             "interface_version": 1,
-            "valid_from_block": start_block,
+            "valid_from_block": valid_from_block,
             "valid_to_block": None,
         }
-        for role, (address, implementation) in sorted(role_values.items())
+        for role, (address, implementation, valid_from_block) in sorted(
+            role_values.items()
+        )
     )
     registry = {
         "chain_id": chain_id,
@@ -193,6 +241,28 @@ def _address(parent: dict[str, Any], key: str) -> str:
     if isinstance(value, dict):
         value = value.get("address")
     return _plain_address(value, f"contracts.{key}")
+
+
+def _deployment_block(
+    parent: dict[str, Any], key: str, start_block: int, fund_last: int
+) -> int:
+    """Use the canonical fund deployment boundary for every v2 contract.
+
+    The v2 manifest deliberately has one deployment window at ``network``;
+    contract entries do not carry per-contract block fields.  Accept optional
+    fields when supplied, but reject values outside the canonical window.
+    """
+    value = parent.get(key)
+    if isinstance(value, str):
+        _plain_address(value, f"contracts.{key}")
+        return start_block
+    if not isinstance(value, dict):
+        raise ValueError(f"contracts.{key} must be an object")
+    for field, expected in (("validFromBlock", start_block), ("validToBlock", fund_last)):
+        actual = value.get(field)
+        if actual is not None and actual != expected:
+            raise ValueError(f"contracts.{key}.{field} must match network deployment window")
+    return start_block
 
 
 def _require_final_readiness(manifest: dict[str, Any]) -> None:

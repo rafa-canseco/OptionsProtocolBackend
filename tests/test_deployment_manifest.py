@@ -113,6 +113,14 @@ def test_manifest_accepts_fixture_matching_real_b1n352_b1n336_schema() -> None:
     assert deployment.registry["fund_address"] == address(1)
 
 
+def test_manifest_rejects_proxy_address_string_without_name_error() -> None:
+    value = manifest()
+    value["contracts"]["fundVault"] = address(99)
+
+    with pytest.raises(ValueError, match="Manifest field fundVault must be an object"):
+        parse(value)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

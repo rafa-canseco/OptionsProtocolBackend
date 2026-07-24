@@ -84,10 +84,11 @@ service role. No product endpoint exposes the raw bytes or ownership token.
 The bytes are retained with the report-run audit record for deterministic crash
 recovery and follow the database backup and operational data-retention policy.
 
-## Current blocker
+## Current operating state
 
-The single no-timelock B1N-352 redeployment and its strict zero-delay
-reconciliation are pending. The indexer and reporter therefore remain
-disabled. If explicitly enabled without a final trusted registry row, the
-reporter records `MISSING_TRUSTED_DEPLOYMENT` and sends no transaction. No
-placeholder registry row or B1N-339 legacy address is seeded.
+The no-timelock B1N-352 redeployment and strict reconciliation are complete on
+Base Sepolia. The indexer is enabled in Railway staging and the continuous NAV
+reporter remains disabled intentionally. If explicitly enabled while the
+registry, reconciliation, NAV window, or reporter quorum is not valid, the
+reporter records a reason such as `MISSING_TRUSTED_DEPLOYMENT` and sends no
+transaction. No placeholder registry row or B1N-339 legacy address is seeded.

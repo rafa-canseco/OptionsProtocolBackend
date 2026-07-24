@@ -49,10 +49,13 @@ incomplete trusted roles. `start-block` must match
 `network.deploymentBlocks.fundFirst`.
 
 The single final manifest must also declare `readiness.handoffReady=true`,
-completed initial and strict zero-delay reconciliation, an onboarded adapter,
-active strategy, and unpaused/authorized public deposits. Allocator-bot and
-mainnet authorization must remain false; strategy QA is manual. Pending-policy
-or partially reconciled manifests cannot produce an applicable payload.
+completed initial and strict zero-delay reconciliation, and an onboarded
+adapter. For the current Base Sepolia QA handoff, `depositsPaused=true`,
+`strategyActive=false`, and `publicDepositsAuthorized=false` are intentional:
+they keep the strategy and public writes disabled until a QA policy is
+approved. Allocator-bot and mainnet authorization must remain false; strategy
+QA is manual. Pending-policy or partially reconciled manifests cannot produce
+an applicable payload.
 
 Review the emitted RPC payload, then repeat with `--apply` using service-role
 Supabase credentials. The database function retires the previous row with the
