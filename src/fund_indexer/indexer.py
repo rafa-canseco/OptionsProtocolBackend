@@ -70,6 +70,13 @@ class FundRegistry:
     contracts: tuple[ContractBinding, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ConfirmedHead:
+    chain_id: int
+    block_number: int
+    block_hash: str
+
+
 def _load_registries() -> list[FundRegistry]:
     client = get_client()
     rows = client.table("v2_fund_registry").select("*").eq("enabled", True).execute()
@@ -465,10 +472,17 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
     }
 
 
-def index_registry_once(w3: Web3, registry: FundRegistry) -> int:
+def index_registry_once(
+    w3: Web3, registry: FundRegistry, confirmed_head: ConfirmedHead
+) -> int:
     if not registry.contracts:
         raise ValueError(f"Fund {registry.fund_address} has no indexed contracts")
     _validate_chain(w3, registry)
+    if confirmed_head.chain_id != registry.chain_id:
+        raise ValueError(
+            "Confirmed head chain mismatch: "
+            f"head={confirmed_head.chain_id}, registry={registry.chain_id}"
+        )
     checkpoint = _checkpoint(registry)
     next_block = int(checkpoint["next_block"])
     if checkpoint.get("last_block_hash") and next_block > registry.start_block:
@@ -481,7 +495,7 @@ def index_registry_once(w3: Web3, registry: FundRegistry) -> int:
             )
             return 0
 
-    safe_block = int(w3.eth.block_number) - CONFIRMATIONS
+    safe_block = confirmed_head.block_number
     if next_block > safe_block:
         return 0
     _validate_proxy_implementations(w3, registry, next_block)
@@ -491,7 +505,11 @@ def index_registry_once(w3: Web3, registry: FundRegistry) -> int:
     while True:
         to_block = next_block + window - 1
         try:
-            block_hash = Web3.to_hex(w3.eth.get_block(to_block)["hash"])
+            block_hash = (
+                confirmed_head.block_hash
+                if to_block == confirmed_head.block_number
+                else Web3.to_hex(w3.eth.get_block(to_block)["hash"])
+            )
             events = _fetch_window(w3, registry, next_block, to_block)
             break
         except Exception as error:
@@ -593,7 +611,7 @@ def _block_timestamp(w3: Web3, block_number: int) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
-def _store_confirmed_head(w3: Web3, chain_id: int) -> None:
+def _capture_confirmed_head(w3: Web3, chain_id: int) -> ConfirmedHead:
     observed_chain_id = int(w3.eth.chain_id)
     if observed_chain_id != chain_id:
         raise ValueError(
@@ -601,15 +619,34 @@ def _store_confirmed_head(w3: Web3, chain_id: int) -> None:
         )
     block_number = int(w3.eth.block_number) - CONFIRMATIONS
     block = w3.eth.get_block(block_number)
+    return ConfirmedHead(
+        chain_id=chain_id,
+        block_number=block_number,
+        block_hash=Web3.to_hex(block["hash"]),
+    )
+
+
+def _store_confirmed_head(confirmed_head: ConfirmedHead) -> None:
     get_client().table("v2_confirmed_chain_heads").upsert(
         {
-            "chain_id": chain_id,
-            "block_number": block_number,
-            "block_hash": Web3.to_hex(block["hash"]),
+            "chain_id": confirmed_head.chain_id,
+            "block_number": confirmed_head.block_number,
+            "block_hash": confirmed_head.block_hash,
             "observed_at": datetime.now(timezone.utc).isoformat(),
         },
         on_conflict="chain_id",
     ).execute()
+
+
+def _index_cycle(w3: Web3, registries: list[FundRegistry]) -> None:
+    confirmed_heads: dict[int, ConfirmedHead] = {}
+    for registry in registries:
+        confirmed_head = confirmed_heads.get(registry.chain_id)
+        if confirmed_head is None:
+            confirmed_head = _capture_confirmed_head(w3, registry.chain_id)
+            _store_confirmed_head(confirmed_head)
+            confirmed_heads[registry.chain_id] = confirmed_head
+        index_registry_once(w3, registry, confirmed_head)
 
 
 async def run() -> None:
@@ -618,9 +655,7 @@ async def run() -> None:
     w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     while True:
         try:
-            for registry in _load_registries():
-                _store_confirmed_head(w3, registry.chain_id)
-                index_registry_once(w3, registry)
+            _index_cycle(w3, _load_registries())
         except asyncio.CancelledError:
             return
         except Exception:
