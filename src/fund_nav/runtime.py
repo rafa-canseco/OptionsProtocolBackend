@@ -345,7 +345,7 @@ class Web3ReporterGateway:
         asset = self.vault.functions.asset().call(block_identifier=block)
         raw_balance = (
             self.w3.eth.contract(address=asset, abi=ERC20_ABI)
-            .functions.balanceOf(self.fund.address)
+            .functions.balanceOf(Web3.to_checksum_address(self.fund.address))
             .call(block_identifier=block)
         )
         strategy_hash = (
@@ -649,7 +649,9 @@ class Web3ReporterGateway:
         role = access.functions.getTargetFunctionRole(
             self.addresses["fund_accounting"], SUBMIT_NAV_SELECTOR
         ).call(block_identifier="pending")
-        member, delay = access.functions.hasRole(ACCOUNTING_ROLE, account).call(
+        member, delay = access.functions.hasRole(
+            ACCOUNTING_ROLE, Web3.to_checksum_address(account)
+        ).call(
             block_identifier="pending"
         )
         return int(role) == ACCOUNTING_ROLE and bool(member) and int(delay) == 0
@@ -720,7 +722,7 @@ class Web3ReporterGateway:
         return self.accounting.functions.submitNav(
             report_nonce,
             [report.as_tuple() for report in reports],
-            reporters,
+            [Web3.to_checksum_address(reporter) for reporter in reporters],
             signatures,
         )
 

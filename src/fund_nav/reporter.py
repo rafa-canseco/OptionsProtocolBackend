@@ -170,6 +170,10 @@ class NavReporter:
             return self._finish(
                 run_id, token, ReportRun(status="blocked", reason_code=reason)
             )
+        # Building the valuation can take longer than a few testnet blocks.
+        # Refresh the inclusion window immediately before signing while keeping
+        # the already-validated snapshot and component values unchanged.
+        reports = self._refresh_inclusion_window(snapshot, reports)
         digest = signature_digest(
             chain_id=snapshot.chain_id,
             accounting=snapshot.accounting,
@@ -214,6 +218,27 @@ class NavReporter:
                 sender=sender,
             )
         )
+
+    def _refresh_inclusion_window(self, snapshot, reports):
+        current_head = self.gateway.head_block()
+        minimum_after = current_head + self.inclusion_margin
+        if minimum_after <= reports[0].valid_after_block:
+            return reports
+        # Leave a small execution buffer for the simulation and submission RPCs;
+        # the contract still enforces the snapshot age and activation window.
+        valid_after = max(
+            current_head + self.inclusion_margin + 10,
+            snapshot.snapshot_block + snapshot.activation_delay,
+        )
+        valid_until = valid_after + snapshot.max_window_length
+        return [
+            replace(
+                report,
+                valid_after_block=valid_after,
+                valid_until_block=valid_until,
+            )
+            for report in reports
+        ]
 
     def _execute(self, prepared: PreparedReport) -> ReportRun:
         run_id = prepared.run_id

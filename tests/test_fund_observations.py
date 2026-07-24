@@ -1,11 +1,13 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 from eth_account import Account
 from web3 import Web3
 
+from src.fund_nav.ingestion import ingest_observation_document
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
+from src.fund_nav.runtime import TrustedFund
 
 FUND = "0xf000000000000000000000000000000000000001"
 VALUATOR = "0xf000000000000000000000000000000000000002"
@@ -122,3 +124,50 @@ def test_unapproved_observer_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="UNAPPROVED_OBSERVER"):
         ObservationIngestor(chain, Store()).ingest(observation())
+
+
+def test_operational_ingestion_selects_only_reconciled_trusted_fund() -> None:
+    item = observation()
+    store = Store()
+    fund = TrustedFund(
+        registry={"chain_id": 84532, "fund_address": FUND},
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+
+    observer = ingest_observation_document(
+        asdict(item),
+        repository=store,
+        funds=[fund],
+        gateway_factory=lambda _fund: Chain(),
+    )
+
+    assert observer == OBSERVER
+    assert len(store.rows) == 1
+
+
+def test_operational_ingestion_rejects_untrusted_or_unknown_fund() -> None:
+    item = observation()
+    blocked = TrustedFund(
+        registry={"chain_id": 84532, "fund_address": FUND},
+        state={},
+        contracts={},
+        trust_reason="UNRECONCILED",
+    )
+
+    with pytest.raises(RuntimeError, match="UNRECONCILED"):
+        ingest_observation_document(
+            asdict(item),
+            repository=Store(),
+            funds=[blocked],
+            gateway_factory=lambda _fund: Chain(),
+        )
+
+    with pytest.raises(ValueError, match="UNKNOWN_TRUSTED_FUND"):
+        ingest_observation_document(
+            asdict(item),
+            repository=Store(),
+            funds=[],
+            gateway_factory=lambda _fund: Chain(),
+        )
