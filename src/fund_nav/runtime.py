@@ -860,7 +860,8 @@ class Web3ReporterGateway:
 
     def observation_digest(self, observation: OptionObservation) -> bytes:
         valuator = self.w3.eth.contract(
-            address=observation.valuator_address, abi=VALUATOR_ABI
+            address=Web3.to_checksum_address(observation.valuator_address),
+            abi=VALUATOR_ABI,
         )
         return bytes(
             valuator.functions.observationDigest(
@@ -875,13 +876,17 @@ class Web3ReporterGateway:
         )
 
     def observer_approved(self, valuator: str, observer: str, block: int) -> bool:
-        contract = self.w3.eth.contract(address=valuator, abi=VALUATOR_ABI)
+        contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(valuator), abi=VALUATOR_ABI
+        )
         return bool(
             contract.functions.isApprovedObserver(observer).call(block_identifier=block)
         )
 
     def market_maker(self, adapter: str, position_id: int, block: int) -> str:
-        contract = self.w3.eth.contract(address=adapter, abi=ADAPTER_ABI)
+        contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(adapter), abi=ADAPTER_ABI
+        )
         return contract.functions.position(position_id).call(block_identifier=block)[1]
 
     def max_observation_window(self, valuator: str, block: int) -> int:

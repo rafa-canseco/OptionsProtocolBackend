@@ -270,6 +270,60 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
         )
 
 
+def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
+    seen = []
+
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    class Functions:
+        def observationDigest(self, *_args):
+            return Call(bytes.fromhex("34" * 32))
+
+        def isApprovedObserver(self, _observer):
+            return Call(True)
+
+        def position(self, _position_id):
+            return Call((FUND, ADAPTER))
+
+    class Eth:
+        def contract(self, address, abi):
+            assert Web3.is_checksum_address(address)
+            seen.append(address)
+            return SimpleNamespace(functions=Functions())
+
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(eth=Eth())
+    observation = OptionObservation(
+        chain_id=84532,
+        fund_address=FUND,
+        valuator_address=VALUATOR.lower(),
+        adapter_address=ADAPTER.lower(),
+        position_id=1,
+        snapshot_block=100,
+        snapshot_block_hash="0x" + "12" * 32,
+        valid_until_block=110,
+        liability=25,
+        base_exit_cost=0,
+        observation_nonce=1,
+        signature="0x" + "00" * 65,
+    )
+
+    assert gateway.observation_digest(observation) == bytes.fromhex("34" * 32)
+    assert gateway.observer_approved(VALUATOR.lower(), FUND, 100) is True
+    assert gateway.market_maker(ADAPTER.lower(), 1, 100) == ADAPTER
+    assert seen == [
+        Web3.to_checksum_address(VALUATOR),
+        Web3.to_checksum_address(VALUATOR),
+        Web3.to_checksum_address(ADAPTER),
+    ]
+
+
 class ConservativeObservationRepository:
     def __init__(self):
         self.rows = []
