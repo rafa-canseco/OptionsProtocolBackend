@@ -722,7 +722,7 @@ class Web3ReporterGateway:
             ):
                 raise RuntimeError("STALE_OBSERVATION")
             digest = valuator.functions.observationDigest(
-                adapter,
+                Web3.to_checksum_address(adapter),
                 position_id,
                 block,
                 item.valid_until_block,
@@ -733,9 +733,9 @@ class Web3ReporterGateway:
             observer = Account._recover_hash(
                 HexBytes(digest), signature=HexBytes(item.signature)
             ).lower()
-            approved = valuator.functions.isApprovedObserver(observer).call(
-                block_identifier=block
-            )
+            approved = valuator.functions.isApprovedObserver(
+                Web3.to_checksum_address(observer)
+            ).call(block_identifier=block)
             if (
                 not approved
                 or observer in observers
@@ -865,7 +865,7 @@ class Web3ReporterGateway:
         )
         return bytes(
             valuator.functions.observationDigest(
-                observation.adapter_address,
+                Web3.to_checksum_address(observation.adapter_address),
                 observation.position_id,
                 observation.snapshot_block,
                 observation.valid_until_block,
@@ -880,7 +880,9 @@ class Web3ReporterGateway:
             address=Web3.to_checksum_address(valuator), abi=VALUATOR_ABI
         )
         return bool(
-            contract.functions.isApprovedObserver(observer).call(block_identifier=block)
+            contract.functions.isApprovedObserver(
+                Web3.to_checksum_address(observer)
+            ).call(block_identifier=block)
         )
 
     def market_maker(self, adapter: str, position_id: int, block: int) -> str:

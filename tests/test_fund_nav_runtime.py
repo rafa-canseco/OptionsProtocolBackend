@@ -282,10 +282,12 @@ def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
             return self.value
 
     class Functions:
-        def observationDigest(self, *_args):
+        def observationDigest(self, adapter, *_args):
+            assert Web3.is_checksum_address(adapter)
             return Call(bytes.fromhex("34" * 32))
 
-        def isApprovedObserver(self, _observer):
+        def isApprovedObserver(self, observer):
+            assert Web3.is_checksum_address(observer)
             return Call(True)
 
         def position(self, _position_id):
