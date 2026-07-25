@@ -6,6 +6,7 @@ from eth_account import Account
 from web3 import Web3
 
 from src.bots import fund_nav_reporter
+from src.config import get_fund_csp_sepolia_observer_private_keys, settings
 from src.fund_nav import runtime
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
@@ -267,3 +268,168 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
             rows=rows[:1],
             quorum=1,
         )
+
+
+class ConservativeObservationRepository:
+    def __init__(self):
+        self.rows = []
+
+    def insert_verified_idempotent(self, row):
+        identity = (
+            row["chain_id"],
+            row["valuator_address"],
+            row["adapter_address"],
+            row["position_id"],
+            row["snapshot_block"],
+            row["observer_address"],
+        )
+        if not any(
+            (
+                item["chain_id"],
+                item["valuator_address"],
+                item["adapter_address"],
+                item["position_id"],
+                item["snapshot_block"],
+                item["observer_address"],
+            )
+            == identity
+            for item in self.rows
+        ):
+            self.rows.append(row)
+
+
+def conservative_gateway(keys):
+    market_maker = Account.from_key("0x" + f"{3:064x}").address.lower()
+    repository = ConservativeObservationRepository()
+    fund = TrustedFund({"chain_id": 84532, "fund_address": FUND}, {}, {}, None)
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.fund = fund
+    gateway.repository = repository
+    gateway.sepolia_observer_private_keys = keys
+    gateway.chain_id = lambda: 84532
+    gateway.block_hash = lambda _block: bytes.fromhex("12" * 32)
+    gateway.head_block = lambda: 101
+    gateway.max_observation_window = lambda _valuator, _block: 20
+    gateway.observer_approved = lambda _valuator, _observer, _block: True
+    gateway.market_maker = lambda _adapter, _position, _block: market_maker
+    gateway.observation_digest = lambda observation: Web3.keccak(
+        text=f"{observation.position_id}:{observation.observation_nonce}"
+    )
+    position = (
+        FUND,
+        market_maker,
+        1,
+        1,
+        25,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        bytes(32),
+    )
+    return gateway, repository, position
+
+
+def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, repository, position = conservative_gateway(keys)
+    valuator = SimpleNamespace(address=Web3.to_checksum_address(VALUATOR))
+
+    gateway._publish_sepolia_conservative_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        quorum=2,
+        positions=[(1, position)],
+        existing_rows=[],
+    )
+    gateway._publish_sepolia_conservative_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        quorum=2,
+        positions=[(1, position)],
+        existing_rows=repository.rows,
+    )
+
+    assert len(repository.rows) == 2
+    assert {int(row["liability"]) for row in repository.rows} == {25}
+    assert {int(row["base_exit_cost"]) for row in repository.rows} == {0}
+    assert len({row["observation_nonce"] for row in repository.rows}) == 2
+    assert {row["snapshot_block_hash"] for row in repository.rows} == {"0x" + "12" * 32}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda gateway: setattr(gateway, "chain_id", lambda: 8453), "WRONG_CHAIN"),
+        (
+            lambda gateway: setattr(
+                gateway, "sepolia_observer_private_keys", ("0x" + f"{1:064x}",)
+            ),
+            "QUORUM_MISMATCH",
+        ),
+        (
+            lambda gateway: setattr(
+                gateway,
+                "observer_approved",
+                lambda _valuator, _observer, _block: False,
+            ),
+            "NOT_APPROVED",
+        ),
+    ],
+)
+def test_sepolia_conservative_observations_fail_closed(mutation, reason) -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = conservative_gateway(keys)
+    mutation(gateway)
+
+    with pytest.raises(RuntimeError, match=reason):
+        gateway._publish_sepolia_conservative_observations(
+            valuator=SimpleNamespace(address=Web3.to_checksum_address(VALUATOR)),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=[],
+        )
+
+
+def test_sepolia_conservative_observations_reject_policy_mismatch() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = conservative_gateway(keys)
+    existing = [
+        {
+            "position_id": 1,
+            "observer_address": Account.from_key(keys[0]).address.lower(),
+            "liability": 24,
+            "base_exit_cost": 0,
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="POLICY_MISMATCH"):
+        gateway._publish_sepolia_conservative_observations(
+            valuator=SimpleNamespace(address=Web3.to_checksum_address(VALUATOR)),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=existing,
+        )
+
+
+def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None:
+    assert settings.fund_csp_sepolia_conservative_observations_enabled is False
+    key = "0x" + f"{1:064x}"
+    monkeypatch.setattr(settings, "fund_csp_sepolia_observer_private_keys", key)
+    with pytest.raises(ValueError, match="exactly two"):
+        get_fund_csp_sepolia_observer_private_keys()
+
+    monkeypatch.setattr(
+        settings, "fund_csp_sepolia_observer_private_keys", f"{key},{key}"
+    )
+    with pytest.raises(ValueError, match="duplicate observers"):
+        get_fund_csp_sepolia_observer_private_keys()

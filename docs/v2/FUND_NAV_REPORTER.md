@@ -25,7 +25,8 @@ signature against `CspFundValuator.observationDigest` at the exact snapshot,
 checks the approved observer set and observation window, and stores the bound
 digest once per observer, position and snapshot. The runtime re-verifies stored
 digests, signatures, market-maker independence and exact quorum before passing
-`ValuationData` to `CspFundValuator.value`. It never computes option liability.
+`ValuationData` to `CspFundValuator.value`. The default runtime never computes
+option liability.
 
 The operational ingestion boundary is service-role only and intentionally not
 exposed as a public API. Submit one observer-produced JSON document with:
@@ -42,6 +43,16 @@ staging Supabase service role and Base Sepolia `RPC_URL`.
 Backend pricing and MM quotes are never substituted for observer evidence or
 valuator output. Attempts are idempotently recorded in `v2_nav_report_runs`,
 including blocked attempts and reason codes.
+
+For Base Sepolia functional cycles only, an explicit disabled-by-default policy
+can publish a synthetic conservative quorum at the reporter's exact trusted
+snapshot. It signs the full posted CSP collateral as the pre-expiry liability
+and zero base exit cost with two dedicated test keys, persists each row through
+`ObservationIngestor`, and lets the on-chain valuator apply its additional
+liability buffer and conservative maximum. This policy is restricted to chain
+`84532`, rejects keys shared with NAV reporters, and fails closed on signer,
+quorum, lifecycle, block, or policy mismatch. It is not executable pricing,
+independent market evidence, or a mainnet-readiness signal.
 
 ## Runtime gates
 
@@ -62,6 +73,12 @@ controls the bounded claim lease and must remain within the database-enforced
 head. The runtime rechecks the head, snapshot hash and report nonce immediately
 before pending-block simulation and submission. A consumed margin blocks the
 run instead of submitting a window likely to fail at inclusion.
+
+`FUND_CSP_SEPOLIA_CONSERVATIVE_OBSERVATIONS_ENABLED` gates the test-only
+publisher. When enabled it requires exactly two unique dedicated keys in
+`FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS`, Base Sepolia chain ID, and an enabled
+NAV reporter. The configured addresses must match the approved on-chain CSP
+valuator quorum. The keys must never be configured in production.
 
 Run identity is `(chain_id, fund_address, report_nonce)`. Its unique insert is
 the atomic ownership claim, so a losing instance does not sign, simulate, or
@@ -87,8 +104,8 @@ recovery and follow the database backup and operational data-retention policy.
 ## Current operating state
 
 The no-timelock B1N-352 redeployment and strict reconciliation are complete on
-Base Sepolia. The indexer is enabled in Railway staging and the continuous NAV
-reporter remains disabled intentionally. If explicitly enabled while the
-registry, reconciliation, NAV window, or reporter quorum is not valid, the
-reporter records a reason such as `MISSING_TRUSTED_DEPLOYMENT` and sends no
-transaction. No placeholder registry row or B1N-339 legacy address is seeded.
+Base Sepolia. The indexer and continuous NAV reporter are enabled in Railway
+staging. If the registry, reconciliation, NAV window, or reporter/observer
+quorum is not valid, the reporter records a reason such as
+`MISSING_TRUSTED_DEPLOYMENT` and sends no transaction. No placeholder registry
+row or B1N-339 legacy address is seeded.

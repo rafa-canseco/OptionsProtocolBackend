@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     fund_nav_reporter_lease_seconds: int = 180
     fund_nav_reporter_private_keys: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
+    fund_csp_sepolia_conservative_observations_enabled: bool = False
+    fund_csp_sepolia_observer_private_keys: str = ""
     fund_state_freshness_seconds: int = 180
     confirmed_head_freshness_seconds: int = 90
     circuit_breaker_poll_seconds: int = 10
@@ -214,6 +216,34 @@ def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
             raise ValueError("Invalid FUND_NAV_REPORTER_PRIVATE_KEYS entry") from exc
     if len(addresses) != len(set(addresses)):
         raise ValueError("FUND_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters")
+    return keys
+
+
+def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:
+    """Return the two dedicated keys for the Base Sepolia test observation policy."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_csp_sepolia_observer_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS must contain exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS contains duplicate observers"
+        )
     return keys
 
 

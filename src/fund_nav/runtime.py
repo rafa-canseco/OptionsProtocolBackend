@@ -1,6 +1,6 @@
 """Concrete DB and Web3 runtime for fail-closed NAV reporting."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -10,7 +10,11 @@ from hexbytes import HexBytes
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
-from src.config import get_fund_nav_reporter_private_keys, settings
+from src.config import (
+    get_fund_csp_sepolia_observer_private_keys,
+    get_fund_nav_reporter_private_keys,
+    settings,
+)
 from src.db.database import get_client
 from src.fund_nav.abis import (
     ACCESS_ABI,
@@ -23,8 +27,8 @@ from src.fund_nav.abis import (
     VALUATOR_ABI,
     VAULT_ABI,
 )
-from src.fund_nav.models import ComponentReport, IDLE_COMPONENT_ID
-from src.fund_nav.observations import OptionObservation
+from src.fund_nav.models import ComponentReport, IDLE_COMPONENT_ID, sign_digest
+from src.fund_nav.observations import ObservationIngestor, OptionObservation
 from src.fund_nav.reporter import (
     AmbiguousSubmission,
     NavReporter,
@@ -37,6 +41,7 @@ from src.fund_nav.reporter import (
 from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
 
 ACCOUNTING_ROLE = 2
+BASE_SEPOLIA_CHAIN_ID = 84532
 EIP1967_IMPLEMENTATION_SLOT = int(
     "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16
 )
@@ -104,6 +109,21 @@ class SupabaseNavRepository:
 
     def insert_verified(self, row: dict[str, Any]) -> None:
         get_client().table("v2_csp_option_observations").insert(row).execute()
+
+    def insert_verified_idempotent(self, row: dict[str, Any]) -> None:
+        (
+            get_client()
+            .table("v2_csp_option_observations")
+            .upsert(
+                row,
+                on_conflict=(
+                    "chain_id,valuator_address,adapter_address,position_id,"
+                    "snapshot_block,observer_address"
+                ),
+                ignore_duplicates=True,
+            )
+            .execute()
+        )
 
     def get_run(self, chain_id: int, fund: str, nonce: int) -> StoredRun | None:
         result = (
@@ -302,11 +322,17 @@ class SupabaseRunStore:
 
 class Web3ReporterGateway:
     def __init__(
-        self, w3: Web3, fund: TrustedFund, repository: SupabaseNavRepository
+        self,
+        w3: Web3,
+        fund: TrustedFund,
+        repository: SupabaseNavRepository,
+        *,
+        sepolia_observer_private_keys: tuple[str, ...] = (),
     ) -> None:
         self.w3 = w3
         self.fund = fund
         self.repository = repository
+        self.sepolia_observer_private_keys = sepolia_observer_private_keys
         self.addresses = {
             role: Web3.to_checksum_address(row["contract_address"])
             for role, row in fund.contracts.items()
@@ -524,7 +550,7 @@ class Web3ReporterGateway:
             valuator.functions.observationQuorum().call(block_identifier=block)
         )
         timestamp = int(self.w3.eth.get_block(block)["timestamp"])
-        selected = []
+        open_positions = []
         for position_id in range(1, count + 1):
             position = adapter_contract.functions.position(position_id).call(
                 block_identifier=block
@@ -534,8 +560,24 @@ class Web3ReporterGateway:
                 .functions.expiry()
                 .call(block_identifier=block)
             )
-            if int(position[11]) != 1 or timestamp >= expiry:
-                continue
+            if int(position[11]) == 1 and timestamp < expiry:
+                open_positions.append((position_id, position))
+
+        if self.sepolia_observer_private_keys and open_positions:
+            self._publish_sepolia_conservative_observations(
+                valuator=valuator,
+                adapter=adapter,
+                block=block,
+                quorum=quorum,
+                positions=open_positions,
+                existing_rows=rows,
+            )
+            rows = self.repository.observations(
+                self.fund.chain_id, self.fund.address, adapter.lower(), block
+            )
+
+        selected = []
+        for position_id, position in open_positions:
             selected.extend(
                 self._position_observations(
                     valuator=valuator,
@@ -550,6 +592,94 @@ class Web3ReporterGateway:
         if len(selected) != len(rows):
             raise RuntimeError("UNUSED_OBSERVATION")
         return selected
+
+    def _publish_sepolia_conservative_observations(
+        self,
+        *,
+        valuator,
+        adapter: str,
+        block: int,
+        quorum: int,
+        positions,
+        existing_rows,
+    ) -> None:
+        if self.chain_id() != BASE_SEPOLIA_CHAIN_ID:
+            raise RuntimeError("CONSERVATIVE_OBSERVATIONS_WRONG_CHAIN")
+        if len(self.sepolia_observer_private_keys) != quorum:
+            raise RuntimeError("CONSERVATIVE_OBSERVATION_QUORUM_MISMATCH")
+
+        signers = tuple(
+            (Account.from_key(private_key).address.lower(), private_key)
+            for private_key in self.sepolia_observer_private_keys
+        )
+        signer_addresses = {address for address, _ in signers}
+        if len(signer_addresses) != quorum:
+            raise RuntimeError("CONSERVATIVE_OBSERVATION_SIGNER_MISMATCH")
+
+        max_window = self.max_observation_window(valuator.address, block)
+        valid_until = block + max_window
+        if valid_until < self.head_block():
+            raise RuntimeError("CONSERVATIVE_OBSERVATION_WINDOW_EXPIRED")
+        block_hash = Web3.to_hex(self.block_hash(block))
+        ingestor = ObservationIngestor(
+            self, _IdempotentObservationStore(self.repository)
+        )
+
+        for position_id, position in positions:
+            market_maker = position[1].lower()
+            if not any(address != market_maker for address in signer_addresses):
+                raise RuntimeError("CONSERVATIVE_OBSERVATION_NOT_INDEPENDENT")
+            collateral = int(position[4])
+            position_rows = [
+                row for row in existing_rows if int(row["position_id"]) == position_id
+            ]
+            existing_signers = set()
+            for row in position_rows:
+                if row["observer_address"] not in signer_addresses:
+                    raise RuntimeError("CONSERVATIVE_OBSERVATION_SIGNER_MISMATCH")
+                if (
+                    int(row["liability"]) != collateral
+                    or int(row["base_exit_cost"]) != 0
+                ):
+                    raise RuntimeError("CONSERVATIVE_OBSERVATION_POLICY_MISMATCH")
+                existing_signers.add(row["observer_address"])
+
+            for observer, private_key in signers:
+                if observer in existing_signers:
+                    continue
+                nonce = int.from_bytes(
+                    Web3.keccak(
+                        text=(f"B1N-366:{observer}:{position_id}:{block}:{valid_until}")
+                    ),
+                    "big",
+                )
+                unsigned = OptionObservation(
+                    chain_id=self.fund.chain_id,
+                    fund_address=self.fund.address,
+                    valuator_address=valuator.address.lower(),
+                    adapter_address=adapter.lower(),
+                    position_id=position_id,
+                    snapshot_block=block,
+                    snapshot_block_hash=block_hash,
+                    valid_until_block=valid_until,
+                    liability=collateral,
+                    base_exit_cost=0,
+                    observation_nonce=nonce,
+                    signature="0x" + "00" * 65,
+                )
+                digest = self.observation_digest(unsigned)
+                signed = replace(
+                    unsigned,
+                    signature=Web3.to_hex(sign_digest(digest, private_key)),
+                )
+                try:
+                    ingestor.ingest(signed)
+                except ValueError as exc:
+                    if str(exc) == "UNAPPROVED_OBSERVER":
+                        raise RuntimeError(
+                            "CONSERVATIVE_OBSERVER_NOT_APPROVED"
+                        ) from exc
+                    raise
 
     def _position_observations(
         self,
@@ -651,9 +781,7 @@ class Web3ReporterGateway:
         ).call(block_identifier="pending")
         member, delay = access.functions.hasRole(
             ACCOUNTING_ROLE, Web3.to_checksum_address(account)
-        ).call(
-            block_identifier="pending"
-        )
+        ).call(block_identifier="pending")
         return int(role) == ACCOUNTING_ROLE and bool(member) and int(delay) == 0
 
     def simulate(self, *, report_nonce, reports, reporters, signatures, sender) -> None:
@@ -763,6 +891,14 @@ class Web3ReporterGateway:
         )
 
 
+class _IdempotentObservationStore:
+    def __init__(self, repository: SupabaseNavRepository):
+        self.repository = repository
+
+    def insert_verified(self, row: dict[str, Any]) -> None:
+        self.repository.insert_verified_idempotent(row)
+
+
 class BlockedReporter:
     def __init__(self, repository: SupabaseNavRepository, fund, reason):
         self.repository = repository
@@ -818,7 +954,17 @@ def _build_fund_reporter(repository, fund):
     if fund.trust_reason:
         return BlockedReporter(repository, fund, fund.trust_reason)
     w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
-    gateway = Web3ReporterGateway(w3, fund, repository)
+    observer_keys = (
+        get_fund_csp_sepolia_observer_private_keys()
+        if settings.fund_csp_sepolia_conservative_observations_enabled
+        else ()
+    )
+    gateway = Web3ReporterGateway(
+        w3,
+        fund,
+        repository,
+        sepolia_observer_private_keys=observer_keys,
+    )
     reporter = NavReporter(
         gateway,
         SupabaseRunStore(repository),
