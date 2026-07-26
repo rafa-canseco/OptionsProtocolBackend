@@ -46,10 +46,10 @@ including blocked attempts and reason codes.
 
 For Base Sepolia functional cycles only, an explicit disabled-by-default policy
 can publish a synthetic conservative quorum at the reporter's exact trusted
-snapshot. It signs the full posted CSP collateral as the pre-expiry liability
-and zero base exit cost with two dedicated test keys, persists each row through
-`ObservationIngestor`, and lets the on-chain valuator apply its additional
-liability buffer and conservative maximum. This policy is restricted to chain
+snapshot. It calibrates the signed pre-expiry liability so the on-chain
+liability buffer produces exactly the full posted CSP collateral, signs zero
+base exit cost with two dedicated test keys, and persists each row through
+`ObservationIngestor`. This policy is restricted to chain
 `84532`, rejects keys shared with NAV reporters, and fails closed on signer,
 quorum, lifecycle, block, or policy mismatch. It is not executable pricing,
 independent market evidence, or a mainnet-readiness signal.

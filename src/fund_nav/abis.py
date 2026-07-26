@@ -184,6 +184,7 @@ VALUATOR_ABI = [
     ),
     _function("observationQuorum", [], [_field("", "uint8")]),
     _function("maxObservationWindow", [], [_field("", "uint64")]),
+    _function("liabilityBufferBps", [], [_field("", "uint16")]),
     _function(
         "isApprovedObserver",
         [_field("observer", "address")],

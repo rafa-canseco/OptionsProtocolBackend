@@ -620,6 +620,9 @@ class Web3ReporterGateway:
         valid_until = block + max_window
         if valid_until < self.head_block():
             raise RuntimeError("CONSERVATIVE_OBSERVATION_WINDOW_EXPIRED")
+        liability_buffer_bps = int(
+            valuator.functions.liabilityBufferBps().call(block_identifier=block)
+        )
         block_hash = Web3.to_hex(self.block_hash(block))
         ingestor = ObservationIngestor(
             self, _IdempotentObservationStore(self.repository)
@@ -630,6 +633,7 @@ class Web3ReporterGateway:
             if not any(address != market_maker for address in signer_addresses):
                 raise RuntimeError("CONSERVATIVE_OBSERVATION_NOT_INDEPENDENT")
             collateral = int(position[4])
+            observed_liability = collateral * 10_000 // (10_000 + liability_buffer_bps)
             position_rows = [
                 row for row in existing_rows if int(row["position_id"]) == position_id
             ]
@@ -638,7 +642,7 @@ class Web3ReporterGateway:
                 if row["observer_address"] not in signer_addresses:
                     raise RuntimeError("CONSERVATIVE_OBSERVATION_SIGNER_MISMATCH")
                 if (
-                    int(row["liability"]) != collateral
+                    int(row["liability"]) != observed_liability
                     or int(row["base_exit_cost"]) != 0
                 ):
                     raise RuntimeError("CONSERVATIVE_OBSERVATION_POLICY_MISMATCH")
@@ -662,7 +666,7 @@ class Web3ReporterGateway:
                     snapshot_block=block,
                     snapshot_block_hash=block_hash,
                     valid_until_block=valid_until,
-                    liability=collateral,
+                    liability=observed_liability,
                     base_exit_cost=0,
                     observation_nonce=nonce,
                     signature="0x" + "00" * 65,

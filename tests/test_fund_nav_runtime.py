@@ -359,6 +359,26 @@ class ConservativeObservationRepository:
             self.rows.append(row)
 
 
+class ConservativeValuatorFunctions:
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    def liabilityBufferBps(self):
+        return self.Call(1_000)
+
+
+def conservative_valuator():
+    return SimpleNamespace(
+        address=Web3.to_checksum_address(VALUATOR),
+        functions=ConservativeValuatorFunctions(),
+    )
+
+
 def conservative_gateway(keys):
     market_maker = Account.from_key("0x" + f"{3:064x}").address.lower()
     repository = ConservativeObservationRepository()
@@ -397,7 +417,7 @@ def conservative_gateway(keys):
 def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
     keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
     gateway, repository, position = conservative_gateway(keys)
-    valuator = SimpleNamespace(address=Web3.to_checksum_address(VALUATOR))
+    valuator = conservative_valuator()
 
     gateway._publish_sepolia_conservative_observations(
         valuator=valuator,
@@ -417,7 +437,10 @@ def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
     )
 
     assert len(repository.rows) == 2
-    assert {int(row["liability"]) for row in repository.rows} == {25}
+    assert {int(row["liability"]) for row in repository.rows} == {22}
+    assert {
+        (int(row["liability"]) * 11_000 + 9_999) // 10_000 for row in repository.rows
+    } == {25}
     assert {int(row["base_exit_cost"]) for row in repository.rows} == {0}
     assert len({row["observation_nonce"] for row in repository.rows}) == 2
     assert {row["snapshot_block_hash"] for row in repository.rows} == {"0x" + "12" * 32}
@@ -450,7 +473,7 @@ def test_sepolia_conservative_observations_fail_closed(mutation, reason) -> None
 
     with pytest.raises(RuntimeError, match=reason):
         gateway._publish_sepolia_conservative_observations(
-            valuator=SimpleNamespace(address=Web3.to_checksum_address(VALUATOR)),
+            valuator=conservative_valuator(),
             adapter=ADAPTER,
             block=100,
             quorum=2,
@@ -473,7 +496,7 @@ def test_sepolia_conservative_observations_reject_policy_mismatch() -> None:
 
     with pytest.raises(RuntimeError, match="POLICY_MISMATCH"):
         gateway._publish_sepolia_conservative_observations(
-            valuator=SimpleNamespace(address=Web3.to_checksum_address(VALUATOR)),
+            valuator=conservative_valuator(),
             adapter=ADAPTER,
             block=100,
             quorum=2,
