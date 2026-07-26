@@ -116,6 +116,7 @@ class ReporterGateway(Protocol):
         private_key: str,
     ) -> SignedTransaction: ...
     def broadcast(self, transaction: SignedTransaction) -> str: ...
+    def wait_until_block(self, block_number: int, timeout: int) -> bool: ...
     def wait(self, transaction_hash: str, timeout: int) -> bool: ...
 
 
@@ -309,6 +310,23 @@ class NavReporter:
     ) -> ReportRun:
         run_id = prepared.run_id
         token = prepared.ownership_token
+        valid_after = prepared.reports[0].valid_after_block
+        build_at = max(prepared.snapshot.head_block, valid_after - 10)
+        if (
+            self.gateway.head_block() < build_at
+            and not self.gateway.wait_until_block(build_at, self.transaction_timeout)
+        ):
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    "ACTIVATION_WAIT_TIMEOUT",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
         try:
             transaction = self.gateway.build_transaction(
                 report_nonce=prepared.report_nonce,
@@ -324,6 +342,34 @@ class NavReporter:
                 self._detailed_run(
                     "failed",
                     "SUBMISSION_FAILED",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
+        if not self.gateway.wait_until_block(
+            valid_after,
+            self.transaction_timeout,
+        ):
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    "ACTIVATION_WAIT_TIMEOUT",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
+        reason = self._broadcast_reason(prepared.snapshot, prepared.reports[0])
+        if reason:
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    reason,
                     report_rows,
                     prepared.reporters,
                     signature_rows,
@@ -598,6 +644,23 @@ class NavReporter:
             return "STALE_SNAPSHOT"
         if head + self.inclusion_margin > report.valid_after_block:
             return "REPORT_WINDOW_MARGIN_CONSUMED"
+        if self.gateway.report_nonce() != snapshot.last_report_nonce:
+            return "REPORT_NONCE_CHANGED"
+        return None
+
+    def _broadcast_reason(
+        self, snapshot: ReporterSnapshot, report: ComponentReport
+    ) -> str | None:
+        if (
+            self.gateway.block_hash(snapshot.snapshot_block)
+            != snapshot.snapshot_block_hash
+        ):
+            return "SNAPSHOT_BLOCK_CHANGED"
+        head = self.gateway.head_block()
+        if head - snapshot.snapshot_block > snapshot.max_snapshot_age:
+            return "STALE_SNAPSHOT"
+        if head > report.valid_until_block:
+            return "REPORT_WINDOW_EXPIRED"
         if self.gateway.report_nonce() != snapshot.last_report_nonce:
             return "REPORT_NONCE_CHANGED"
         return None

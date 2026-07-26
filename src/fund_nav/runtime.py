@@ -1,5 +1,6 @@
 """Concrete DB and Web3 runtime for fail-closed NAV reporting."""
 
+import time
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
@@ -1027,6 +1028,14 @@ class Web3ReporterGateway:
         if observed != transaction.transaction_hash:
             raise RuntimeError("TRANSACTION_HASH_MISMATCH")
         return transaction.transaction_hash
+
+    def wait_until_block(self, block_number: int, timeout: int) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.head_block() < block_number:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(1)
+        return True
 
     def wait(self, transaction_hash: str, timeout: int) -> bool:
         try:

@@ -173,6 +173,8 @@ class Gateway:
         self.role_accounts = set(REPORTERS)
         self.tx_status = "unknown"
         self.wait_result = True
+        self.activation_wait_result = True
+        self.activation_waits = []
         self.broadcasted = []
 
     def snapshot(self):
@@ -220,6 +222,12 @@ class Gateway:
         self.submissions += 1
         self.broadcasted.append(transaction)
         return TX_HASH
+
+    def wait_until_block(self, block_number, _timeout):
+        self.activation_waits.append(block_number)
+        if self.activation_wait_result:
+            self.current_head = max(self.current_head, block_number)
+        return self.activation_wait_result
 
     def wait(self, _tx, _timeout):
         return self.wait_result
@@ -342,12 +350,23 @@ def test_component_nonce_and_hash_are_bound() -> None:
     assert service.run_once().reason_code == "WRONG_POSITION_STATE_HASH"
 
 
-def test_consumed_inclusion_margin_blocks_before_simulation_or_send() -> None:
+def test_refreshes_consumed_margin_and_submits_at_activation() -> None:
     service, gateway = reporter()
     gateway.current_head = 102
 
     run = service.run_once()
-    assert run.reason_code == "REPORT_WINDOW_MARGIN_CONSUMED"
+    assert run.status == "confirmed"
+    assert gateway.activation_waits == [105, 115]
+    assert gateway.submissions == 1
+
+
+def test_activation_wait_timeout_never_sends() -> None:
+    service, gateway = reporter()
+    gateway.activation_wait_result = False
+
+    run = service.run_once()
+
+    assert run.reason_code == "ACTIVATION_WAIT_TIMEOUT"
     assert gateway.submissions == 0
 
 
