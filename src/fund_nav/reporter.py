@@ -347,8 +347,9 @@ class NavReporter:
                     signature_rows,
                 ),
             )
+        submission_block = valid_after - 2
         if not self.gateway.wait_until_block(
-            valid_after,
+            submission_block,
             self.transaction_timeout,
         ):
             return self._finish(
@@ -661,6 +662,8 @@ class NavReporter:
             return "STALE_SNAPSHOT"
         if head > report.valid_until_block:
             return "REPORT_WINDOW_EXPIRED"
+        if head + 1 >= report.valid_after_block:
+            return "REPORT_WINDOW_MARGIN_CONSUMED"
         if self.gateway.report_nonce() != snapshot.last_report_nonce:
             return "REPORT_NONCE_CHANGED"
         return None
