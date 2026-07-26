@@ -892,7 +892,9 @@ class Web3ReporterGateway:
         return contract.functions.position(position_id).call(block_identifier=block)[1]
 
     def max_observation_window(self, valuator: str, block: int) -> int:
-        contract = self.w3.eth.contract(address=valuator, abi=VALUATOR_ABI)
+        contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(valuator), abi=VALUATOR_ABI
+        )
         return int(
             contract.functions.maxObservationWindow().call(block_identifier=block)
         )

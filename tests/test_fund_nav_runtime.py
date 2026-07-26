@@ -293,6 +293,9 @@ def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
         def position(self, _position_id):
             return Call((FUND, ADAPTER))
 
+        def maxObservationWindow(self):
+            return Call(120)
+
     class Eth:
         def contract(self, address, abi):
             assert Web3.is_checksum_address(address)
@@ -319,10 +322,12 @@ def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
     assert gateway.observation_digest(observation) == bytes.fromhex("34" * 32)
     assert gateway.observer_approved(VALUATOR.lower(), FUND, 100) is True
     assert gateway.market_maker(ADAPTER.lower(), 1, 100) == ADAPTER
+    assert gateway.max_observation_window(VALUATOR.lower(), 100) == 120
     assert seen == [
         Web3.to_checksum_address(VALUATOR),
         Web3.to_checksum_address(VALUATOR),
         Web3.to_checksum_address(ADAPTER),
+        Web3.to_checksum_address(VALUATOR),
     ]
 
 
