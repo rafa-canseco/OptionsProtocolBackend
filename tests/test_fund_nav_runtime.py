@@ -32,6 +32,7 @@ VALUATOR = "0xf000000000000000000000000000000000000002"
 ADAPTER = "0xf000000000000000000000000000000000000003"
 OTOKEN = "0xf000000000000000000000000000000000000004"
 USDC = "0xf000000000000000000000000000000000000005"
+WETH = "0xf000000000000000000000000000000000000006"
 CAST_VALUATION_DATA_FIXTURE = (
     "0000000000000000000000000000000000000000000000000000000000000020"
     "0000000000000000000000000000000000000000000000000000000000000020"
@@ -463,6 +464,9 @@ def fair_value_gateway(keys):
         def accountingAsset(self):
             return Call(USDC)
 
+        def weth(self):
+            return Call(WETH)
+
     class TokenFunctions:
         def decimals(self):
             return Call(6)
@@ -470,6 +474,15 @@ def fair_value_gateway(keys):
     class OTokenFunctions:
         def isPut(self):
             return Call(True)
+
+        def underlying(self):
+            return Call(WETH)
+
+        def strikeAsset(self):
+            return Call(USDC)
+
+        def collateralAsset(self):
+            return Call(USDC)
 
         def strikePrice(self):
             return Call(157_500_000_000)

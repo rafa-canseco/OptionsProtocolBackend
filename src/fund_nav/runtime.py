@@ -692,6 +692,7 @@ class Web3ReporterGateway:
         accounting_asset = adapter_contract.functions.accountingAsset().call(
             block_identifier=block
         )
+        underlying = adapter_contract.functions.weth().call(block_identifier=block)
         accounting_decimals = int(
             self.w3.eth.contract(address=accounting_asset, abi=ERC20_ABI)
             .functions.decimals()
@@ -703,7 +704,17 @@ class Web3ReporterGateway:
             if not any(address != market_maker for address in signer_addresses):
                 raise RuntimeError("FAIR_VALUE_OBSERVATION_NOT_INDEPENDENT")
             otoken = self.w3.eth.contract(address=position[0], abi=OTOKEN_ABI)
-            if not bool(otoken.functions.isPut().call(block_identifier=block)):
+            if (
+                not bool(otoken.functions.isPut().call(block_identifier=block))
+                or otoken.functions.underlying().call(block_identifier=block).lower()
+                != underlying.lower()
+                or otoken.functions.strikeAsset().call(block_identifier=block).lower()
+                != accounting_asset.lower()
+                or otoken.functions.collateralAsset()
+                .call(block_identifier=block)
+                .lower()
+                != accounting_asset.lower()
+            ):
                 raise RuntimeError("FAIR_VALUE_REQUIRES_EUROPEAN_PUT")
             strike = int(otoken.functions.strikePrice().call(block_identifier=block))
             expiry = int(otoken.functions.expiry().call(block_identifier=block))

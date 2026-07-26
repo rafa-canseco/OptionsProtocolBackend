@@ -159,6 +159,7 @@ ADAPTER_STATE_FIELDS = [
 ADAPTER_ABI = [
     _function("interfaceVersion", [], [_field("", "uint64")]),
     _function("accountingAsset", [], [_field("", "address")]),
+    _function("weth", [], [_field("", "address")]),
     _function("adapterState", [], [_field("state", "tuple", ADAPTER_STATE_FIELDS)]),
     _function(
         "position",
@@ -216,6 +217,8 @@ VALUATOR_ABI = [
 ]
 OTOKEN_ABI = [
     _function("underlying", [], [_field("", "address")]),
+    _function("strikeAsset", [], [_field("", "address")]),
+    _function("collateralAsset", [], [_field("", "address")]),
     _function("strikePrice", [], [_field("", "uint256")]),
     _function("expiry", [], [_field("", "uint256")]),
     _function("isPut", [], [_field("", "bool")]),
