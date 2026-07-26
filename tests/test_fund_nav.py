@@ -356,7 +356,7 @@ def test_refreshes_consumed_margin_and_submits_at_activation() -> None:
 
     run = service.run_once()
     assert run.status == "confirmed"
-    assert gateway.activation_waits == [105, 113]
+    assert gateway.activation_waits == [110, 117]
     assert gateway.submissions == 1
 
 

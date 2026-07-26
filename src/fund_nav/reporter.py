@@ -14,6 +14,9 @@ from src.fund_nav.models import (
     signature_digest,
 )
 
+EXECUTION_BUFFER_BLOCKS = 15
+SUBMISSION_LEAD_BLOCKS = 3
+
 
 @dataclass(frozen=True, slots=True)
 class ReporterSnapshot:
@@ -228,7 +231,7 @@ class NavReporter:
         # Leave a small execution buffer for the simulation and submission RPCs;
         # the contract still enforces the snapshot age and activation window.
         valid_after = max(
-            current_head + self.inclusion_margin + 10,
+            current_head + self.inclusion_margin + EXECUTION_BUFFER_BLOCKS,
             snapshot.snapshot_block + snapshot.activation_delay,
         )
         valid_until = valid_after + snapshot.max_window_length
@@ -347,7 +350,7 @@ class NavReporter:
                     signature_rows,
                 ),
             )
-        submission_block = valid_after - 2
+        submission_block = valid_after - SUBMISSION_LEAD_BLOCKS
         if not self.gateway.wait_until_block(
             submission_block,
             self.transaction_timeout,
@@ -662,7 +665,7 @@ class NavReporter:
             return "STALE_SNAPSHOT"
         if head > report.valid_until_block:
             return "REPORT_WINDOW_EXPIRED"
-        if head + 1 >= report.valid_after_block:
+        if head + SUBMISSION_LEAD_BLOCKS - 1 >= report.valid_after_block:
             return "REPORT_WINDOW_MARGIN_CONSUMED"
         if self.gateway.report_nonce() != snapshot.last_report_nonce:
             return "REPORT_NONCE_CHANGED"
