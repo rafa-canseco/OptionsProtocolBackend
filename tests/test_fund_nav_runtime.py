@@ -6,8 +6,14 @@ from eth_account import Account
 from web3 import Web3
 
 from src.bots import fund_nav_reporter
-from src.config import get_fund_csp_sepolia_observer_private_keys, settings
+from src.config import (
+    get_fund_csp_sepolia_fair_value_policy,
+    get_fund_csp_sepolia_observer_private_keys,
+    settings,
+)
 from src.fund_nav import runtime
+from src.fund_nav.fair_value import FairValuePolicy, observation_model_version
+from src.fund_nav.fair_value import versioned_observation_nonce
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
@@ -24,6 +30,8 @@ from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
 FUND = "0xf000000000000000000000000000000000000001"
 VALUATOR = "0xf000000000000000000000000000000000000002"
 ADAPTER = "0xf000000000000000000000000000000000000003"
+OTOKEN = "0xf000000000000000000000000000000000000004"
+USDC = "0xf000000000000000000000000000000000000005"
 CAST_VALUATION_DATA_FIXTURE = (
     "0000000000000000000000000000000000000000000000000000000000000020"
     "0000000000000000000000000000000000000000000000000000000000000020"
@@ -217,6 +225,12 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
         def isApprovedObserver(self, _observer):
             return Call(True)
 
+        def requiredModelVersion(self):
+            return Call(1)
+
+        def maxObservationDivergenceBps(self):
+            return Call(500)
+
     valuator = SimpleNamespace(
         address=Web3.to_checksum_address(VALUATOR), functions=Functions()
     )
@@ -238,7 +252,7 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
             "valid_until_block": 110,
             "liability": "20",
             "base_exit_cost": "2",
-            "observation_nonce": str(index + 1),
+            "observation_nonce": str(versioned_observation_nonce(index + 1)),
             "signature": Web3.to_hex(sign_digest(digest, key)),
             "digest": Web3.to_hex(digest),
             "observer_address": observers[index],
@@ -257,6 +271,19 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
         quorum=2,
     )
     assert len(accepted) == 2
+
+    divergent_rows = [dict(row) for row in rows]
+    divergent_rows[1]["liability"] = "22"
+    with pytest.raises(RuntimeError, match="DIVERGENCE_EXCEEDED"):
+        gateway._position_observations(
+            valuator=valuator,
+            adapter=ADAPTER,
+            block=100,
+            position_id=1,
+            market_maker=observers[0],
+            rows=divergent_rows,
+            quorum=2,
+        )
 
     with pytest.raises(RuntimeError, match="INCOMPLETE_OBSERVER_QUORUM"):
         gateway._position_observations(
@@ -331,9 +358,10 @@ def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
     ]
 
 
-class ConservativeObservationRepository:
+class FairValueObservationRepository:
     def __init__(self):
         self.rows = []
+        self.marks = []
 
     def insert_verified_idempotent(self, row):
         identity = (
@@ -358,8 +386,11 @@ class ConservativeObservationRepository:
         ):
             self.rows.append(row)
 
+    def upsert_fair_value_mark(self, row):
+        self.marks = [row]
 
-class ConservativeValuatorFunctions:
+
+class FairValueValuatorFunctions:
     class Call:
         def __init__(self, value):
             self.value = value
@@ -368,25 +399,43 @@ class ConservativeValuatorFunctions:
             assert block_identifier == 100
             return self.value
 
+    def interfaceVersion(self):
+        return self.Call(1)
+
+    def valuationPolicyVersion(self):
+        return self.Call(2)
+
+    def requiredModelVersion(self):
+        return self.Call(1)
+
     def liabilityBufferBps(self):
-        return self.Call(1_000)
+        return self.Call(0)
+
+    def maxObservationDivergenceBps(self):
+        return self.Call(500)
 
 
-def conservative_valuator():
+def fair_value_valuator():
     return SimpleNamespace(
         address=Web3.to_checksum_address(VALUATOR),
-        functions=ConservativeValuatorFunctions(),
+        functions=FairValueValuatorFunctions(),
     )
 
 
-def conservative_gateway(keys):
+def fair_value_gateway(keys):
     market_maker = Account.from_key("0x" + f"{3:064x}").address.lower()
-    repository = ConservativeObservationRepository()
+    repository = FairValueObservationRepository()
     fund = TrustedFund({"chain_id": 84532, "fund_address": FUND}, {}, {}, None)
     gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
     gateway.fund = fund
     gateway.repository = repository
     gateway.sepolia_observer_private_keys = keys
+    gateway.fair_value_policy = FairValuePolicy(
+        implied_volatility_bps=4_200,
+        implied_volatility_source="approved-testnet-snapshot",
+        risk_free_rate_bps=500,
+        settlement_cost_bps=0,
+    )
     gateway.chain_id = lambda: 84532
     gateway.block_hash = lambda _block: bytes.fromhex("12" * 32)
     gateway.head_block = lambda: 101
@@ -396,12 +445,57 @@ def conservative_gateway(keys):
     gateway.observation_digest = lambda observation: Web3.keccak(
         text=f"{observation.position_id}:{observation.observation_nonce}"
     )
+    gateway._approved_spot_snapshot = lambda **_kwargs: {
+        "round_id": 7,
+        "price_8": 191_213_078_641,
+        "updated_at": 1_785_090_000,
+    }
+
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    class AdapterFunctions:
+        def accountingAsset(self):
+            return Call(USDC)
+
+    class TokenFunctions:
+        def decimals(self):
+            return Call(6)
+
+    class OTokenFunctions:
+        def isPut(self):
+            return Call(True)
+
+        def strikePrice(self):
+            return Call(157_500_000_000)
+
+        def expiry(self):
+            return Call(1_785_139_200)
+
+    class Eth:
+        def get_block(self, _block):
+            return {"timestamp": 1_785_090_604}
+
+        def contract(self, address, abi):
+            functions = {
+                Web3.to_checksum_address(ADAPTER): AdapterFunctions(),
+                Web3.to_checksum_address(USDC): TokenFunctions(),
+                Web3.to_checksum_address(OTOKEN): OTokenFunctions(),
+            }[Web3.to_checksum_address(address)]
+            return SimpleNamespace(functions=functions)
+
+    gateway.w3 = SimpleNamespace(eth=Eth())
     position = (
-        FUND,
+        OTOKEN,
         market_maker,
         1,
-        1,
-        25,
+        50_793_650,
+        799_999_988,
         0,
         0,
         0,
@@ -414,12 +508,12 @@ def conservative_gateway(keys):
     return gateway, repository, position
 
 
-def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
+def test_sepolia_fair_value_observations_are_exact_and_idempotent() -> None:
     keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
-    gateway, repository, position = conservative_gateway(keys)
-    valuator = conservative_valuator()
+    gateway, repository, position = fair_value_gateway(keys)
+    valuator = fair_value_valuator()
 
-    gateway._publish_sepolia_conservative_observations(
+    gateway._publish_sepolia_fair_value_observations(
         valuator=valuator,
         adapter=ADAPTER,
         block=100,
@@ -427,7 +521,7 @@ def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
         positions=[(1, position)],
         existing_rows=[],
     )
-    gateway._publish_sepolia_conservative_observations(
+    gateway._publish_sepolia_fair_value_observations(
         valuator=valuator,
         adapter=ADAPTER,
         block=100,
@@ -437,13 +531,17 @@ def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
     )
 
     assert len(repository.rows) == 2
-    assert {int(row["liability"]) for row in repository.rows} == {22}
-    assert {
-        (int(row["liability"]) * 11_000 + 9_999) // 10_000 for row in repository.rows
-    } == {25}
+    assert {int(row["liability"]) for row in repository.rows} == {1}
     assert {int(row["base_exit_cost"]) for row in repository.rows} == {0}
     assert len({row["observation_nonce"] for row in repository.rows}) == 2
+    assert {
+        observation_model_version(int(row["observation_nonce"]))
+        for row in repository.rows
+    } == {1}
     assert {row["snapshot_block_hash"] for row in repository.rows} == {"0x" + "12" * 32}
+    assert repository.marks[0]["fair_liability_assets"] == "1"
+    assert repository.marks[0]["stress_liability_assets"] == "799999988"
+    assert repository.marks[0]["source_quality"] == "single_model_multi_signer"
 
 
 @pytest.mark.parametrize(
@@ -466,14 +564,14 @@ def test_sepolia_conservative_observations_are_exact_and_idempotent() -> None:
         ),
     ],
 )
-def test_sepolia_conservative_observations_fail_closed(mutation, reason) -> None:
+def test_sepolia_fair_value_observations_fail_closed(mutation, reason) -> None:
     keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
-    gateway, _repository, position = conservative_gateway(keys)
+    gateway, _repository, position = fair_value_gateway(keys)
     mutation(gateway)
 
     with pytest.raises(RuntimeError, match=reason):
-        gateway._publish_sepolia_conservative_observations(
-            valuator=conservative_valuator(),
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
             adapter=ADAPTER,
             block=100,
             quorum=2,
@@ -482,21 +580,22 @@ def test_sepolia_conservative_observations_fail_closed(mutation, reason) -> None
         )
 
 
-def test_sepolia_conservative_observations_reject_policy_mismatch() -> None:
+def test_sepolia_fair_value_observations_reject_policy_mismatch() -> None:
     keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
-    gateway, _repository, position = conservative_gateway(keys)
+    gateway, _repository, position = fair_value_gateway(keys)
     existing = [
         {
             "position_id": 1,
             "observer_address": Account.from_key(keys[0]).address.lower(),
-            "liability": 24,
+            "liability": 2,
             "base_exit_cost": 0,
+            "observation_nonce": str(1 << 192),
         }
     ]
 
     with pytest.raises(RuntimeError, match="POLICY_MISMATCH"):
-        gateway._publish_sepolia_conservative_observations(
-            valuator=conservative_valuator(),
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
             adapter=ADAPTER,
             block=100,
             quorum=2,
@@ -506,7 +605,7 @@ def test_sepolia_conservative_observations_reject_policy_mismatch() -> None:
 
 
 def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None:
-    assert settings.fund_csp_sepolia_conservative_observations_enabled is False
+    assert settings.fund_csp_sepolia_fair_value_observations_enabled is False
     key = "0x" + f"{1:064x}"
     monkeypatch.setattr(settings, "fund_csp_sepolia_observer_private_keys", key)
     with pytest.raises(ValueError, match="exactly two"):
@@ -517,3 +616,11 @@ def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None
     )
     with pytest.raises(ValueError, match="duplicate observers"):
         get_fund_csp_sepolia_observer_private_keys()
+
+
+def test_sepolia_fair_value_policy_has_no_implicit_iv_default(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_bps", 0)
+    monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_source", "")
+
+    with pytest.raises(ValueError, match="IV_BPS"):
+        get_fund_csp_sepolia_fair_value_policy()

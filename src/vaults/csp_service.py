@@ -22,6 +22,7 @@ from src.models.csp_vault import (
     FundSummaryResponse,
     NavWindow,
     RedemptionView,
+    StressNav,
     TokenMetadata,
     TrustedContract,
 )
@@ -58,6 +59,10 @@ class FundRepository(Protocol):
     def registries(self) -> list[dict[str, Any]]: ...
     def state(self, chain_id: int, fund: str) -> dict[str, Any] | None: ...
     def inventory(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def active_positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def nav_valuation(
+        self, chain_id: int, fund: str, report_nonce: int
+    ) -> dict[str, Any] | None: ...
     def position(self, chain_id: int, fund: str, wallet: str) -> dict[str, Any]: ...
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
     def confirmed_head(self, chain_id: int) -> dict[str, Any] | None: ...
@@ -85,6 +90,45 @@ class SupabaseFundRepository:
         return (
             self._fund_query("v2_fund_inventory", chain_id, fund).execute().data or []
         )
+
+    def active_positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
+        rows = self._fund_query("v2_csp_positions", chain_id, fund).execute().data or []
+        return [
+            row
+            for row in rows
+            if row.get("lifecycle") in {"open", "awaiting_physical_delivery"}
+        ]
+
+    def nav_valuation(
+        self, chain_id: int, fund: str, report_nonce: int
+    ) -> dict[str, Any] | None:
+        if report_nonce <= 0:
+            return None
+        run = (
+            self._fund_query("v2_nav_report_runs", chain_id, fund)
+            .eq("report_nonce", report_nonce)
+            .eq("status", "confirmed")
+            .limit(1)
+            .execute()
+        )
+        if not run.data:
+            return None
+        row = run.data[0]
+        snapshot_block = int(row["snapshot_block"])
+        marks = (
+            self._fund_query("v2_csp_fair_value_marks", chain_id, fund)
+            .eq("snapshot_block", snapshot_block)
+            .order("position_id")
+            .execute()
+            .data
+            or []
+        )
+        return {
+            "snapshot_block": snapshot_block,
+            "snapshot_block_hash": row["snapshot_block_hash"],
+            "reports": row.get("reports") or [],
+            "marks": marks,
+        }
 
     def position(self, chain_id: int, fund: str, wallet: str) -> dict[str, Any]:
         balance = (
@@ -174,6 +218,14 @@ class FundService:
         row = self._find(fund_key)
         state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
         inventory = self.repository.inventory(int(row["chain_id"]), row["fund_address"])
+        positions = self.repository.active_positions(
+            int(row["chain_id"]), row["fund_address"]
+        )
+        valuation = self.repository.nav_valuation(
+            int(row["chain_id"]),
+            row["fund_address"],
+            int(state.get("last_report_nonce", 0)),
+        )
         context = self._write_context(row, state)
         stale = context["stale"]
         actions = self._actions(row, state, common=context["reason"])
@@ -190,25 +242,60 @@ class FundService:
             (item["asset_address"], item["bucket"]): item["amount"]
             for item in inventory
         }
+        adapter_free = int(
+            amounts.get((row["accounting_asset"], "strategy_accounted"), 0)
+        )
+        assigned_weth = int(amounts.get((row["weth"], "assigned"), 0))
+        locked_collateral = sum(
+            int(position.get("collateral", 0))
+            for position in positions
+            if position.get("lifecycle") == "open"
+        )
+        valuation_view = self._valuation_view(
+            valuation=valuation,
+            idle_assets=int(state.get("accounted_idle_assets", 0)),
+            adapter_free_assets=adapter_free,
+            locked_collateral_assets=locked_collateral,
+            assigned_weth=assigned_weth,
+            denominator=denominator,
+            share_decimals=int(row["share_decimals"]),
+        )
         return FundSummaryResponse(
             fund=self._registry(row),
             net_assets=str(net_assets),
             share_supply=str(supply),
             virtual_shares=str(virtual),
             share_price_assets=str(share_price),
+            stress_price_assets=valuation_view["stress_price_assets"],
             composition=FundComposition(
                 idle_assets=str(state.get("accounted_idle_assets", 0)),
-                strategy_accounting_assets=str(
-                    amounts.get((row["accounting_asset"], "strategy_accounted"), 0)
-                ),
-                assigned_weth=str(amounts.get((row["weth"], "assigned"), 0)),
+                strategy_accounting_assets=str(adapter_free),
+                assigned_weth=str(assigned_weth),
                 reserved_claim_assets=str(state.get("reserved_claim_assets", 0)),
+                gross_assets=str(valuation_view["gross_assets"]),
+                adapter_free_accounting_assets=str(adapter_free),
+                locked_collateral_assets=str(locked_collateral),
+                fair_option_liability_assets=str(
+                    valuation_view["fair_liability_assets"]
+                ),
+                assigned_weth_value_assets=str(
+                    valuation_view["assigned_weth_value_assets"]
+                ),
+                settlement_receivable_assets=str(
+                    valuation_view["settlement_receivable_assets"]
+                ),
+                settlement_cost_assets=str(valuation_view["settlement_cost_assets"]),
             ),
             nav=NavWindow(
                 report_nonce=int(state.get("last_report_nonce", 0)),
                 valid_after_block=state.get("nav_valid_after_block"),
                 valid_until_block=state.get("nav_valid_until_block"),
                 stale=stale,
+                methodology=valuation_view["methodology"],
+                model_version=valuation_view["model_version"],
+                observed_at=valuation_view["observed_at"],
+                source_quality=valuation_view["source_quality"],
+                stress=valuation_view["stress"],
             ),
             status=self._status(state),
             actions=actions,
@@ -217,6 +304,91 @@ class FundService:
             indexed_at=state.get("indexed_at"),
             stale=stale,
         )
+
+    @staticmethod
+    def _valuation_view(
+        *,
+        valuation,
+        idle_assets,
+        adapter_free_assets,
+        locked_collateral_assets,
+        assigned_weth,
+        denominator,
+        share_decimals,
+    ) -> dict[str, Any]:
+        fallback_gross = idle_assets + adapter_free_assets + locked_collateral_assets
+        fallback = {
+            "gross_assets": fallback_gross,
+            "fair_liability_assets": 0,
+            "assigned_weth_value_assets": 0,
+            "settlement_receivable_assets": 0,
+            "settlement_cost_assets": 0,
+            "stress_price_assets": None,
+            "methodology": None,
+            "model_version": None,
+            "observed_at": None,
+            "source_quality": None,
+            "stress": None,
+        }
+        if not valuation:
+            return fallback
+        reports = valuation.get("reports") or []
+        marks = valuation.get("marks") or []
+        if not reports:
+            return fallback
+        gross_assets = sum(int(report.get("grossAssets", 0)) for report in reports)
+        fair_liability = sum(int(report.get("liabilities", 0)) for report in reports)
+        settlement_cost = sum(int(report.get("baseExitCost", 0)) for report in reports)
+        accounted = idle_assets + adapter_free_assets + locked_collateral_assets
+        non_usdc_value = max(gross_assets - accounted, 0)
+        assigned_weth_value = non_usdc_value if assigned_weth else 0
+        settlement_receivable = non_usdc_value - assigned_weth_value
+        stress_liability = sum(
+            int(mark.get("stress_liability_assets", 0)) for mark in marks
+        )
+        stress_net = max(gross_assets - stress_liability - settlement_cost, 0)
+        stress_price = (
+            (stress_net + 1) * 10**share_decimals // denominator
+            if denominator and marks
+            else None
+        )
+        model_versions = {int(mark["model_version"]) for mark in marks}
+        methodologies = {mark["methodology"] for mark in marks}
+        source_qualities = {mark["source_quality"] for mark in marks}
+        return {
+            "gross_assets": gross_assets,
+            "fair_liability_assets": fair_liability,
+            "assigned_weth_value_assets": assigned_weth_value,
+            "settlement_receivable_assets": settlement_receivable,
+            "settlement_cost_assets": settlement_cost,
+            "stress_price_assets": str(stress_price)
+            if stress_price is not None
+            else None,
+            "methodology": next(iter(methodologies))
+            if len(methodologies) == 1
+            else None,
+            "model_version": next(iter(model_versions))
+            if len(model_versions) == 1
+            else None,
+            "observed_at": max(
+                (
+                    mark["observed_at"]
+                    for mark in marks
+                    if mark.get("observed_at") is not None
+                ),
+                default=None,
+            ),
+            "source_quality": next(iter(source_qualities))
+            if len(source_qualities) == 1
+            else None,
+            "stress": StressNav(
+                net_assets=str(stress_net),
+                share_price_assets=str(stress_price),
+                option_liability_assets=str(stress_liability),
+            )
+            if stress_price is not None
+            else None,
+        }
 
     def position(self, fund_key: str, wallet: str) -> FundPositionResponse:
         row = self._find(fund_key)

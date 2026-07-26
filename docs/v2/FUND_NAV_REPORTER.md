@@ -45,14 +45,27 @@ valuator output. Attempts are idempotently recorded in `v2_nav_report_runs`,
 including blocked attempts and reason codes.
 
 For Base Sepolia functional cycles only, an explicit disabled-by-default policy
-can publish a synthetic conservative quorum at the reporter's exact trusted
-snapshot. It calibrates the signed pre-expiry liability so the on-chain
-liability buffer produces exactly the full posted CSP collateral, signs zero
-base exit cost with two dedicated test keys, and persists each row through
-`ObservationIngestor`. This policy is restricted to chain
-`84532`, rejects keys shared with NAV reporters, and fails closed on signer,
-quorum, lifecycle, block, or policy mismatch. It is not executable pricing,
-independent market evidence, or a mainnet-readiness signal.
+can publish a fair-value quorum at the reporter's exact trusted snapshot. The
+signed liability is the European Black-Scholes put value using exact on-chain
+amount, strike and expiry, the valuator-approved Chainlink spot at the snapshot
+block, and an explicit versioned IV/rate policy. Full collateral is retained as
+an API-only stress liability and is never signed as transactional NAV.
+
+The initial approved testnet policy is model
+`b1nary-european-bs-put-v1`, IV `4200` bps, risk-free rate `500` bps,
+settlement cost `0`, and IV source
+`deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-operator-approved`. The two
+dedicated keys sign the same model output, so source quality is
+`single_model_multi_signer`: this proves functional quorum, not independent
+market evidence or mainnet readiness. The policy is restricted to chain
+`84532`, requires the on-chain buffer to be zero, validates model version in
+the high 64 bits of every nonce, rejects keys shared with NAV reporters, and
+fails closed on signer, quorum, lifecycle, block, spot, or policy mismatch.
+
+The transactional product API keeps `sharePriceAssets` as fair NAV per share
+and exposes stress NAV separately. Fair-value metadata is joined to the exact
+confirmed `v2_nav_report_runs` snapshot so an unconfirmed mark cannot be mixed
+with the active share price.
 
 ## Runtime gates
 

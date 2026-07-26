@@ -11,6 +11,7 @@ from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
 from src.config import (
+    get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
     settings,
@@ -20,12 +21,23 @@ from src.fund_nav.abis import (
     ACCESS_ABI,
     ACCOUNTING_ABI,
     ADAPTER_ABI,
+    CHAINLINK_SPOT_ABI,
     ERC20_ABI,
     FLOW_ABI,
     OTOKEN_ABI,
     STRATEGY_ABI,
     VALUATOR_ABI,
     VAULT_ABI,
+)
+from src.fund_nav.fair_value import (
+    METHODOLOGY,
+    MODEL_VERSION,
+    SOURCE_QUALITY,
+    EuropeanPutInputs,
+    FairValuePolicy,
+    mark_european_put,
+    observation_model_version,
+    versioned_observation_nonce,
 )
 from src.fund_nav.models import ComponentReport, IDLE_COMPONENT_ID, sign_digest
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
@@ -121,6 +133,20 @@ class SupabaseNavRepository:
                     "snapshot_block,observer_address"
                 ),
                 ignore_duplicates=True,
+            )
+            .execute()
+        )
+
+    def upsert_fair_value_mark(self, row: dict[str, Any]) -> None:
+        (
+            get_client()
+            .table("v2_csp_fair_value_marks")
+            .upsert(
+                row,
+                on_conflict=(
+                    "chain_id,valuator_address,adapter_address,position_id,"
+                    "snapshot_block"
+                ),
             )
             .execute()
         )
@@ -328,11 +354,13 @@ class Web3ReporterGateway:
         repository: SupabaseNavRepository,
         *,
         sepolia_observer_private_keys: tuple[str, ...] = (),
+        fair_value_policy: FairValuePolicy | None = None,
     ) -> None:
         self.w3 = w3
         self.fund = fund
         self.repository = repository
         self.sepolia_observer_private_keys = sepolia_observer_private_keys
+        self.fair_value_policy = fair_value_policy
         self.addresses = {
             role: Web3.to_checksum_address(row["contract_address"])
             for role, row in fund.contracts.items()
@@ -564,7 +592,7 @@ class Web3ReporterGateway:
                 open_positions.append((position_id, position))
 
         if self.sepolia_observer_private_keys and open_positions:
-            self._publish_sepolia_conservative_observations(
+            self._publish_sepolia_fair_value_observations(
                 valuator=valuator,
                 adapter=adapter,
                 block=block,
@@ -593,7 +621,7 @@ class Web3ReporterGateway:
             raise RuntimeError("UNUSED_OBSERVATION")
         return selected
 
-    def _publish_sepolia_conservative_observations(
+    def _publish_sepolia_fair_value_observations(
         self,
         *,
         valuator,
@@ -604,9 +632,39 @@ class Web3ReporterGateway:
         existing_rows,
     ) -> None:
         if self.chain_id() != BASE_SEPOLIA_CHAIN_ID:
-            raise RuntimeError("CONSERVATIVE_OBSERVATIONS_WRONG_CHAIN")
+            raise RuntimeError("FAIR_VALUE_OBSERVATIONS_WRONG_CHAIN")
+        if self.fair_value_policy is None:
+            raise RuntimeError("FAIR_VALUE_POLICY_REQUIRED")
         if len(self.sepolia_observer_private_keys) != quorum:
-            raise RuntimeError("CONSERVATIVE_OBSERVATION_QUORUM_MISMATCH")
+            raise RuntimeError("FAIR_VALUE_OBSERVATION_QUORUM_MISMATCH")
+        if int(valuator.functions.interfaceVersion().call(block_identifier=block)) != 1:
+            raise RuntimeError("FAIR_VALUE_VALUATOR_INTERFACE_MISMATCH")
+        if (
+            int(
+                valuator.functions.valuationPolicyVersion().call(block_identifier=block)
+            )
+            != 2
+        ):
+            raise RuntimeError("FAIR_VALUE_POLICY_VERSION_MISMATCH")
+        if (
+            int(valuator.functions.requiredModelVersion().call(block_identifier=block))
+            != MODEL_VERSION
+        ):
+            raise RuntimeError("FAIR_VALUE_MODEL_VERSION_MISMATCH")
+        if (
+            int(valuator.functions.liabilityBufferBps().call(block_identifier=block))
+            != 0
+        ):
+            raise RuntimeError("FAIR_VALUE_REQUIRES_ZERO_ONCHAIN_BUFFER")
+        if (
+            int(
+                valuator.functions.maxObservationDivergenceBps().call(
+                    block_identifier=block
+                )
+            )
+            != 500
+        ):
+            raise RuntimeError("FAIR_VALUE_DIVERGENCE_POLICY_MISMATCH")
 
         signers = tuple(
             (Account.from_key(private_key).address.lower(), private_key)
@@ -614,49 +672,115 @@ class Web3ReporterGateway:
         )
         signer_addresses = {address for address, _ in signers}
         if len(signer_addresses) != quorum:
-            raise RuntimeError("CONSERVATIVE_OBSERVATION_SIGNER_MISMATCH")
+            raise RuntimeError("FAIR_VALUE_OBSERVATION_SIGNER_MISMATCH")
 
         max_window = self.max_observation_window(valuator.address, block)
         valid_until = block + max_window
         if valid_until < self.head_block():
-            raise RuntimeError("CONSERVATIVE_OBSERVATION_WINDOW_EXPIRED")
-        liability_buffer_bps = int(
-            valuator.functions.liabilityBufferBps().call(block_identifier=block)
+            raise RuntimeError("FAIR_VALUE_OBSERVATION_WINDOW_EXPIRED")
+        snapshot_timestamp = int(self.w3.eth.get_block(block)["timestamp"])
+        spot = self._approved_spot_snapshot(
+            valuator=valuator,
+            block=block,
+            snapshot_timestamp=snapshot_timestamp,
         )
         block_hash = Web3.to_hex(self.block_hash(block))
         ingestor = ObservationIngestor(
             self, _IdempotentObservationStore(self.repository)
         )
+        adapter_contract = self.w3.eth.contract(address=adapter, abi=ADAPTER_ABI)
+        accounting_asset = adapter_contract.functions.accountingAsset().call(
+            block_identifier=block
+        )
+        accounting_decimals = int(
+            self.w3.eth.contract(address=accounting_asset, abi=ERC20_ABI)
+            .functions.decimals()
+            .call(block_identifier=block)
+        )
 
         for position_id, position in positions:
             market_maker = position[1].lower()
             if not any(address != market_maker for address in signer_addresses):
-                raise RuntimeError("CONSERVATIVE_OBSERVATION_NOT_INDEPENDENT")
+                raise RuntimeError("FAIR_VALUE_OBSERVATION_NOT_INDEPENDENT")
+            otoken = self.w3.eth.contract(address=position[0], abi=OTOKEN_ABI)
+            if not bool(otoken.functions.isPut().call(block_identifier=block)):
+                raise RuntimeError("FAIR_VALUE_REQUIRES_EUROPEAN_PUT")
+            strike = int(otoken.functions.strikePrice().call(block_identifier=block))
+            expiry = int(otoken.functions.expiry().call(block_identifier=block))
             collateral = int(position[4])
-            observed_liability = collateral * 10_000 // (10_000 + liability_buffer_bps)
+            mark = mark_european_put(
+                EuropeanPutInputs(
+                    spot_price_8=spot["price_8"],
+                    strike_price_8=strike,
+                    option_amount_8=int(position[3]),
+                    expiry_timestamp=expiry,
+                    snapshot_timestamp=snapshot_timestamp,
+                    collateral_assets=collateral,
+                    accounting_asset_decimals=accounting_decimals,
+                ),
+                self.fair_value_policy,
+            )
+            observed_liability = mark.fair_liability_assets
+            base_exit_cost = mark.settlement_cost_assets
+            self.repository.upsert_fair_value_mark(
+                {
+                    "chain_id": self.fund.chain_id,
+                    "fund_address": self.fund.address.lower(),
+                    "valuator_address": valuator.address.lower(),
+                    "adapter_address": adapter.lower(),
+                    "position_id": str(position_id),
+                    "snapshot_block": block,
+                    "snapshot_block_hash": block_hash,
+                    "otoken_address": position[0].lower(),
+                    "model_name": self.fair_value_policy.model_name,
+                    "model_version": self.fair_value_policy.model_version,
+                    "methodology": METHODOLOGY,
+                    "source_quality": SOURCE_QUALITY,
+                    "iv_bps": self.fair_value_policy.implied_volatility_bps,
+                    "iv_source": (self.fair_value_policy.implied_volatility_source),
+                    "risk_free_rate_bps": (self.fair_value_policy.risk_free_rate_bps),
+                    "spot_round_id": str(spot["round_id"]),
+                    "spot_price_8": str(spot["price_8"]),
+                    "spot_updated_at": spot["updated_at"],
+                    "strike_price_8": str(strike),
+                    "option_amount_8": str(position[3]),
+                    "expiry_timestamp": expiry,
+                    "collateral_assets": str(collateral),
+                    "fair_liability_assets": str(observed_liability),
+                    "stress_liability_assets": str(mark.stress_liability_assets),
+                    "settlement_cost_assets": str(base_exit_cost),
+                    "option_price_8": str(mark.option_price_8),
+                }
+            )
             position_rows = [
                 row for row in existing_rows if int(row["position_id"]) == position_id
             ]
             existing_signers = set()
             for row in position_rows:
                 if row["observer_address"] not in signer_addresses:
-                    raise RuntimeError("CONSERVATIVE_OBSERVATION_SIGNER_MISMATCH")
+                    raise RuntimeError("FAIR_VALUE_OBSERVATION_SIGNER_MISMATCH")
                 if (
                     int(row["liability"]) != observed_liability
-                    or int(row["base_exit_cost"]) != 0
+                    or int(row["base_exit_cost"]) != base_exit_cost
+                    or observation_model_version(int(row["observation_nonce"]))
+                    != MODEL_VERSION
                 ):
-                    raise RuntimeError("CONSERVATIVE_OBSERVATION_POLICY_MISMATCH")
+                    raise RuntimeError("FAIR_VALUE_OBSERVATION_POLICY_MISMATCH")
                 existing_signers.add(row["observer_address"])
 
             for observer, private_key in signers:
                 if observer in existing_signers:
                     continue
-                nonce = int.from_bytes(
+                sequence = int.from_bytes(
                     Web3.keccak(
-                        text=(f"B1N-366:{observer}:{position_id}:{block}:{valid_until}")
+                        text=(
+                            f"B1N-366:{self.fair_value_policy.model_name}:"
+                            f"{observer}:{position_id}:{block}:{valid_until}"
+                        )
                     ),
                     "big",
-                )
+                ) & (2**192 - 1)
+                nonce = versioned_observation_nonce(sequence)
                 unsigned = OptionObservation(
                     chain_id=self.fund.chain_id,
                     fund_address=self.fund.address,
@@ -667,7 +791,7 @@ class Web3ReporterGateway:
                     snapshot_block_hash=block_hash,
                     valid_until_block=valid_until,
                     liability=observed_liability,
-                    base_exit_cost=0,
+                    base_exit_cost=base_exit_cost,
                     observation_nonce=nonce,
                     signature="0x" + "00" * 65,
                 )
@@ -680,10 +804,45 @@ class Web3ReporterGateway:
                     ingestor.ingest(signed)
                 except ValueError as exc:
                     if str(exc) == "UNAPPROVED_OBSERVER":
-                        raise RuntimeError(
-                            "CONSERVATIVE_OBSERVER_NOT_APPROVED"
-                        ) from exc
+                        raise RuntimeError("FAIR_VALUE_OBSERVER_NOT_APPROVED") from exc
                     raise
+
+    def _approved_spot_snapshot(
+        self, *, valuator, block: int, snapshot_timestamp: int
+    ) -> dict[str, int]:
+        feed_address = valuator.functions.spotFeed().call(block_identifier=block)
+        expected_decimals = int(
+            valuator.functions.spotFeedDecimals().call(block_identifier=block)
+        )
+        max_staleness = int(
+            valuator.functions.maxSpotStaleness().call(block_identifier=block)
+        )
+        feed = self.w3.eth.contract(address=feed_address, abi=CHAINLINK_SPOT_ABI)
+        observed_decimals = int(feed.functions.decimals().call(block_identifier=block))
+        if observed_decimals != expected_decimals:
+            raise RuntimeError("FAIR_VALUE_SPOT_DECIMALS_MISMATCH")
+        round_id, answer, _, updated_at, answered_in_round = (
+            feed.functions.latestRoundData().call(block_identifier=block)
+        )
+        if (
+            int(answer) <= 0
+            or int(updated_at) <= 0
+            or int(updated_at) > snapshot_timestamp
+            or snapshot_timestamp - int(updated_at) > max_staleness
+            or int(answered_in_round) < int(round_id)
+        ):
+            raise RuntimeError("FAIR_VALUE_SPOT_INVALID_OR_STALE")
+        if observed_decimals <= 8:
+            price_8 = int(answer) * 10 ** (8 - observed_decimals)
+        else:
+            price_8 = int(answer) // 10 ** (observed_decimals - 8)
+        if price_8 <= 0:
+            raise RuntimeError("FAIR_VALUE_SPOT_INVALID_OR_STALE")
+        return {
+            "round_id": int(round_id),
+            "price_8": price_8,
+            "updated_at": int(updated_at),
+        }
 
     def _position_observations(
         self,
@@ -697,6 +856,14 @@ class Web3ReporterGateway:
         quorum,
     ):
         candidates = [row for row in rows if int(row["position_id"]) == position_id]
+        required_model_version = int(
+            valuator.functions.requiredModelVersion().call(block_identifier=block)
+        )
+        max_divergence_bps = int(
+            valuator.functions.maxObservationDivergenceBps().call(
+                block_identifier=block
+            )
+        )
         observers = set()
         independent = False
         observations = []
@@ -723,6 +890,8 @@ class Web3ReporterGateway:
                 or item.snapshot_block != block
                 or item.snapshot_block_hash != Web3.to_hex(self.block_hash(block))
                 or item.valid_until_block < self.head_block()
+                or observation_model_version(item.observation_nonce)
+                != required_model_version
             ):
                 raise RuntimeError("STALE_OBSERVATION")
             digest = valuator.functions.observationDigest(
@@ -753,6 +922,24 @@ class Web3ReporterGateway:
             observations.append(item)
         if len(observations) != quorum or not independent:
             raise RuntimeError("INCOMPLETE_OBSERVER_QUORUM")
+        liabilities = sorted(item.liability for item in observations)
+        median = (
+            liabilities[len(liabilities) // 2]
+            if len(liabilities) % 2
+            else (
+                liabilities[len(liabilities) // 2 - 1]
+                + liabilities[len(liabilities) // 2]
+            )
+            // 2
+        )
+        if median == 0:
+            divergent = liabilities[-1] != 0
+        else:
+            divergent = (
+                liabilities[-1] - liabilities[0]
+            ) * 10_000 > median * max_divergence_bps
+        if divergent:
+            raise RuntimeError("OBSERVATION_DIVERGENCE_EXCEEDED")
         return observations
 
     def block_hash(self, block_number: int) -> bytes:
@@ -969,14 +1156,20 @@ def _build_fund_reporter(repository, fund):
     w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     observer_keys = (
         get_fund_csp_sepolia_observer_private_keys()
-        if settings.fund_csp_sepolia_conservative_observations_enabled
+        if settings.fund_csp_sepolia_fair_value_observations_enabled
         else ()
+    )
+    fair_value_policy = (
+        get_fund_csp_sepolia_fair_value_policy()
+        if settings.fund_csp_sepolia_fair_value_observations_enabled
+        else None
     )
     gateway = Web3ReporterGateway(
         w3,
         fund,
         repository,
         sepolia_observer_private_keys=observer_keys,
+        fair_value_policy=fair_value_policy,
     )
     reporter = NavReporter(
         gateway,

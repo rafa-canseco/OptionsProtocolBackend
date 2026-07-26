@@ -18,6 +18,7 @@ from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
+    get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
     settings,
@@ -77,13 +78,14 @@ async def lifespan(app: FastAPI):
             reporter_keys = get_fund_nav_reporter_private_keys()
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
-        if settings.fund_csp_sepolia_conservative_observations_enabled:
+        if settings.fund_csp_sepolia_fair_value_observations_enabled:
             if settings.chain_id != 84532:
                 raise RuntimeError(
-                    "Conservative CSP observations are restricted to Base Sepolia"
+                    "Fair-value CSP observations are restricted to Base Sepolia"
                 )
             try:
                 observer_keys = get_fund_csp_sepolia_observer_private_keys()
+                get_fund_csp_sepolia_fair_value_policy()
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
             from eth_account import Account
@@ -98,9 +100,9 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError(
                     "Sepolia CSP observer keys must be separate from NAV reporter keys"
                 )
-    elif settings.fund_csp_sepolia_conservative_observations_enabled:
+    elif settings.fund_csp_sepolia_fair_value_observations_enabled:
         raise RuntimeError(
-            "FUND_NAV_REPORTER_ENABLED is required for conservative CSP observations"
+            "FUND_NAV_REPORTER_ENABLED is required for fair-value CSP observations"
         )
 
     tasks = []

@@ -448,7 +448,7 @@ def test_nav_reporter_lease_is_bounded_before_task_creation(monkeypatch):
         ),
     ],
 )
-def test_sepolia_conservative_observation_validation_precedes_tasks(
+def test_sepolia_fair_value_observation_validation_precedes_tasks(
     monkeypatch, reporter_enabled, chain_id, observer_keys, message
 ):
     import src.main as main_module
@@ -466,7 +466,7 @@ def test_sepolia_conservative_observation_validation_precedes_tasks(
     )
     monkeypatch.setattr(
         main_module.settings,
-        "fund_csp_sepolia_conservative_observations_enabled",
+        "fund_csp_sepolia_fair_value_observations_enabled",
         True,
     )
     monkeypatch.setattr(main_module.settings, "chain_id", chain_id)
@@ -474,6 +474,24 @@ def test_sepolia_conservative_observation_validation_precedes_tasks(
         main_module.settings,
         "fund_csp_sepolia_observer_private_keys",
         observer_keys,
+    )
+    monkeypatch.setattr(
+        main_module.settings, "fund_csp_sepolia_fair_value_iv_bps", 4_200
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_iv_source",
+        "approved-testnet-snapshot",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_risk_free_rate_bps",
+        500,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_settlement_cost_bps",
+        0,
     )
     monkeypatch.setattr(
         main_module.asyncio,

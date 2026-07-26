@@ -84,6 +84,37 @@ class FakeRepository:
             {"asset_address": WETH, "bucket": "assigned", "amount": "2"},
         ]
 
+    def active_positions(self, _chain, _fund):
+        return [{"lifecycle": "open", "collateral": "400"}]
+
+    def nav_valuation(self, _chain, _fund, report_nonce):
+        assert report_nonce == 2
+        return {
+            "snapshot_block": 99,
+            "snapshot_block_hash": "0x01",
+            "reports": [
+                {
+                    "grossAssets": 500,
+                    "liabilities": 0,
+                    "baseExitCost": 0,
+                },
+                {
+                    "grossAssets": 2_000,
+                    "liabilities": 400,
+                    "baseExitCost": 0,
+                },
+            ],
+            "marks": [
+                {
+                    "model_version": 1,
+                    "methodology": "european_black_scholes",
+                    "source_quality": "single_model_multi_signer",
+                    "stress_liability_assets": "800",
+                    "observed_at": "2099-07-21T00:00:00Z",
+                }
+            ],
+        }
+
     def position(self, _chain, _fund, _wallet):
         return self.user
 
@@ -109,6 +140,13 @@ def test_registry_summary_and_fund_inventory() -> None:
     assert service.list_funds().funds[0].accounting_asset.symbol == "USDC"
     assert summary.composition.assigned_weth == "2"
     assert summary.composition.strategy_accounting_assets == "1500"
+    assert summary.composition.locked_collateral_assets == "400"
+    assert summary.composition.gross_assets == "2500"
+    assert summary.composition.fair_option_liability_assets == "400"
+    assert summary.composition.assigned_weth_value_assets == "100"
+    assert summary.nav.methodology == "european_black_scholes"
+    assert summary.nav.source_quality == "single_model_multi_signer"
+    assert summary.stress_price_assets == str((1700 + 1) * 10**18 // 2100)
     assert summary.actions.deposit.available is True
 
 

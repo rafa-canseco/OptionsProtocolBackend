@@ -55,8 +55,12 @@ class Settings(BaseSettings):
     fund_nav_reporter_lease_seconds: int = 180
     fund_nav_reporter_private_keys: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
-    fund_csp_sepolia_conservative_observations_enabled: bool = False
+    fund_csp_sepolia_fair_value_observations_enabled: bool = False
     fund_csp_sepolia_observer_private_keys: str = ""
+    fund_csp_sepolia_fair_value_iv_bps: int = 0
+    fund_csp_sepolia_fair_value_iv_source: str = ""
+    fund_csp_sepolia_fair_value_risk_free_rate_bps: int = 0
+    fund_csp_sepolia_fair_value_settlement_cost_bps: int = 0
     fund_state_freshness_seconds: int = 180
     confirmed_head_freshness_seconds: int = 90
     circuit_breaker_poll_seconds: int = 10
@@ -220,7 +224,7 @@ def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
 
 
 def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:
-    """Return the two dedicated keys for the Base Sepolia test observation policy."""
+    """Return the two dedicated keys for the Base Sepolia fair-value policy."""
     from eth_account import Account
 
     keys = tuple(
@@ -245,6 +249,18 @@ def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:
             "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS contains duplicate observers"
         )
     return keys
+
+
+def get_fund_csp_sepolia_fair_value_policy():
+    """Return the strict, explicitly versioned Base Sepolia fair-value policy."""
+    from src.fund_nav.fair_value import FairValuePolicy
+
+    return FairValuePolicy(
+        implied_volatility_bps=settings.fund_csp_sepolia_fair_value_iv_bps,
+        implied_volatility_source=settings.fund_csp_sepolia_fair_value_iv_source,
+        risk_free_rate_bps=(settings.fund_csp_sepolia_fair_value_risk_free_rate_bps),
+        settlement_cost_bps=(settings.fund_csp_sepolia_fair_value_settlement_cost_bps),
+    )
 
 
 @functools.lru_cache(maxsize=None)

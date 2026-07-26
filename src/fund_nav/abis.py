@@ -117,7 +117,8 @@ VAULT_ABI = [
 FLOW_ABI = [_function("hasActiveProcessing", [], [_field("", "bool")])]
 STRATEGY_ABI = [_function("positionsHash", [], [_field("", "bytes32")])]
 ERC20_ABI = [
-    _function("balanceOf", [_field("account", "address")], [_field("", "uint256")])
+    _function("balanceOf", [_field("account", "address")], [_field("", "uint256")]),
+    _function("decimals", [], [_field("", "uint8")]),
 ]
 ACCESS_ABI = [
     _function(
@@ -156,6 +157,8 @@ ADAPTER_STATE_FIELDS = [
     _field("accountedWeth", "uint256"),
 ]
 ADAPTER_ABI = [
+    _function("interfaceVersion", [], [_field("", "uint64")]),
+    _function("accountingAsset", [], [_field("", "address")]),
     _function("adapterState", [], [_field("state", "tuple", ADAPTER_STATE_FIELDS)]),
     _function(
         "position",
@@ -183,8 +186,15 @@ VALUATOR_ABI = [
         [_field("positionValue", "tuple", POSITION_VALUE_FIELDS)],
     ),
     _function("observationQuorum", [], [_field("", "uint8")]),
+    _function("interfaceVersion", [], [_field("", "uint64")]),
+    _function("valuationPolicyVersion", [], [_field("", "uint64")]),
+    _function("requiredModelVersion", [], [_field("", "uint64")]),
     _function("maxObservationWindow", [], [_field("", "uint64")]),
     _function("liabilityBufferBps", [], [_field("", "uint16")]),
+    _function("maxObservationDivergenceBps", [], [_field("", "uint16")]),
+    _function("spotFeed", [], [_field("", "address")]),
+    _function("spotFeedDecimals", [], [_field("", "uint8")]),
+    _function("maxSpotStaleness", [], [_field("", "uint64")]),
     _function(
         "isApprovedObserver",
         [_field("observer", "address")],
@@ -204,4 +214,24 @@ VALUATOR_ABI = [
         [_field("", "bytes32")],
     ),
 ]
-OTOKEN_ABI = [_function("expiry", [], [_field("", "uint256")])]
+OTOKEN_ABI = [
+    _function("underlying", [], [_field("", "address")]),
+    _function("strikePrice", [], [_field("", "uint256")]),
+    _function("expiry", [], [_field("", "uint256")]),
+    _function("isPut", [], [_field("", "bool")]),
+]
+
+CHAINLINK_SPOT_ABI = [
+    _function("decimals", [], [_field("", "uint8")]),
+    _function(
+        "latestRoundData",
+        [],
+        [
+            _field("roundId", "uint80"),
+            _field("answer", "int256"),
+            _field("startedAt", "uint256"),
+            _field("updatedAt", "uint256"),
+            _field("answeredInRound", "uint80"),
+        ],
+    ),
+]
