@@ -343,7 +343,10 @@ class TrustedRegistryLoader:
         self.repository = repository
 
     def load(self) -> list[TrustedFund]:
-        return [self._load(row) for row in self.repository.enabled_funds()]
+        return [self.load_one(row) for row in self.repository.enabled_funds()]
+
+    def load_one(self, registry: dict[str, Any]) -> TrustedFund:
+        return self._load(registry)
 
     def _load(self, registry: dict[str, Any]) -> TrustedFund:
         chain_id = int(registry["chain_id"])
@@ -1360,11 +1363,15 @@ class RuntimeReporter:
 
 
 class ReporterFleet:
-    def __init__(self, reporters):
-        self.reporters = reporters
+    def __init__(self, reporter_factories):
+        self.reporter_factories = reporter_factories
 
     def run_once(self) -> ReportRun:
-        results = [reporter.run_once() for reporter in self.reporters]
+        # A report can wait across several testnet blocks for activation and
+        # submission. Build each fund reporter immediately before its own run so
+        # later funds do not inherit the state snapshot loaded for an earlier
+        # fund.
+        results = [factory().run_once() for factory in self.reporter_factories]
         return next(
             (result for result in results if result.status != "confirmed"), results[-1]
         )
@@ -1375,8 +1382,18 @@ def build_reporter():
     funds = TrustedRegistryLoader(repository).load()
     if not funds:
         return UndeployedReporter(repository)
-    reporters = [_build_fund_reporter(repository, fund) for fund in funds]
-    return reporters[0] if len(reporters) == 1 else ReporterFleet(reporters)
+    if len(funds) == 1:
+        return _build_fund_reporter(repository, funds[0])
+    registries = [fund.registry for fund in funds]
+    return ReporterFleet(
+        [
+            lambda registry=registry: _build_fund_reporter(
+                repository,
+                TrustedRegistryLoader(repository).load_one(registry),
+            )
+            for registry in registries
+        ]
+    )
 
 
 def _build_fund_reporter(repository, fund):

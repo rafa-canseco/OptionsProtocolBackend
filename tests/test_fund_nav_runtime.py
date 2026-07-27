@@ -25,6 +25,7 @@ from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
 from src.fund_nav.runtime import (
     BlockedReporter,
+    ReporterFleet,
     RuntimeReporter,
     TrustedFund,
     TrustedRegistryLoader,
@@ -162,6 +163,32 @@ async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> No
         await fund_nav_reporter.run()
 
     assert built == [100, 101]
+
+
+def test_reporter_fleet_loads_each_fund_immediately_before_its_run() -> None:
+    state = {"block": 100}
+    loaded = []
+
+    class Reporter:
+        def __init__(self, name):
+            self.name = name
+
+        def run_once(self):
+            if self.name == "first":
+                state["block"] = 200
+            return ReportRun(status="confirmed")
+
+    def factory(name):
+        def build():
+            loaded.append((name, state["block"]))
+            return Reporter(name)
+
+        return build
+
+    result = ReporterFleet([factory("first"), factory("second")]).run_once()
+
+    assert result.status == "confirmed"
+    assert loaded == [("first", 100), ("second", 200)]
 
 
 def test_blocked_and_runtime_reporters_record_without_rpc_send() -> None:
