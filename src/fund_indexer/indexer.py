@@ -17,6 +17,7 @@ from src.fund_indexer.snapshot import SnapshotContracts, read_onchain_snapshot
 
 
 logger = logging.getLogger(__name__)
+# Keep the persisted name stable so the existing CSP checkpoint is not replayed.
 INDEXER_NAME = "tokenized_csp_fund"
 DEFAULT_WINDOW = 2_000
 MIN_WINDOW = 10
@@ -33,6 +34,7 @@ PROXY_ROLES = {
     "fund_flow_manager",
     "strategy_manager",
     "csp_adapter",
+    "covered_call_adapter",
     "controller",
     "batch_settler",
 }
@@ -41,6 +43,7 @@ IMMUTABLE_ROLES = {
     "access_manager",
     "address_book",
     "csp_valuator",
+    "covered_call_valuator",
     "margin_pool",
     "nav_verifier",
     "oracle",
@@ -68,6 +71,8 @@ class FundRegistry:
     accounting_asset: str
     weth: str
     contracts: tuple[ContractBinding, ...]
+    strategy_kind: str = "csp"
+    quote_asset: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,12 @@ def _load_registries() -> list[FundRegistry]:
                 start_block=int(row["start_block"]),
                 accounting_asset=normalize_address(row["accounting_asset"]),
                 weth=normalize_address(row["weth"]),
+                strategy_kind=row.get("strategy_kind", "csp"),
+                quote_asset=(
+                    normalize_address(row["quote_asset"])
+                    if row.get("quote_asset")
+                    else None
+                ),
                 contracts=bindings,
             )
         )
@@ -319,6 +330,8 @@ def _persist_window(
             canonical,
             registry.accounting_asset,
             registry.weth,
+            strategy_kind=registry.strategy_kind,
+            quote_asset=registry.quote_asset,
             to_block=to_block,
         )
         if canonical
@@ -338,6 +351,8 @@ def _persist_window(
             block_hash,
         )
         reconciliation = reconcile(projected, snapshot)
+        _apply_position_metadata(projected, snapshot, new_events)
+        projection = projected.export()
         indexed_at = _block_timestamp(w3, to_block)
         snapshot_state = dict(
             positions_hash=snapshot.strategy_positions_hash,
@@ -362,6 +377,9 @@ def _persist_window(
             has_active_processing=snapshot.has_active_processing,
             fund_flow_nonce=snapshot.fund_flow_nonce,
             idle_state_hash=snapshot.idle_state_hash,
+            normalization_slippage_bps=getattr(
+                snapshot, "normalization_slippage_bps", 0
+            ),
             as_of_block=snapshot.block_number,
             as_of_block_hash=snapshot.block_hash,
             reconciled=reconciliation["passed"],
@@ -393,11 +411,16 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
         if binding.valid_from_block <= block_number
         and (binding.valid_to_block is None or block_number <= binding.valid_to_block)
     }
+    adapter_role = (
+        "covered_call_adapter"
+        if registry.strategy_kind == "covered_call"
+        else "csp_adapter"
+    )
     required = {
         "fund_vault",
         "fund_flow_manager",
         "claim_escrow",
-        "csp_adapter",
+        adapter_role,
         "controller",
         "batch_settler",
         "strategy_manager",
@@ -406,7 +429,17 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
     missing = sorted(required - by_role.keys())
     if missing:
         raise ValueError(f"Fund registry is missing reconciliation roles: {missing}")
-    return SnapshotContracts(**{role: by_role[role] for role in required})
+    return SnapshotContracts(
+        fund_vault=by_role["fund_vault"],
+        fund_flow_manager=by_role["fund_flow_manager"],
+        claim_escrow=by_role["claim_escrow"],
+        strategy_adapter=by_role[adapter_role],
+        controller=by_role["controller"],
+        batch_settler=by_role["batch_settler"],
+        strategy_manager=by_role["strategy_manager"],
+        fund_accounting=by_role["fund_accounting"],
+        strategy_kind=registry.strategy_kind,
+    )
 
 
 def _rewind(registry: FundRegistry, block_number: int) -> None:
@@ -429,6 +462,8 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
                 "fund_address": registry.fund_address,
                 "accounting_asset": registry.accounting_asset,
                 "weth": registry.weth,
+                "strategy_kind": registry.strategy_kind,
+                "quote_asset": registry.quote_asset,
                 "net_assets": "0",
                 "share_supply": "0",
                 "reserved_claim_assets": "0",
@@ -460,6 +495,7 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
                 "nav_valid_after_block": None,
                 "nav_valid_until_block": None,
                 "last_event_block": block_number,
+                "normalization_slippage_bps": 0,
             }
         ],
         "share_balances": [],
@@ -470,6 +506,38 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
         "nav_reports": [],
         "activities": [],
     }
+
+
+def _apply_position_metadata(
+    projection,
+    snapshot,
+    new_events: list[FundEvent],
+) -> None:
+    metadata_by_position = {
+        (item.adapter_address, item.position_id): item
+        for item in getattr(snapshot, "position_metadata", ())
+    }
+    for key, metadata in metadata_by_position.items():
+        position = projection.positions.get(key)
+        if position is None:
+            continue
+        position.update(
+            strike_price_8=str(metadata.strike_price_8),
+            expiry_timestamp=metadata.expiry_timestamp,
+            is_put=metadata.is_put,
+        )
+    for event in new_events:
+        if event.event_name != "PositionOpened":
+            continue
+        key = normalize_address(event.contract_address), int(event.args["positionId"])
+        metadata = metadata_by_position.get(key)
+        if metadata is None:
+            continue
+        event.args.update(
+            strikePrice8=str(metadata.strike_price_8),
+            expiryTimestamp=metadata.expiry_timestamp,
+            isPut=metadata.is_put,
+        )
 
 
 def index_registry_once(

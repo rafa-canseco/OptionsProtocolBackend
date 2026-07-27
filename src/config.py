@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     fund_csp_sepolia_fair_value_iv_source: str = ""
     fund_csp_sepolia_fair_value_risk_free_rate_bps: int = 0
     fund_csp_sepolia_fair_value_settlement_cost_bps: int = 0
+    fund_covered_call_sepolia_fair_value_observations_enabled: bool = False
+    fund_covered_call_sepolia_observer_private_keys: str = ""
+    fund_covered_call_sepolia_fair_value_iv_bps: int = 0
+    fund_covered_call_sepolia_fair_value_iv_source: str = ""
+    fund_covered_call_sepolia_fair_value_risk_free_rate_bps: int = 0
+    fund_covered_call_sepolia_fair_value_settlement_cost_bps: int = 0
     fund_state_freshness_seconds: int = 180
     confirmed_head_freshness_seconds: int = 90
     circuit_breaker_poll_seconds: int = 10
@@ -276,6 +282,73 @@ def get_fund_csp_sepolia_fair_value_policy():
         risk_free_rate_bps=(settings.fund_csp_sepolia_fair_value_risk_free_rate_bps),
         settlement_cost_bps=(settings.fund_csp_sepolia_fair_value_settlement_cost_bps),
     )
+
+
+def get_fund_covered_call_sepolia_observer_private_keys() -> tuple[str, ...]:
+    """Return dedicated keys for the versioned covered-call fair-value policy."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_covered_call_sepolia_observer_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS must contain "
+            "exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS contains "
+            "duplicate observers"
+        )
+    return keys
+
+
+def get_fund_covered_call_sepolia_fair_value_policy():
+    """Return the explicit Base Sepolia European-call fair-value policy."""
+    from src.fund_nav.fair_value import (
+        CALL_POLICY_IV_BPS,
+        CALL_POLICY_IV_SOURCE,
+        CALL_POLICY_RISK_FREE_RATE_BPS,
+        CALL_POLICY_SETTLEMENT_COST_BPS,
+        CoveredCallFairValuePolicy,
+    )
+
+    policy = CoveredCallFairValuePolicy(
+        implied_volatility_bps=(
+            settings.fund_covered_call_sepolia_fair_value_iv_bps
+        ),
+        implied_volatility_source=(
+            settings.fund_covered_call_sepolia_fair_value_iv_source
+        ),
+        risk_free_rate_bps=(
+            settings.fund_covered_call_sepolia_fair_value_risk_free_rate_bps
+        ),
+        settlement_cost_bps=(
+            settings.fund_covered_call_sepolia_fair_value_settlement_cost_bps
+        ),
+    )
+    if (
+        policy.implied_volatility_bps != CALL_POLICY_IV_BPS
+        or policy.implied_volatility_source != CALL_POLICY_IV_SOURCE
+        or policy.risk_free_rate_bps != CALL_POLICY_RISK_FREE_RATE_BPS
+        or policy.settlement_cost_bps != CALL_POLICY_SETTLEMENT_COST_BPS
+    ):
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA fair-value inputs must match the "
+            "approved B1N-358 policy"
+        )
+    return policy
 
 
 @functools.lru_cache(maxsize=None)

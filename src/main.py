@@ -18,6 +18,8 @@ from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
+    get_fund_covered_call_sepolia_fair_value_policy,
+    get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
@@ -90,14 +92,31 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "NAV submitter key must be separate from NAV reporter keys"
             )
-        if settings.fund_csp_sepolia_fair_value_observations_enabled:
+        fair_value_configs = (
+            (
+                "CSP",
+                settings.fund_csp_sepolia_fair_value_observations_enabled,
+                get_fund_csp_sepolia_observer_private_keys,
+                get_fund_csp_sepolia_fair_value_policy,
+            ),
+            (
+                "covered-call",
+                settings.fund_covered_call_sepolia_fair_value_observations_enabled,
+                get_fund_covered_call_sepolia_observer_private_keys,
+                get_fund_covered_call_sepolia_fair_value_policy,
+            ),
+        )
+        observer_sets = {}
+        for label, enabled, get_keys, get_policy in fair_value_configs:
+            if not enabled:
+                continue
             if settings.chain_id != 84532:
                 raise RuntimeError(
-                    "Fair-value CSP observations are restricted to Base Sepolia"
+                    f"Fair-value {label} observations are restricted to Base Sepolia"
                 )
             try:
-                observer_keys = get_fund_csp_sepolia_observer_private_keys()
-                get_fund_csp_sepolia_fair_value_policy()
+                observer_keys = get_keys()
+                get_policy()
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
             observer_addresses = {
@@ -105,15 +124,27 @@ async def lifespan(app: FastAPI):
             }
             if reporter_addresses & observer_addresses:
                 raise RuntimeError(
-                    "Sepolia CSP observer keys must be separate from NAV reporter keys"
+                    f"Sepolia {label} observer keys must be separate from "
+                    "NAV reporter keys"
                 )
             if submitter_address in observer_addresses:
                 raise RuntimeError(
-                    "NAV submitter key must be separate from CSP observer keys"
+                    f"NAV submitter key must be separate from {label} observer keys"
                 )
-    elif settings.fund_csp_sepolia_fair_value_observations_enabled:
+            observer_sets[label] = observer_addresses
+        if (
+            observer_sets.get("CSP", set())
+            & observer_sets.get("covered-call", set())
+        ):
+            raise RuntimeError(
+                "CSP and covered-call observer keys must be separate"
+            )
+    elif (
+        settings.fund_csp_sepolia_fair_value_observations_enabled
+        or settings.fund_covered_call_sepolia_fair_value_observations_enabled
+    ):
         raise RuntimeError(
-            "FUND_NAV_REPORTER_ENABLED is required for fair-value CSP observations"
+            "FUND_NAV_REPORTER_ENABLED is required for fair-value observations"
         )
 
     tasks = []

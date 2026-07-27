@@ -169,6 +169,50 @@ ADAPTER_ABI = [
     _function("positionStateHash", [], [_field("", "bytes32")]),
 ]
 
+COVERED_CALL_POSITION_FIELDS = [
+    _field("oToken", "address"),
+    _field("marketMaker", "address"),
+    _field("protocolVaultId", "uint256"),
+    _field("optionAmount", "uint256"),
+    _field("collateral", "uint256"),
+    _field("premiumEarned", "uint256"),
+    _field("collateralReturned", "uint256"),
+    _field("calledAwayUsdc", "uint256"),
+    _field("fallbackWethRecovered", "uint256"),
+    _field("mmWethPayout", "uint256"),
+    _field("usdcBalanceBeforeDelivery", "uint256"),
+    _field("openedAt", "uint64"),
+    _field("fallbackEligibleAt", "uint64"),
+    _field("lifecycle", "uint8"),
+    _field("lifecycleHash", "bytes32"),
+]
+COVERED_CALL_ADAPTER_STATE_FIELDS = [
+    _field("stateNonce", "uint64"),
+    _field("positionsHash", "bytes32"),
+    _field("positionCount", "uint256"),
+    _field("activePositionCount", "uint256"),
+    _field("activeCollateral", "uint256"),
+    _field("accountedWeth", "uint256"),
+    _field("accountedUsdc", "uint256"),
+]
+COVERED_CALL_ADAPTER_ABI = [
+    _function("interfaceVersion", [], [_field("", "uint64")]),
+    _function("accountingAsset", [], [_field("", "address")]),
+    _function("weth", [], [_field("", "address")]),
+    _function("usdc", [], [_field("", "address")]),
+    _function(
+        "adapterState",
+        [],
+        [_field("state", "tuple", COVERED_CALL_ADAPTER_STATE_FIELDS)],
+    ),
+    _function(
+        "position",
+        [_field("positionId", "uint256")],
+        [_field("", "tuple", COVERED_CALL_POSITION_FIELDS)],
+    ),
+    _function("positionStateHash", [], [_field("", "bytes32")]),
+]
+
 POSITION_VALUE_FIELDS = [
     _field("grossAssets", "uint256"),
     _field("liabilities", "uint256"),

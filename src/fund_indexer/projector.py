@@ -4,13 +4,17 @@ from typing import Any
 from src.fund_indexer.models import FundEvent, ZERO_ADDRESS, integer, normalize_address
 
 
-LIFECYCLES = {
+CSP_LIFECYCLES = {
     0: "none",
     1: "open",
     2: "awaiting_physical_delivery",
     3: "settled_otm",
     4: "assigned",
     5: "cash_fallback",
+}
+COVERED_CALL_LIFECYCLES = {
+    **CSP_LIFECYCLES,
+    4: "called_away",
 }
 
 
@@ -89,6 +93,8 @@ def project_events(
     accounting_asset: str | None = None,
     weth: str | None = None,
     *,
+    strategy_kind: str = "csp",
+    quote_asset: str | None = None,
     to_block: int | None = None,
 ) -> FundProjection:
     if not events:
@@ -118,6 +124,10 @@ def project_events(
             if accounting_asset
             else None,
             "weth": normalize_address(weth) if weth else None,
+            "strategy_kind": strategy_kind,
+            "quote_asset": (
+                normalize_address(quote_asset) if quote_asset is not None else None
+            ),
         }
     )
     seen: set[tuple[int, str, int]] = set()
@@ -195,6 +205,7 @@ def _apply(projection: FundProjection, event: FundEvent) -> None:
         "StrategyEmergencyExited": _strategy_nonce_only,
         "AccountingAssetsReturned": _assets_returned,
         "AssignedWethSwapped": _weth_swapped,
+        "UsdcNormalized": _usdc_normalized,
         "RawAssetsRecovered": _assets_recovered,
         "PhysicalDelivery": _physical_delivery,
         "PhysicalDeliveryReserved": _adapter_activity("physical_delivery_reserved"),
@@ -489,18 +500,53 @@ def _position_opened(projection: FundProjection, event: FundEvent) -> None:
         "settlement_payout": "0",
         "payment": "0",
         "assigned_weth": "0",
+        "called_away_usdc": "0",
+        "fallback_weth_recovered": "0",
+        "mm_weth_payout": "0",
         "lifecycle": "open",
         "lifecycle_hash": args["lifecycleHash"],
         "opened_block": event.block_number,
         "settled_block": None,
+        "strike_price_8": (
+            str(integer(args["strikePrice8"]))
+            if args.get("strikePrice8") is not None
+            else None
+        ),
+        "expiry_timestamp": (
+            integer(args["expiryTimestamp"])
+            if args.get("expiryTimestamp") is not None
+            else None
+        ),
+        "is_put": (bool(args["isPut"]) if args.get("isPut") is not None else None),
+        "strategy_kind": projection.fund.get("strategy_kind", "csp"),
     }
     accounting_asset = projection.fund.get("accounting_asset")
-    if accounting_asset:
+    strategy_kind = projection.fund.get("strategy_kind", "csp")
+    if accounting_asset and strategy_kind == "csp":
         adapter_delta = integer(args["premiumEarned"]) - integer(args["collateral"])
         _inventory_add(
             projection, accounting_asset, "strategy_accounted", adapter_delta
         )
-    _activity(projection, event, "csp_opened")
+    elif accounting_asset and strategy_kind == "covered_call":
+        quote_asset = projection.fund.get("quote_asset")
+        _inventory_add(
+            projection,
+            accounting_asset,
+            "strategy_accounted",
+            -integer(args["collateral"]),
+        )
+        if quote_asset:
+            _inventory_add(
+                projection,
+                quote_asset,
+                "transient_usdc",
+                integer(args["premiumEarned"]),
+            )
+    _activity(
+        projection,
+        event,
+        "covered_call_opened" if strategy_kind == "covered_call" else "csp_opened",
+    )
 
 
 def _position_transitioned(projection: FundProjection, event: FundEvent) -> None:
@@ -509,8 +555,15 @@ def _position_transitioned(projection: FundProjection, event: FundEvent) -> None
     adapter = normalize_address(event.contract_address)
     position = projection.positions.get((adapter, position_id))
     if position is None:
-        raise ValueError(f"Transition for unknown CSP position {position_id}")
-    lifecycle = LIFECYCLES[integer(args["lifecycle"])]
+        raise ValueError(f"Transition for unknown fund position {position_id}")
+    strategy_kind = projection.fund.get("strategy_kind", "csp")
+    lifecycle_map = (
+        COVERED_CALL_LIFECYCLES if strategy_kind == "covered_call" else CSP_LIFECYCLES
+    )
+    lifecycle = lifecycle_map[integer(args["lifecycle"])]
+    if strategy_kind == "covered_call":
+        _covered_call_transition(projection, event, position, lifecycle)
+        return
     collateral_delta = integer(args["collateralDelta"])
     payment = integer(args["payment"])
     weth_delta = integer(args["wethDelta"])
@@ -546,6 +599,46 @@ def _position_transitioned(projection: FundProjection, event: FundEvent) -> None
         "assigned": "csp_assigned",
         "cash_fallback": "csp_cash_fallback",
     }.get(lifecycle, "csp_awaiting_delivery")
+    _activity(projection, event, activity)
+
+
+def _covered_call_transition(
+    projection: FundProjection,
+    event: FundEvent,
+    position: dict[str, Any],
+    lifecycle: str,
+) -> None:
+    args = event.args
+    weth_delta = integer(args["collateralDelta"])
+    usdc_delta = integer(args["payment"])
+    mm_weth_payout = integer(args["wethDelta"])
+    collateral_returned = integer(position["collateral_returned"])
+    fallback_recovered = integer(position["fallback_weth_recovered"])
+    if lifecycle == "settled_otm":
+        collateral_returned += weth_delta
+    elif lifecycle == "cash_fallback":
+        fallback_recovered += weth_delta
+    position.update(
+        lifecycle=lifecycle,
+        collateral_returned=str(collateral_returned),
+        called_away_usdc=str(integer(position["called_away_usdc"]) + usdc_delta),
+        fallback_weth_recovered=str(fallback_recovered),
+        mm_weth_payout=str(integer(position["mm_weth_payout"]) + mm_weth_payout),
+        lifecycle_hash=args["lifecycleHash"],
+    )
+    accounting_asset = projection.fund.get("accounting_asset")
+    quote_asset = projection.fund.get("quote_asset")
+    if accounting_asset and weth_delta:
+        _inventory_add(projection, accounting_asset, "strategy_accounted", weth_delta)
+    if quote_asset and usdc_delta:
+        _inventory_add(projection, quote_asset, "transient_usdc", usdc_delta)
+    if lifecycle not in {"open", "awaiting_physical_delivery"}:
+        position["settled_block"] = event.block_number
+    activity = {
+        "settled_otm": "covered_call_settled_otm",
+        "called_away": "covered_call_called_away",
+        "cash_fallback": "covered_call_cash_fallback",
+    }.get(lifecycle, "covered_call_awaiting_delivery")
     _activity(projection, event, activity)
 
 
@@ -601,13 +694,42 @@ def _weth_swapped(projection: FundProjection, event: FundEvent) -> None:
         )
 
 
+def _usdc_normalized(projection: FundProjection, event: FundEvent) -> None:
+    if projection.fund.get("strategy_kind") != "covered_call":
+        return
+    accounting_asset = projection.fund.get("accounting_asset")
+    quote_asset = projection.fund.get("quote_asset")
+    if accounting_asset and quote_asset:
+        _inventory_add(
+            projection,
+            quote_asset,
+            "transient_usdc",
+            -integer(event.args["usdcIn"]),
+        )
+        _inventory_add(
+            projection,
+            accounting_asset,
+            "strategy_accounted",
+            integer(event.args["wethOut"]),
+        )
+    _activity(projection, event, "covered_call_usdc_normalized")
+
+
 def _assets_recovered(projection: FundProjection, event: FundEvent) -> None:
     for asset, amount in zip(event.args["assets"], event.args["amounts"], strict=True):
-        bucket = (
-            "assigned"
-            if normalize_address(asset) == projection.fund.get("weth")
-            else "strategy_accounted"
-        )
+        normalized = normalize_address(asset)
+        if projection.fund.get("strategy_kind") == "covered_call":
+            bucket = (
+                "strategy_accounted"
+                if normalized == projection.fund.get("accounting_asset")
+                else "transient_usdc"
+            )
+        else:
+            bucket = (
+                "assigned"
+                if normalized == projection.fund.get("weth")
+                else "strategy_accounted"
+            )
         _inventory_add(projection, asset, bucket, -integer(amount))
 
 

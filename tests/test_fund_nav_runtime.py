@@ -7,12 +7,18 @@ from web3 import Web3
 
 from src.bots import fund_nav_reporter
 from src.config import (
+    get_fund_covered_call_sepolia_fair_value_policy,
+    get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     settings,
 )
 from src.fund_nav import runtime
-from src.fund_nav.fair_value import FairValuePolicy, observation_model_version
+from src.fund_nav.fair_value import (
+    CoveredCallFairValuePolicy,
+    FairValuePolicy,
+    observation_model_version,
+)
 from src.fund_nav.fair_value import versioned_observation_nonce
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
@@ -444,6 +450,23 @@ class FairValueValuatorFunctions:
     def maxObservationDivergenceBps(self):
         return self.Call(500)
 
+    def observationDigest(
+        self,
+        _adapter,
+        position_id,
+        _snapshot_block,
+        _valid_until_block,
+        _liability,
+        _base_exit_cost,
+        observation_nonce,
+    ):
+        return self.Call(
+            Web3.keccak(text=f"{position_id}:{observation_nonce}")
+        )
+
+    def isApprovedObserver(self, _observer):
+        return self.Call(True)
+
 
 def fair_value_valuator():
     return SimpleNamespace(
@@ -452,24 +475,40 @@ def fair_value_valuator():
     )
 
 
-def fair_value_gateway(keys):
+def fair_value_gateway(keys, strategy_kind="csp"):
     market_maker = Account.from_key("0x" + f"{3:064x}").address.lower()
     repository = FairValueObservationRepository()
     fund = TrustedFund({"chain_id": 84532, "fund_address": FUND}, {}, {}, None)
     gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
     gateway.fund = fund
     gateway.repository = repository
+    gateway.strategy_kind = strategy_kind
+    gateway.adapter_abi = []
     gateway.sepolia_observer_private_keys = keys
-    gateway.fair_value_policy = FairValuePolicy(
-        implied_volatility_bps=4_200,
-        implied_volatility_source="approved-testnet-snapshot",
-        risk_free_rate_bps=500,
-        settlement_cost_bps=0,
+    gateway.fair_value_policy = (
+        CoveredCallFairValuePolicy(
+            implied_volatility_bps=4_200,
+            implied_volatility_source=(
+                "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-"
+                "b1n358-covered-call-v2-approved"
+            ),
+            risk_free_rate_bps=500,
+            settlement_cost_bps=0,
+        )
+        if strategy_kind == "covered_call"
+        else FairValuePolicy(
+            implied_volatility_bps=4_200,
+            implied_volatility_source="approved-testnet-snapshot",
+            risk_free_rate_bps=500,
+            settlement_cost_bps=0,
+        )
     )
     gateway.chain_id = lambda: 84532
     gateway.block_hash = lambda _block: bytes.fromhex("12" * 32)
     gateway.head_block = lambda: 101
-    gateway.max_observation_window = lambda _valuator, _block: 20
+    gateway.max_observation_window = lambda _valuator, _block: (
+        120 if strategy_kind == "covered_call" else 20
+    )
     gateway.observer_approved = lambda _valuator, _observer, _block: True
     gateway.market_maker = lambda _adapter, _position, _block: market_maker
     gateway.observation_digest = lambda observation: Web3.keccak(
@@ -491,18 +530,21 @@ def fair_value_gateway(keys):
 
     class AdapterFunctions:
         def accountingAsset(self):
-            return Call(USDC)
+            return Call(WETH if strategy_kind == "covered_call" else USDC)
 
         def weth(self):
             return Call(WETH)
 
+        def usdc(self):
+            return Call(USDC)
+
     class TokenFunctions:
         def decimals(self):
-            return Call(6)
+            return Call(18 if strategy_kind == "covered_call" else 6)
 
     class OTokenFunctions:
         def isPut(self):
-            return Call(True)
+            return Call(strategy_kind == "csp")
 
         def underlying(self):
             return Call(WETH)
@@ -511,10 +553,14 @@ def fair_value_gateway(keys):
             return Call(USDC)
 
         def collateralAsset(self):
-            return Call(USDC)
+            return Call(WETH if strategy_kind == "covered_call" else USDC)
 
         def strikePrice(self):
-            return Call(157_500_000_000)
+            return Call(
+                220_000_000_000
+                if strategy_kind == "covered_call"
+                else 157_500_000_000
+            )
 
         def expiry(self):
             return Call(1_785_139_200)
@@ -527,25 +573,46 @@ def fair_value_gateway(keys):
             functions = {
                 Web3.to_checksum_address(ADAPTER): AdapterFunctions(),
                 Web3.to_checksum_address(USDC): TokenFunctions(),
+                Web3.to_checksum_address(WETH): TokenFunctions(),
                 Web3.to_checksum_address(OTOKEN): OTokenFunctions(),
             }[Web3.to_checksum_address(address)]
             return SimpleNamespace(functions=functions)
 
     gateway.w3 = SimpleNamespace(eth=Eth())
     position = (
-        OTOKEN,
-        market_maker,
-        1,
-        50_793_650,
-        799_999_988,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        bytes(32),
+        (
+            OTOKEN,
+            market_maker,
+            1,
+            250_000,
+            2_500_000_000_000_000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            bytes(32),
+        )
+        if strategy_kind == "covered_call"
+        else (
+            OTOKEN,
+            market_maker,
+            1,
+            50_793_650,
+            799_999_988,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            bytes(32),
+        )
     )
     return gateway, repository, position
 
@@ -584,6 +651,139 @@ def test_sepolia_fair_value_observations_are_exact_and_idempotent() -> None:
     assert repository.marks[0]["fair_liability_assets"] == "1"
     assert repository.marks[0]["stress_liability_assets"] == "799999988"
     assert repository.marks[0]["source_quality"] == "single_model_multi_signer"
+
+
+def test_covered_call_publisher_restores_active_nav_observation_quorum() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, repository, position = fair_value_gateway(
+        keys, strategy_kind="covered_call"
+    )
+    valuator = fair_value_valuator()
+
+    gateway._publish_sepolia_fair_value_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        quorum=2,
+        positions=[(1, position)],
+        existing_rows=[],
+    )
+    accepted = gateway._position_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        position_id=1,
+        market_maker=position[1],
+        rows=repository.rows,
+        quorum=2,
+    )
+
+    assert len(accepted) == 2
+    assert len(encode_valuation_data(accepted)) > 32
+    assert {row["strategy_kind"] for row in repository.rows} == {"covered_call"}
+    liability = int(repository.rows[0]["liability"])
+    assert 0 < liability < position[4]
+    assert {int(row["base_exit_cost"]) for row in repository.rows} == {0}
+    assert repository.marks[0]["strategy_kind"] == "covered_call"
+    assert repository.marks[0]["model_name"] == "b1nary-european-bs-call-v1"
+    assert (
+        repository.marks[0]["policy_reference"]
+        == "policies/covered_call_fund_policy.v2.base-sepolia.json"
+    )
+    assert (
+        repository.marks[0]["policy_sha256"]
+        == "4ecb60fc6a19ac0a10c37ca380998b3566a3193693a10fb211f86bb61a2bebf3"
+    )
+    assert repository.marks[0]["stress_liability_assets"] == str(position[4])
+    assert repository.marks[0]["fair_liability_assets"] == str(liability)
+
+
+def test_covered_call_publisher_requires_final_observation_window_policy() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = fair_value_gateway(
+        keys, strategy_kind="covered_call"
+    )
+    gateway.max_observation_window = lambda _valuator, _block: 119
+
+    with pytest.raises(RuntimeError, match="OBSERVATION_WINDOW_POLICY_MISMATCH"):
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=[],
+        )
+
+
+def test_covered_call_publisher_rejects_unapproved_bounded_policy() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = fair_value_gateway(
+        keys, strategy_kind="covered_call"
+    )
+    gateway.fair_value_policy = CoveredCallFairValuePolicy(
+        implied_volatility_bps=4_300,
+        implied_volatility_source=(
+            "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-"
+            "b1n358-covered-call-v2-approved"
+        ),
+        risk_free_rate_bps=500,
+        settlement_cost_bps=0,
+    )
+
+    with pytest.raises(RuntimeError, match="FAIR_VALUE_POLICY_MISMATCH"):
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=[],
+        )
+
+
+@pytest.mark.parametrize(
+    ("feed", "decimals", "staleness"),
+    [
+        (ADAPTER, 8, 3_600),
+        (runtime.COVERED_CALL_SPOT_FEED, 6, 3_600),
+        (runtime.COVERED_CALL_SPOT_FEED, 8, 3_599),
+    ],
+)
+def test_covered_call_spot_policy_is_exact(feed, decimals, staleness) -> None:
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    class ValuatorFunctions:
+        def spotFeed(self):
+            return Call(feed)
+
+        def spotFeedDecimals(self):
+            return Call(decimals)
+
+        def maxSpotStaleness(self):
+            return Call(staleness)
+
+    class Eth:
+        def contract(self, address, abi):
+            raise AssertionError("invalid policy must fail before feed RPC")
+
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.strategy_kind = "covered_call"
+    gateway.w3 = SimpleNamespace(eth=Eth())
+    valuator = SimpleNamespace(functions=ValuatorFunctions())
+
+    with pytest.raises(RuntimeError, match="COVERED_CALL_SPOT_POLICY_MISMATCH"):
+        gateway._approved_spot_snapshot(
+            valuator=valuator,
+            block=100,
+            snapshot_timestamp=1_000,
+        )
 
 
 @pytest.mark.parametrize(
@@ -660,9 +860,70 @@ def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None
         get_fund_csp_sepolia_observer_private_keys()
 
 
+def test_covered_call_observer_config_is_separate_disabled_and_strict(
+    monkeypatch,
+) -> None:
+    assert (
+        settings.fund_covered_call_sepolia_fair_value_observations_enabled
+        is False
+    )
+    key = "0x" + f"{1:064x}"
+    monkeypatch.setattr(
+        settings, "fund_covered_call_sepolia_observer_private_keys", key
+    )
+    with pytest.raises(ValueError, match="exactly two"):
+        get_fund_covered_call_sepolia_observer_private_keys()
+
+    monkeypatch.setattr(
+        settings,
+        "fund_covered_call_sepolia_observer_private_keys",
+        f"{key},{key}",
+    )
+    with pytest.raises(ValueError, match="duplicate observers"):
+        get_fund_covered_call_sepolia_observer_private_keys()
+
+
 def test_sepolia_fair_value_policy_has_no_implicit_iv_default(monkeypatch) -> None:
     monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_bps", 0)
     monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_source", "")
 
     with pytest.raises(ValueError, match="IV_BPS"):
         get_fund_csp_sepolia_fair_value_policy()
+
+
+def test_covered_call_fair_value_policy_has_no_implicit_iv_default(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        settings, "fund_covered_call_sepolia_fair_value_iv_bps", 0
+    )
+    monkeypatch.setattr(
+        settings, "fund_covered_call_sepolia_fair_value_iv_source", ""
+    )
+
+    with pytest.raises(ValueError, match="IV_BPS"):
+        get_fund_covered_call_sepolia_fair_value_policy()
+
+
+def test_covered_call_config_requires_exact_approved_policy(monkeypatch) -> None:
+    monkeypatch.setattr(
+        settings, "fund_covered_call_sepolia_fair_value_iv_bps", 4_200
+    )
+    monkeypatch.setattr(
+        settings,
+        "fund_covered_call_sepolia_fair_value_iv_source",
+        "unapproved-source",
+    )
+    monkeypatch.setattr(
+        settings,
+        "fund_covered_call_sepolia_fair_value_risk_free_rate_bps",
+        500,
+    )
+    monkeypatch.setattr(
+        settings,
+        "fund_covered_call_sepolia_fair_value_settlement_cost_bps",
+        0,
+    )
+
+    with pytest.raises(ValueError, match="approved B1N-358"):
+        get_fund_covered_call_sepolia_fair_value_policy()

@@ -1,4 +1,4 @@
-"""DB-first product service for tokenized CSP funds."""
+"""DB-first product service for tokenized option funds."""
 
 import base64
 import json
@@ -24,26 +24,27 @@ from src.models.csp_vault import (
     FundSummaryResponse,
     NavWindow,
     RedemptionView,
+    StrategyOperationSummary,
     StressNav,
     TokenMetadata,
     TrustedContract,
 )
 
-PROXY_ROLES = {
+COMMON_PROXY_ROLES = {
     "fund_vault",
     "fund_share",
     "fund_accounting",
     "fund_flow_manager",
     "strategy_manager",
-    "csp_adapter",
     "controller",
     "batch_settler",
 }
-REQUIRED_TRUSTED_ROLES = PROXY_ROLES | {
+STRATEGY_PROXY_ROLES = {"csp_adapter", "covered_call_adapter"}
+PROXY_ROLES = COMMON_PROXY_ROLES | STRATEGY_PROXY_ROLES
+COMMON_TRUSTED_ROLES = COMMON_PROXY_ROLES | {
     "claim_escrow",
     "access_manager",
     "address_book",
-    "csp_valuator",
     "margin_pool",
     "nav_verifier",
     "oracle",
@@ -51,6 +52,19 @@ REQUIRED_TRUSTED_ROLES = PROXY_ROLES | {
     "swap_router",
     "whitelist",
 }
+REQUIRED_TRUSTED_ROLES = COMMON_TRUSTED_ROLES | {
+    "csp_adapter",
+    "csp_valuator",
+}
+
+
+def required_trusted_roles(strategy_kind: str) -> set[str]:
+    if strategy_kind == "covered_call":
+        return COMMON_TRUSTED_ROLES | {
+            "covered_call_adapter",
+            "covered_call_valuator",
+        }
+    return REQUIRED_TRUSTED_ROLES
 
 
 class UnknownFundError(LookupError):
@@ -95,7 +109,7 @@ class SupabaseFundRepository:
 
     def positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
         return (
-            self._fund_query("v2_csp_positions", chain_id, fund)
+            self._fund_query("v2_fund_strategy_positions", chain_id, fund)
             .order("position_id")
             .execute()
             .data
@@ -232,7 +246,7 @@ class FundService:
             row["fund_address"],
             int(state.get("last_report_nonce", 0)),
         )
-        context = self._write_context(row, state)
+        context = self._write_context(row, state, positions=positions)
         stale = context["stale"]
         actions = self._actions(row, state, common=context["reason"])
         net_assets = int(state.get("net_assets", 0))
@@ -251,7 +265,22 @@ class FundService:
         adapter_free = int(
             amounts.get((row["accounting_asset"], "strategy_accounted"), 0)
         )
-        assigned_weth = int(amounts.get((row["weth"], "assigned"), 0))
+        strategy_kind = row.get("strategy_kind", "csp")
+        assigned_weth = (
+            int(amounts.get((row["weth"], "assigned"), 0))
+            if strategy_kind == "csp"
+            else 0
+        )
+        transient_usdc = (
+            int(
+                amounts.get(
+                    (row.get("quote_asset"), "transient_usdc"),
+                    0,
+                )
+            )
+            if strategy_kind == "covered_call" and row.get("quote_asset")
+            else 0
+        )
         locked_collateral = sum(
             int(position.get("collateral", 0))
             for position in active_positions
@@ -263,6 +292,9 @@ class FundService:
             adapter_free_assets=adapter_free,
             locked_collateral_assets=locked_collateral,
             assigned_weth=assigned_weth,
+            transient_usdc=transient_usdc,
+            strategy_kind=strategy_kind,
+            normalization_slippage_bps=int(state.get("normalization_slippage_bps", 0)),
             denominator=denominator,
             share_decimals=int(row["share_decimals"]),
         )
@@ -291,6 +323,14 @@ class FundService:
                     valuation_view["settlement_receivable_assets"]
                 ),
                 settlement_cost_assets=str(valuation_view["settlement_cost_assets"]),
+                transient_usdc=str(transient_usdc),
+                transient_usdc_value_assets=str(
+                    valuation_view["transient_usdc_value_assets"]
+                ),
+                normalization_cost_assets=str(
+                    valuation_view["normalization_cost_assets"]
+                ),
+                option_exit_cost_assets=str(valuation_view["option_exit_cost_assets"]),
             ),
             nav=NavWindow(
                 report_nonce=int(state.get("last_report_nonce", 0)),
@@ -303,7 +343,12 @@ class FundService:
                 source_quality=valuation_view["source_quality"],
                 stress=valuation_view["stress"],
             ),
-            strategy=self._strategy_snapshot(positions, valuation),
+            strategy=self._strategy_snapshot(
+                positions,
+                valuation,
+                strategy_kind=strategy_kind,
+                transient_usdc=transient_usdc,
+            ),
             status=self._status(state),
             actions=actions,
             as_of_block=state.get("as_of_block"),
@@ -316,6 +361,9 @@ class FundService:
     def _strategy_snapshot(
         positions: list[dict[str, Any]],
         valuation: dict[str, Any] | None,
+        *,
+        strategy_kind: str = "csp",
+        transient_usdc: int = 0,
     ) -> FundStrategySnapshot:
         total_premium = sum(
             max(int(position.get("premium_earned", 0)), 0) for position in positions
@@ -332,6 +380,7 @@ class FundService:
         )
         if selected is None:
             return FundStrategySnapshot(
+                strategy_kind=strategy_kind,
                 total_premium_collected_assets=str(total_premium),
                 next_open_condition="when_funded_and_pricing_is_ready",
             )
@@ -343,24 +392,76 @@ class FundService:
             None,
         )
         is_active = selected in active
-        expiry = int(mark["expiry_timestamp"]) if mark else None
+        expiry = (
+            int(mark["expiry_timestamp"])
+            if mark
+            else (
+                int(selected["expiry_timestamp"])
+                if selected.get("expiry_timestamp") is not None
+                else None
+            )
+        )
+        strike = (
+            str(mark["strike_price_8"])
+            if mark is not None
+            else (
+                str(selected["strike_price_8"])
+                if selected.get("strike_price_8") is not None
+                else None
+            )
+        )
+        lifecycle = str(selected.get("lifecycle", "unknown"))
+        operation = {
+            "open": "call_opened" if strategy_kind == "covered_call" else "put_opened",
+            "awaiting_physical_delivery": "awaiting_physical_delivery",
+            "settled_otm": (
+                "call_settled_otm"
+                if strategy_kind == "covered_call"
+                else "put_settled_otm"
+            ),
+            "called_away": "call_called_away",
+            "assigned": "put_assigned",
+            "cash_fallback": "cash_fallback",
+        }.get(lifecycle, "position_updated")
+        next_condition = "when_pricing_is_ready"
+        if lifecycle == "awaiting_physical_delivery":
+            next_condition = "awaiting_physical_delivery"
+        elif is_active:
+            next_condition = "after_current_settlement"
+        elif strategy_kind == "covered_call" and transient_usdc:
+            next_condition = "after_usdc_normalization"
         return FundStrategySnapshot(
+            strategy_kind=strategy_kind,
             latest_position=CspPositionSummary(
                 position_id=position_id,
-                lifecycle=str(selected.get("lifecycle", "unknown")),
-                strike_price_usd_8=(
-                    str(mark["strike_price_8"]) if mark is not None else None
-                ),
+                lifecycle=lifecycle,
+                strike_price_usd_8=strike,
                 expiry_timestamp=expiry,
                 option_amount_8=str(selected.get("option_amount", 0)),
                 collateral_assets=str(selected.get("collateral", 0)),
                 premium_earned_assets=str(selected.get("premium_earned", 0)),
+                called_away_usdc=str(selected.get("called_away_usdc", 0)),
+                fallback_weth_recovered_assets=str(
+                    selected.get("fallback_weth_recovered", 0)
+                ),
+                mm_weth_payout_assets=str(selected.get("mm_weth_payout", 0)),
+            ),
+            latest_operation=StrategyOperationSummary(
+                operation_type=operation,
+                position_id=position_id,
+                block_number=(
+                    int(selected["settled_block"])
+                    if selected.get("settled_block") is not None
+                    else (
+                        int(selected["opened_block"])
+                        if selected.get("opened_block") is not None
+                        else None
+                    )
+                ),
             ),
             total_premium_collected_assets=str(total_premium),
             next_open_after=expiry if is_active else None,
-            next_open_condition=(
-                "after_current_settlement" if is_active else "when_pricing_is_ready"
-            ),
+            next_open_condition=next_condition,
         )
 
     @staticmethod
@@ -371,6 +472,9 @@ class FundService:
         adapter_free_assets,
         locked_collateral_assets,
         assigned_weth,
+        transient_usdc,
+        strategy_kind,
+        normalization_slippage_bps,
         denominator,
         share_decimals,
     ) -> dict[str, Any]:
@@ -381,6 +485,9 @@ class FundService:
             "assigned_weth_value_assets": 0,
             "settlement_receivable_assets": 0,
             "settlement_cost_assets": 0,
+            "transient_usdc_value_assets": 0,
+            "normalization_cost_assets": 0,
+            "option_exit_cost_assets": 0,
             "stress_price_assets": None,
             "methodology": None,
             "model_version": None,
@@ -399,8 +506,22 @@ class FundService:
         settlement_cost = sum(int(report.get("baseExitCost", 0)) for report in reports)
         accounted = idle_assets + adapter_free_assets + locked_collateral_assets
         non_usdc_value = max(gross_assets - accounted, 0)
-        assigned_weth_value = non_usdc_value if assigned_weth else 0
-        settlement_receivable = non_usdc_value - assigned_weth_value
+        assigned_weth_value = (
+            non_usdc_value if strategy_kind == "csp" and assigned_weth else 0
+        )
+        transient_usdc_value = (
+            non_usdc_value if strategy_kind == "covered_call" and transient_usdc else 0
+        )
+        settlement_receivable = max(
+            non_usdc_value - assigned_weth_value - transient_usdc_value,
+            0,
+        )
+        normalization_cost = (
+            (transient_usdc_value * normalization_slippage_bps + 10_000 - 1) // 10_000
+            if transient_usdc_value and normalization_slippage_bps
+            else 0
+        )
+        option_exit_cost = max(settlement_cost - normalization_cost, 0)
         stress_liability = sum(
             int(mark.get("stress_liability_assets", 0)) for mark in marks
         )
@@ -419,12 +540,21 @@ class FundService:
             "assigned_weth_value_assets": assigned_weth_value,
             "settlement_receivable_assets": settlement_receivable,
             "settlement_cost_assets": settlement_cost,
+            "transient_usdc_value_assets": transient_usdc_value,
+            "normalization_cost_assets": normalization_cost,
+            "option_exit_cost_assets": option_exit_cost,
             "stress_price_assets": str(stress_price)
             if stress_price is not None
             else None,
-            "methodology": next(iter(methodologies))
-            if len(methodologies) == 1
-            else None,
+            "methodology": (
+                next(iter(methodologies))
+                if len(methodologies) == 1
+                else (
+                    "signed_observer_quorum"
+                    if strategy_kind == "covered_call"
+                    else None
+                )
+            ),
             "model_version": next(iter(model_versions))
             if len(model_versions) == 1
             else None,
@@ -436,9 +566,15 @@ class FundService:
                 ),
                 default=None,
             ),
-            "source_quality": next(iter(source_qualities))
-            if len(source_qualities) == 1
-            else None,
+            "source_quality": (
+                next(iter(source_qualities))
+                if len(source_qualities) == 1
+                else (
+                    "mixed_sources"
+                    if strategy_kind == "covered_call"
+                    else None
+                )
+            ),
             "stress": StressNav(
                 net_assets=str(stress_net),
                 share_price_assets=str(stress_price),
@@ -545,8 +681,16 @@ class FundService:
 
     @staticmethod
     def _registry(row: dict[str, Any]) -> FundRegistryItem:
+        quote_asset = None
+        if row.get("quote_asset"):
+            quote_asset = TokenMetadata(
+                address=row["quote_asset"],
+                symbol=row.get("quote_asset_symbol") or "USDC",
+                decimals=int(row.get("quote_asset_decimals", 6)),
+            )
         return FundRegistryItem(
             fund_key=row["fund_key"],
+            strategy_kind=row.get("strategy_kind", "csp"),
             chain_id=int(row["chain_id"]),
             fund_address=row["fund_address"],
             deployment_status=row["deployment_status"],
@@ -560,6 +704,7 @@ class FundService:
                 symbol=row["accounting_asset_symbol"],
                 decimals=int(row["accounting_asset_decimals"]),
             ),
+            quote_asset=quote_asset,
         )
 
     @staticmethod
@@ -619,15 +764,37 @@ class FundService:
             return "FLOW_PROCESSING"
         return None
 
-    def _write_context(self, registry, state) -> dict[str, Any]:
+    def _write_context(self, registry, state, *, positions=None) -> dict[str, Any]:
         chain_id = int(registry["chain_id"])
+        if positions is None:
+            positions = self.repository.positions(
+                chain_id, registry["fund_address"]
+            )
         contracts = self.repository.contracts(chain_id, registry["fund_address"])
         head = self.repository.confirmed_head(chain_id)
         active = self._active_contracts(contracts, state.get("as_of_block"))
         trust_reason = self._binding_reason(registry, state, active)
         stale_reason = self._freshness_reason(state, head)
-        stale = bool(trust_reason or stale_reason or state.get("nav_stale", True))
-        reason = trust_reason or self._state_reason(registry, state, stale)
+        settlement_reason = (
+            "AWAITING_PHYSICAL_DELIVERY"
+            if registry.get("strategy_kind") == "covered_call"
+            and any(
+                position.get("lifecycle") == "awaiting_physical_delivery"
+                for position in positions
+            )
+            else None
+        )
+        stale = bool(
+            trust_reason
+            or stale_reason
+            or settlement_reason
+            or state.get("nav_stale", True)
+        )
+        reason = (
+            trust_reason
+            or settlement_reason
+            or self._state_reason(registry, state, stale)
+        )
         if reason == "STALE_SNAPSHOT" and stale_reason:
             reason = stale_reason
         return {"reason": reason, "stale": stale, "active_contracts": active}
@@ -653,7 +820,8 @@ class FundService:
         by_role = {row["contract_role"]: row for row in active}
         if len(by_role) != len(active):
             return "AMBIGUOUS_BINDING"
-        if not REQUIRED_TRUSTED_ROLES.issubset(by_role):
+        required = required_trusted_roles(registry.get("strategy_kind", "csp"))
+        if not required.issubset(by_role):
             return "MISSING_TRUSTED_DEPLOYMENT"
         expected_addresses = {
             "fund_vault": registry["fund_address"],
@@ -666,7 +834,16 @@ class FundService:
             return "UNTRUSTED_BINDING"
         if any(int(row["interface_version"]) not in {1} for row in by_role.values()):
             return "UNSUPPORTED_INTERFACE"
-        if any(not by_role[role].get("implementation_address") for role in PROXY_ROLES):
+        required_proxies = COMMON_PROXY_ROLES | {
+            (
+                "covered_call_adapter"
+                if registry.get("strategy_kind") == "covered_call"
+                else "csp_adapter"
+            )
+        }
+        if any(
+            not by_role[role].get("implementation_address") for role in required_proxies
+        ):
             return "UNTRUSTED_IMPLEMENTATION"
         return None
 

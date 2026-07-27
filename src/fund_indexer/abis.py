@@ -230,6 +230,10 @@ EVENT_ABIS = [
         [("wethIn", "uint256", False), ("usdcOut", "uint256", False)],
     ),
     _event(
+        "UsdcNormalized",
+        [("usdcIn", "uint256", False), ("wethOut", "uint256", False)],
+    ),
+    _event(
         "RawAssetsRecovered",
         [
             ("escrow", "address", True),

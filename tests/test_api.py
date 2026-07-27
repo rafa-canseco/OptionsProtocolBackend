@@ -530,6 +530,158 @@ def test_sepolia_fair_value_observation_validation_precedes_tasks(
             pass
 
 
+@pytest.mark.parametrize(
+    ("reporter_enabled", "chain_id", "observer_keys", "message"),
+    [
+        (
+            False,
+            84532,
+            ",".join(["0x" + f"{5:064x}", "0x" + f"{6:064x}"]),
+            "FUND_NAV_REPORTER_ENABLED",
+        ),
+        (
+            True,
+            8453,
+            ",".join(["0x" + f"{5:064x}", "0x" + f"{6:064x}"]),
+            "restricted to Base Sepolia",
+        ),
+        (
+            True,
+            84532,
+            ",".join(["0x" + f"{1:064x}", "0x" + f"{5:064x}"]),
+            "separate from NAV reporter keys",
+        ),
+    ],
+)
+def test_covered_call_fair_value_startup_gates_precede_tasks(
+    monkeypatch, reporter_enabled, chain_id, observer_keys, message
+):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_reporter_enabled", reporter_enabled
+    )
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_reporter_private_keys",
+        "0x" + f"{1:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_submitter_private_key",
+        "0x" + f"{4:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module.settings, "chain_id", chain_id)
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_observer_private_keys",
+        observer_keys,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_iv_bps",
+        4_200,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_iv_source",
+        (
+            "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-"
+            "b1n358-covered-call-v2-approved"
+        ),
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_risk_free_rate_bps",
+        500,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_settlement_cost_bps",
+        0,
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        with TestClient(main_module.app):
+            pass
+
+
+def test_csp_and_covered_call_observer_key_sets_must_be_separate(monkeypatch):
+    import src.main as main_module
+
+    observer_keys = ",".join(
+        ["0x" + f"{5:064x}", "0x" + f"{6:064x}"]
+    )
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(main_module.settings, "chain_id", 84532)
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_reporter_private_keys",
+        "0x" + f"{1:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_submitter_private_key",
+        "0x" + f"{4:064x}",
+    )
+    for prefix in ("fund_csp", "fund_covered_call"):
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_fair_value_observations_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_observer_private_keys",
+            observer_keys,
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_fair_value_iv_bps",
+            4_200,
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_fair_value_iv_source",
+            (
+                "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-"
+                "b1n358-covered-call-v2-approved"
+                if prefix == "fund_covered_call"
+                else "approved-testnet-snapshot"
+            ),
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_fair_value_risk_free_rate_bps",
+            500,
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            f"{prefix}_sepolia_fair_value_settlement_cost_bps",
+            0,
+        )
+
+    with pytest.raises(RuntimeError, match="observer keys must be separate"):
+        with TestClient(main_module.app):
+            pass
+
+
 # --- Rate limiting ---
 
 
