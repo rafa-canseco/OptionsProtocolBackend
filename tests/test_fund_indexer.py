@@ -492,6 +492,50 @@ def test_persist_window_projects_nav_at_terminal_block(monkeypatch, registry) ->
     assert projected_blocks == [115]
 
 
+def test_staggered_activation_defers_reconciliation_and_advances_state(
+    monkeypatch, registry
+) -> None:
+    event = indexer.FundEvent(
+        chain_id=registry.chain_id,
+        fund_address=registry.fund_address,
+        contract_address=registry.fund_address,
+        contract_role="fund_vault",
+        interface_version=1,
+        block_number=100,
+        block_hash=f"0x{100:064x}",
+        transaction_hash="0x01",
+        transaction_index=0,
+        log_index=0,
+        event_name="Upgraded",
+        args={"implementation": IMPLEMENTATION},
+    )
+    client = CapturingRpcClient()
+    indexed_at = "2026-07-27T22:03:44+00:00"
+    block_hash = f"0x{101:064x}"
+    monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(
+        indexer,
+        "_missing_reconciliation_roles",
+        lambda *_: ["covered_call_adapter"],
+    )
+    monkeypatch.setattr(indexer, "_block_timestamp", lambda *_: indexed_at)
+    monkeypatch.setattr(
+        indexer,
+        "read_onchain_snapshot",
+        lambda *_: pytest.fail("snapshot must wait for every reconciliation role"),
+    )
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+
+    indexer._persist_window(FakeWeb3(), registry, 100, 101, block_hash, [event])
+
+    state = client.params["p_projection"]["fund_state"][0]
+    assert state["as_of_block"] == 101
+    assert state["as_of_block_hash"] == block_hash
+    assert state["indexed_at"] == indexed_at
+    assert state["reconciled"] is False
+    assert client.params["p_projection"]["reconciliations"] == []
+
+
 def test_authoritative_accounting_state_is_reconciled_then_persisted(
     monkeypatch, registry
 ) -> None:
@@ -543,6 +587,7 @@ def test_authoritative_accounting_state_is_reconciled_then_persisted(
 
     client = CapturingRpcClient()
     monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(indexer, "_missing_reconciliation_roles", lambda *_: [])
     monkeypatch.setattr(indexer, "_snapshot_contracts", lambda *_: object())
     monkeypatch.setattr(indexer, "read_onchain_snapshot", lambda *_: snapshot)
     monkeypatch.setattr(indexer, "reconcile", reconcile_before_overwrite)

@@ -337,57 +337,84 @@ def _persist_window(
         if canonical
         else None
     )
-    projection = (
-        projected.export()
-        if projected is not None
-        else _empty_projection(registry, to_block)
+    indexed_at = _block_timestamp(w3, to_block)
+    projection = _empty_projection(
+        registry,
+        to_block,
+        block_hash=block_hash,
+        indexed_at=indexed_at,
     )
     if projected is not None:
-        snapshot = read_onchain_snapshot(
-            w3,
-            projected,
-            _snapshot_contracts(registry, to_block),
-            to_block,
-            block_hash,
-        )
-        reconciliation = reconcile(projected, snapshot)
-        _apply_position_metadata(projected, snapshot, new_events)
         projection = projected.export()
-        indexed_at = _block_timestamp(w3, to_block)
-        snapshot_state = dict(
-            positions_hash=snapshot.strategy_positions_hash,
-            reporter_set_version=snapshot.reporter_set_version,
-            reporter_threshold=snapshot.reporter_threshold,
-            active_reporter_count=snapshot.active_reporter_count,
-            active_reporters=list(snapshot.active_reporters),
-            fee_recipient=snapshot.fee_recipient,
-            management_fee_wad=str(snapshot.management_fee_wad),
-            performance_fee_bps=snapshot.performance_fee_bps,
-            high_water_mark=str(snapshot.high_water_mark),
-            last_report_nonce=snapshot.last_report_nonce,
-            accounted_idle_assets=str(snapshot.accounted_idle_assets),
-            virtual_shares=str(snapshot.virtual_shares),
-            deposits_paused=snapshot.deposits_paused,
-            redemptions_paused=snapshot.redemptions_paused,
-            execution_lock_owner=(
-                None
-                if int(snapshot.execution_lock_owner, 16) == 0
-                else snapshot.execution_lock_owner
-            ),
-            has_active_processing=snapshot.has_active_processing,
-            fund_flow_nonce=snapshot.fund_flow_nonce,
-            idle_state_hash=snapshot.idle_state_hash,
-            normalization_slippage_bps=getattr(
-                snapshot, "normalization_slippage_bps", 0
-            ),
-            as_of_block=snapshot.block_number,
-            as_of_block_hash=snapshot.block_hash,
-            reconciled=reconciliation["passed"],
-            indexed_at=indexed_at,
-        )
-        projected.fund.update(snapshot_state)
-        projection["fund_state"][0].update(snapshot_state)
-        projection["reconciliations"] = [reconciliation]
+        missing_roles = _missing_reconciliation_roles(registry, to_block)
+        if missing_roles:
+            provisional_state = _empty_projection(
+                registry,
+                to_block,
+                block_hash=block_hash,
+                indexed_at=indexed_at,
+            )["fund_state"][0]
+            provisional_state.update(projection["fund_state"][0])
+            provisional_state.update(
+                as_of_block=to_block,
+                as_of_block_hash=block_hash,
+                reconciled=False,
+                indexed_at=indexed_at,
+            )
+            projection["fund_state"] = [provisional_state]
+            projection["reconciliations"] = []
+            logger.info(
+                "Deferring fund reconciliation for %s at block %d; "
+                "roles activate later: %s",
+                registry.fund_address,
+                to_block,
+                ", ".join(missing_roles),
+            )
+        else:
+            snapshot = read_onchain_snapshot(
+                w3,
+                projected,
+                _snapshot_contracts(registry, to_block),
+                to_block,
+                block_hash,
+            )
+            reconciliation = reconcile(projected, snapshot)
+            _apply_position_metadata(projected, snapshot, new_events)
+            projection = projected.export()
+            snapshot_state = dict(
+                positions_hash=snapshot.strategy_positions_hash,
+                reporter_set_version=snapshot.reporter_set_version,
+                reporter_threshold=snapshot.reporter_threshold,
+                active_reporter_count=snapshot.active_reporter_count,
+                active_reporters=list(snapshot.active_reporters),
+                fee_recipient=snapshot.fee_recipient,
+                management_fee_wad=str(snapshot.management_fee_wad),
+                performance_fee_bps=snapshot.performance_fee_bps,
+                high_water_mark=str(snapshot.high_water_mark),
+                last_report_nonce=snapshot.last_report_nonce,
+                accounted_idle_assets=str(snapshot.accounted_idle_assets),
+                virtual_shares=str(snapshot.virtual_shares),
+                deposits_paused=snapshot.deposits_paused,
+                redemptions_paused=snapshot.redemptions_paused,
+                execution_lock_owner=(
+                    None
+                    if int(snapshot.execution_lock_owner, 16) == 0
+                    else snapshot.execution_lock_owner
+                ),
+                has_active_processing=snapshot.has_active_processing,
+                fund_flow_nonce=snapshot.fund_flow_nonce,
+                idle_state_hash=snapshot.idle_state_hash,
+                normalization_slippage_bps=getattr(
+                    snapshot, "normalization_slippage_bps", 0
+                ),
+                as_of_block=snapshot.block_number,
+                as_of_block_hash=snapshot.block_hash,
+                reconciled=reconciliation["passed"],
+                indexed_at=indexed_at,
+            )
+            projected.fund.update(snapshot_state)
+            projection["fund_state"][0].update(snapshot_state)
+            projection["reconciliations"] = [reconciliation]
     _verify_terminal_hash(w3, to_block, block_hash)
     get_client().rpc(
         "v2_ingest_fund_window",
@@ -416,16 +443,7 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
         if registry.strategy_kind == "covered_call"
         else "csp_adapter"
     )
-    required = {
-        "fund_vault",
-        "fund_flow_manager",
-        "claim_escrow",
-        adapter_role,
-        "controller",
-        "batch_settler",
-        "strategy_manager",
-        "fund_accounting",
-    }
+    required = _required_reconciliation_roles(registry.strategy_kind)
     missing = sorted(required - by_role.keys())
     if missing:
         raise ValueError(f"Fund registry is missing reconciliation roles: {missing}")
@@ -442,6 +460,34 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
     )
 
 
+def _required_reconciliation_roles(strategy_kind: str) -> set[str]:
+    adapter_role = (
+        "covered_call_adapter" if strategy_kind == "covered_call" else "csp_adapter"
+    )
+    return {
+        "fund_vault",
+        "fund_flow_manager",
+        "claim_escrow",
+        adapter_role,
+        "controller",
+        "batch_settler",
+        "strategy_manager",
+        "fund_accounting",
+    }
+
+
+def _missing_reconciliation_roles(
+    registry: FundRegistry, block_number: int
+) -> list[str]:
+    active_roles = {
+        binding.role
+        for binding in registry.contracts
+        if binding.valid_from_block <= block_number
+        and (binding.valid_to_block is None or block_number <= binding.valid_to_block)
+    }
+    return sorted(_required_reconciliation_roles(registry.strategy_kind) - active_roles)
+
+
 def _rewind(registry: FundRegistry, block_number: int) -> None:
     get_client().rpc(
         "v2_rewind_fund_indexer",
@@ -454,7 +500,13 @@ def _rewind(registry: FundRegistry, block_number: int) -> None:
     ).execute()
 
 
-def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, Any]:
+def _empty_projection(
+    registry: FundRegistry,
+    block_number: int,
+    *,
+    block_hash: str | None = None,
+    indexed_at: str | None = None,
+) -> dict[str, Any]:
     return {
         "fund_state": [
             {
@@ -487,11 +539,10 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
                 "fund_flow_nonce": 0,
                 "idle_state_hash": None,
                 "as_of_block": block_number,
-                "as_of_block_hash": None,
+                "as_of_block_hash": block_hash,
                 "reconciled": False,
-                "indexed_at": datetime.fromtimestamp(
-                    block_number, timezone.utc
-                ).isoformat(),
+                "indexed_at": indexed_at
+                or datetime.fromtimestamp(block_number, timezone.utc).isoformat(),
                 "nav_valid_after_block": None,
                 "nav_valid_until_block": None,
                 "last_event_block": block_number,
@@ -505,6 +556,7 @@ def _empty_projection(registry: FundRegistry, block_number: int) -> dict[str, An
         "components": [],
         "nav_reports": [],
         "activities": [],
+        "reconciliations": [],
     }
 
 
