@@ -12,6 +12,7 @@ from src.models.csp_vault import (
     ActionAvailability,
     ActivityItem,
     ActivityResponse,
+    CspPositionSummary,
     FundActions,
     FundComposition,
     FundConfigResponse,
@@ -19,6 +20,7 @@ from src.models.csp_vault import (
     FundPositionResponse,
     FundRegistryItem,
     FundStatus,
+    FundStrategySnapshot,
     FundSummaryResponse,
     NavWindow,
     RedemptionView,
@@ -59,7 +61,7 @@ class FundRepository(Protocol):
     def registries(self) -> list[dict[str, Any]]: ...
     def state(self, chain_id: int, fund: str) -> dict[str, Any] | None: ...
     def inventory(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
-    def active_positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
     def nav_valuation(
         self, chain_id: int, fund: str, report_nonce: int
     ) -> dict[str, Any] | None: ...
@@ -91,13 +93,14 @@ class SupabaseFundRepository:
             self._fund_query("v2_fund_inventory", chain_id, fund).execute().data or []
         )
 
-    def active_positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
-        rows = self._fund_query("v2_csp_positions", chain_id, fund).execute().data or []
-        return [
-            row
-            for row in rows
-            if row.get("lifecycle") in {"open", "awaiting_physical_delivery"}
-        ]
+    def positions(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
+        return (
+            self._fund_query("v2_csp_positions", chain_id, fund)
+            .order("position_id")
+            .execute()
+            .data
+            or []
+        )
 
     def nav_valuation(
         self, chain_id: int, fund: str, report_nonce: int
@@ -218,9 +221,12 @@ class FundService:
         row = self._find(fund_key)
         state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
         inventory = self.repository.inventory(int(row["chain_id"]), row["fund_address"])
-        positions = self.repository.active_positions(
-            int(row["chain_id"]), row["fund_address"]
-        )
+        positions = self.repository.positions(int(row["chain_id"]), row["fund_address"])
+        active_positions = [
+            position
+            for position in positions
+            if position.get("lifecycle") in {"open", "awaiting_physical_delivery"}
+        ]
         valuation = self.repository.nav_valuation(
             int(row["chain_id"]),
             row["fund_address"],
@@ -248,7 +254,7 @@ class FundService:
         assigned_weth = int(amounts.get((row["weth"], "assigned"), 0))
         locked_collateral = sum(
             int(position.get("collateral", 0))
-            for position in positions
+            for position in active_positions
             if position.get("lifecycle") == "open"
         )
         valuation_view = self._valuation_view(
@@ -297,12 +303,64 @@ class FundService:
                 source_quality=valuation_view["source_quality"],
                 stress=valuation_view["stress"],
             ),
+            strategy=self._strategy_snapshot(positions, valuation),
             status=self._status(state),
             actions=actions,
             as_of_block=state.get("as_of_block"),
             as_of_block_hash=state.get("as_of_block_hash"),
             indexed_at=state.get("indexed_at"),
             stale=stale,
+        )
+
+    @staticmethod
+    def _strategy_snapshot(
+        positions: list[dict[str, Any]],
+        valuation: dict[str, Any] | None,
+    ) -> FundStrategySnapshot:
+        total_premium = sum(
+            max(int(position.get("premium_earned", 0)), 0) for position in positions
+        )
+        active = [
+            position
+            for position in positions
+            if position.get("lifecycle") in {"open", "awaiting_physical_delivery"}
+        ]
+        selected = max(
+            active or positions,
+            key=lambda position: int(position.get("position_id", 0)),
+            default=None,
+        )
+        if selected is None:
+            return FundStrategySnapshot(
+                total_premium_collected_assets=str(total_premium),
+                next_open_condition="when_funded_and_pricing_is_ready",
+            )
+
+        position_id = int(selected.get("position_id", 0))
+        marks = (valuation or {}).get("marks") or []
+        mark = next(
+            (item for item in marks if int(item.get("position_id", -1)) == position_id),
+            None,
+        )
+        is_active = selected in active
+        expiry = int(mark["expiry_timestamp"]) if mark else None
+        return FundStrategySnapshot(
+            latest_position=CspPositionSummary(
+                position_id=position_id,
+                lifecycle=str(selected.get("lifecycle", "unknown")),
+                strike_price_usd_8=(
+                    str(mark["strike_price_8"]) if mark is not None else None
+                ),
+                expiry_timestamp=expiry,
+                option_amount_8=str(selected.get("option_amount", 0)),
+                collateral_assets=str(selected.get("collateral", 0)),
+                premium_earned_assets=str(selected.get("premium_earned", 0)),
+            ),
+            total_premium_collected_assets=str(total_premium),
+            next_open_after=expiry if is_active else None,
+            next_open_condition=(
+                "after_current_settlement" if is_active else "when_pricing_is_ready"
+            ),
         )
 
     @staticmethod

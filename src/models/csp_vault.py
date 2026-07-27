@@ -79,6 +79,23 @@ class FundActions(FundModel):
     claim_redemption: ActionAvailability
 
 
+class CspPositionSummary(FundModel):
+    position_id: int
+    lifecycle: str
+    strike_price_usd_8: str | None = None
+    expiry_timestamp: int | None = None
+    option_amount_8: str
+    collateral_assets: str
+    premium_earned_assets: str
+
+
+class FundStrategySnapshot(FundModel):
+    latest_position: CspPositionSummary | None = None
+    total_premium_collected_assets: str = "0"
+    next_open_after: int | None = None
+    next_open_condition: str
+
+
 class FundSummaryResponse(FundModel):
     fund: FundRegistryItem
     net_assets: str
@@ -89,6 +106,7 @@ class FundSummaryResponse(FundModel):
     stress_price_assets: str | None = None
     composition: FundComposition
     nav: NavWindow
+    strategy: FundStrategySnapshot
     status: FundStatus
     actions: FundActions
     as_of_block: int | None
