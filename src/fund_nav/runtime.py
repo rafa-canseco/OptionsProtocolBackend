@@ -615,8 +615,11 @@ class Web3ReporterGateway:
         observed_hash = adapter_contract.functions.positionStateHash().call(
             block_identifier=block
         )
-        if int(adapter_state[0]) != int(nonce) or bytes(observed_hash) != bytes(
-            state_hash
+        if not self._strategy_state_matches(
+            adapter_state=adapter_state,
+            observed_hash=observed_hash,
+            component_nonce=nonce,
+            component_hash=state_hash,
         ):
             raise RuntimeError("WRONG_POSITION_STATE_HASH")
         valuator = self.w3.eth.contract(
@@ -647,6 +650,31 @@ class Web3ReporterGateway:
             liquid_accounting_assets=int(value[2]),
             base_exit_cost=int(value[3]),
             data_hash=bytes(value[4]),
+        )
+
+    @staticmethod
+    def _strategy_state_matches(
+        *,
+        adapter_state,
+        observed_hash,
+        component_nonce,
+        component_hash,
+    ) -> bool:
+        if int(adapter_state[0]) != int(component_nonce):
+            return False
+        if bytes(observed_hash) == bytes(component_hash):
+            return True
+
+        # A freshly onboarded strategy has not emitted a position transition yet,
+        # so FundAccounting intentionally keeps the component at its canonical
+        # nonce/hash zero state. The adapter's live positionStateHash is still a
+        # non-zero keccak over that empty state. Accept only this fully empty
+        # bootstrap case; any inventory or position state must first be synced by
+        # StrategyManager and match byte-for-byte.
+        return (
+            int(component_nonce) == 0
+            and bytes(component_hash) == bytes(32)
+            and all(int(value) == 0 for value in adapter_state[2:])
         )
 
     def _valuation_observations(self, valuator, adapter: str, block: int):

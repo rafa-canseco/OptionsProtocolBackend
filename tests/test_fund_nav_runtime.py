@@ -181,6 +181,56 @@ def test_blocked_and_runtime_reporters_record_without_rpc_send() -> None:
     assert runtime.run_once().reason_code == "INCOMPLETE_OBSERVER_QUORUM"
 
 
+def test_gateway_accepts_only_fully_empty_unsynced_strategy_bootstrap() -> None:
+    empty_adapter_state = (
+        0,
+        Web3.keccak(text="initial positions accumulator"),
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    live_empty_hash = Web3.keccak(text="empty covered-call adapter state")
+
+    assert Web3ReporterGateway._strategy_state_matches(
+        adapter_state=empty_adapter_state,
+        observed_hash=live_empty_hash,
+        component_nonce=0,
+        component_hash=bytes(32),
+    )
+    assert not Web3ReporterGateway._strategy_state_matches(
+        adapter_state=(*empty_adapter_state[:-1], 1),
+        observed_hash=live_empty_hash,
+        component_nonce=0,
+        component_hash=bytes(32),
+    )
+    assert not Web3ReporterGateway._strategy_state_matches(
+        adapter_state=(1, bytes(32), 0, 0, 0, 0, 0),
+        observed_hash=live_empty_hash,
+        component_nonce=0,
+        component_hash=bytes(32),
+    )
+
+
+def test_gateway_requires_exact_hash_after_first_strategy_transition() -> None:
+    committed_hash = Web3.keccak(text="committed strategy state")
+    adapter_state = (1, Web3.keccak(text="positions"), 1, 1, 10, 10, 0)
+
+    assert Web3ReporterGateway._strategy_state_matches(
+        adapter_state=adapter_state,
+        observed_hash=committed_hash,
+        component_nonce=1,
+        component_hash=committed_hash,
+    )
+    assert not Web3ReporterGateway._strategy_state_matches(
+        adapter_state=adapter_state,
+        observed_hash=Web3.keccak(text="different live state"),
+        component_nonce=1,
+        component_hash=committed_hash,
+    )
+
+
 def test_concrete_gateway_simulation_calls_and_estimates_without_send() -> None:
     calls = []
 
