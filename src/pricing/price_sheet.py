@@ -1,9 +1,15 @@
 import time
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_FLOOR
 
 from src.pricing.assets import Asset, get_asset_config
 from src.pricing.black_scholes import OptionType
 from src.pricing.utils import cutoff_hours_for_expiry, get_expiries
+
+_CSP_ROLLING_MIN_SECONDS = 36 * 3600
+_CSP_ROLLING_MAX_SECONDS = 60 * 3600
+_CSP_STRIKE_OTM_BPS = 1500
+_CSP_STRIKE_TICK_USD = 25
 
 
 @dataclass
@@ -93,6 +99,21 @@ def generate_otoken_specs(
             num_strikes=num_strikes,
             min_otm_per_side=cfg.min_otm_per_side,
         )
+        ttl = ts - now_ts
+        if (
+            asset == Asset.ETH
+            and _CSP_ROLLING_MIN_SECONDS <= ttl <= _CSP_ROLLING_MAX_SECONDS
+        ):
+            discounted = (
+                Decimal(str(spot))
+                * Decimal(10_000 - _CSP_STRIKE_OTM_BPS)
+                / Decimal(10_000)
+            )
+            ticks = (
+                discounted / Decimal(_CSP_STRIKE_TICK_USD)
+            ).to_integral_value(rounding=ROUND_FLOOR)
+            csp_strike = float(ticks * Decimal(_CSP_STRIKE_TICK_USD))
+            strikes = sorted(set((*strikes, csp_strike)))
         for K in strikes:
             for opt_type in (OptionType.CALL, OptionType.PUT):
                 specs.append(
