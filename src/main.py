@@ -21,6 +21,7 @@ from src.config import (
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
+    get_fund_nav_submitter_private_key,
     settings,
     has_solana_config,
     has_bridge_config,
@@ -76,8 +77,19 @@ async def lifespan(app: FastAPI):
             )
         try:
             reporter_keys = get_fund_nav_reporter_private_keys()
+            submitter_key = get_fund_nav_submitter_private_key()
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
+        from eth_account import Account
+
+        reporter_addresses = {
+            Account.from_key(key).address.lower() for key in reporter_keys
+        }
+        submitter_address = Account.from_key(submitter_key).address.lower()
+        if submitter_address in reporter_addresses:
+            raise RuntimeError(
+                "NAV submitter key must be separate from NAV reporter keys"
+            )
         if settings.fund_csp_sepolia_fair_value_observations_enabled:
             if settings.chain_id != 84532:
                 raise RuntimeError(
@@ -88,17 +100,16 @@ async def lifespan(app: FastAPI):
                 get_fund_csp_sepolia_fair_value_policy()
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-            from eth_account import Account
-
-            reporter_addresses = {
-                Account.from_key(key).address.lower() for key in reporter_keys
-            }
             observer_addresses = {
                 Account.from_key(key).address.lower() for key in observer_keys
             }
             if reporter_addresses & observer_addresses:
                 raise RuntimeError(
                     "Sepolia CSP observer keys must be separate from NAV reporter keys"
+                )
+            if submitter_address in observer_addresses:
+                raise RuntimeError(
+                    "NAV submitter key must be separate from CSP observer keys"
                 )
     elif settings.fund_csp_sepolia_fair_value_observations_enabled:
         raise RuntimeError(

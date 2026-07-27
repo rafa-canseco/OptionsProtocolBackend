@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
+from eth_account import Account
 from web3 import Web3
 
 from src.fund_nav.models import (
@@ -104,6 +105,7 @@ class ReporterGateway(Protocol):
     def head_block(self) -> int: ...
     def report_nonce(self) -> int: ...
     def transaction_status(self, transaction_hash: str) -> str: ...
+    def transaction_nonce_consumed(self, signed_transaction: str) -> bool: ...
     def contract_digest(self, report_nonce: int, reports) -> bytes: ...
     def accounting_role_immediate(self, account: str) -> bool: ...
     def simulate(
@@ -133,6 +135,14 @@ class ReportRunStore(Protocol):
         run: StoredRun,
         error: str,
     ) -> bool: ...
+    def record_failed_transaction(
+        self,
+        snapshot: ReporterSnapshot,
+        report_nonce: int,
+        run: StoredRun,
+        reason_code: str,
+        error: str,
+    ) -> bool: ...
 
 
 class NavReporter:
@@ -142,6 +152,7 @@ class NavReporter:
         store: ReportRunStore,
         *,
         private_keys: tuple[str, ...],
+        submitter_private_key: str,
         expected_chain_id: int,
         transaction_timeout: int,
         inclusion_margin: int,
@@ -149,6 +160,7 @@ class NavReporter:
         self.gateway = gateway
         self.store = store
         self.private_keys = private_keys
+        self.submitter_private_key = submitter_private_key
         self.expected_chain_id = expected_chain_id
         self.transaction_timeout = transaction_timeout
         self.inclusion_margin = max(1, inclusion_margin)
@@ -487,8 +499,18 @@ class NavReporter:
                 signed_transaction=existing.signed_transaction,
             )
         if status == "unknown":
+            if self.gateway.transaction_nonce_consumed(
+                existing.signed_transaction
+            ):
+                return self._record_failed_transaction(
+                    existing,
+                    snapshot,
+                    report_nonce,
+                    "TRANSACTION_NONCE_CONSUMED",
+                    "SIGNED_TRANSACTION_NONCE_ALREADY_USED",
+                )
             return self._rebroadcast_existing(existing, report_nonce)
-        if status in {"pending", "unknown"}:
+        if status == "pending":
             return ReportRun(
                 status="submitted",
                 reason_code="TRANSACTION_RECONCILIATION_PENDING",
@@ -513,6 +535,26 @@ class NavReporter:
             reason_code=(
                 "TRANSACTION_REVERTED" if recorded else "REVERT_FINALIZATION_REFUSED"
             ),
+        )
+
+    def _record_failed_transaction(
+        self,
+        existing: StoredRun,
+        snapshot: ReporterSnapshot,
+        report_nonce: int,
+        reason_code: str,
+        error: str,
+    ) -> ReportRun:
+        recorded = self.store.record_failed_transaction(
+            snapshot,
+            report_nonce,
+            existing,
+            reason_code,
+            error,
+        )
+        return ReportRun(
+            status="failed",
+            reason_code=reason_code if recorded else "FAILURE_FINALIZATION_REFUSED",
         )
 
     def _rebroadcast_existing(
@@ -620,19 +662,11 @@ class NavReporter:
         return [by_address[address] for address in sorted(by_address)]
 
     def _select_signers(self, signed, threshold):
-        sender = next(
-            (
-                item
-                for item in signed
-                if self.gateway.accounting_role_immediate(item[0])
-            ),
-            None,
-        )
-        if sender is None:
+        selected = sorted(signed, key=lambda item: item[0])[:threshold]
+        submitter = Account.from_key(self.submitter_private_key)
+        sender = (submitter.address.lower(), self.submitter_private_key, b"")
+        if not self.gateway.accounting_role_immediate(sender[0]):
             return [], None
-        selected = [sender]
-        selected.extend(item for item in signed if item != sender)
-        selected = sorted(selected[:threshold], key=lambda item: item[0])
         return selected, sender
 
     def _execution_reason(

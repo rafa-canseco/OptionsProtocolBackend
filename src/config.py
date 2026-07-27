@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     fund_nav_reporter_tx_timeout_seconds: int = 120
     fund_nav_reporter_lease_seconds: int = 180
     fund_nav_reporter_private_keys: str = ""
+    fund_nav_submitter_private_key: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
     fund_csp_sepolia_fair_value_observations_enabled: bool = False
     fund_csp_sepolia_observer_private_keys: str = ""
@@ -221,6 +222,20 @@ def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
     if len(addresses) != len(set(addresses)):
         raise ValueError("FUND_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters")
     return keys
+
+
+def get_fund_nav_submitter_private_key() -> str:
+    """Return the dedicated key used only to submit signed NAV reports."""
+    from eth_account import Account
+
+    key = settings.fund_nav_submitter_private_key.strip()
+    if not key:
+        raise ValueError("FUND_NAV_SUBMITTER_PRIVATE_KEY is required")
+    try:
+        Account.from_key(key)
+    except Exception as exc:
+        raise ValueError("Invalid FUND_NAV_SUBMITTER_PRIVATE_KEY") from exc
+    return key
 
 
 def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:

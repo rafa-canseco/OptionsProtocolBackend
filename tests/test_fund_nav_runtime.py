@@ -97,6 +97,35 @@ def test_registry_loader_requires_complete_supported_bindings() -> None:
     assert unsupported.trust_reason == "UNSUPPORTED_INTERFACE"
 
 
+def test_gateway_detects_when_signed_transaction_nonce_was_consumed() -> None:
+    account = Account.from_key("0x" + f"{99:064x}")
+    signed = account.sign_transaction(
+        {
+            "type": 2,
+            "chainId": 84532,
+            "nonce": 7,
+            "to": Web3.to_checksum_address(FUND),
+            "value": 0,
+            "gas": 21_000,
+            "maxFeePerGas": 30_000_000,
+            "maxPriorityFeePerGas": 1_000_000,
+        }
+    )
+    gateway = object.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(
+        eth=SimpleNamespace(get_transaction_count=lambda _sender, _tag: 8)
+    )
+
+    assert gateway.transaction_nonce_consumed(
+        Web3.to_hex(signed.raw_transaction)
+    )
+
+    gateway.w3.eth.get_transaction_count = lambda _sender, _tag: 7
+    assert not gateway.transaction_nonce_consumed(
+        Web3.to_hex(signed.raw_transaction)
+    )
+
+
 @pytest.mark.asyncio
 async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> None:
     built = []

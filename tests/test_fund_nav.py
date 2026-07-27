@@ -25,6 +25,8 @@ FUND = "0xf000000000000000000000000000000000000001"
 ACCOUNTING = "0xf000000000000000000000000000000000000002"
 KEYS = tuple("0x" + f"{index:064x}" for index in range(1, 4))
 REPORTERS = tuple(Account.from_key(key).address.lower() for key in KEYS)
+SUBMITTER_KEY = "0x" + f"{10:064x}"
+SUBMITTER = Account.from_key(SUBMITTER_KEY).address.lower()
 BLOCK_HASH = bytes.fromhex("12" * 32)
 IDLE_HASH = bytes.fromhex("34" * 32)
 TX_RAW = b"signed"
@@ -161,6 +163,14 @@ class Store:
         self.lease_expires = 0
         return True
 
+    def record_failed_transaction(
+        self, current_snapshot, nonce, run, reason_code, error
+    ):
+        recorded = self.record_revert(current_snapshot, nonce, run, error)
+        if recorded:
+            self.failed_transaction_error = error
+        return recorded
+
 
 class Gateway:
     def __init__(self, value=None):
@@ -170,8 +180,9 @@ class Gateway:
         self.builds = 0
         self.current_head = self.value.head_block
         self.current_nonce = self.value.last_report_nonce
-        self.role_accounts = set(REPORTERS)
+        self.role_accounts = {SUBMITTER}
         self.tx_status = "unknown"
+        self.nonce_consumed = False
         self.wait_result = True
         self.activation_wait_result = True
         self.activation_waits = []
@@ -192,6 +203,9 @@ class Gateway:
     def transaction_status(self, _transaction_hash):
         return self.tx_status
 
+    def transaction_nonce_consumed(self, _signed_transaction):
+        return self.nonce_consumed
+
     def contract_digest(self, nonce, reports):
         return signature_digest(
             chain_id=84532,
@@ -210,11 +224,11 @@ class Gateway:
         assert report_nonce == 9
         assert len(reports) == 1
         assert len(reporters) == len(signatures)
-        assert sender in reporters
+        assert sender == SUBMITTER
 
     def build_transaction(self, *, private_key, **_kwargs):
         self.builds += 1
-        assert private_key in KEYS
+        assert private_key == SUBMITTER_KEY
         return SignedTransaction(TX_HASH, TX_RAW)
 
     def broadcast(self, transaction):
@@ -233,12 +247,19 @@ class Gateway:
         return self.wait_result
 
 
-def reporter(value=None, store=None, keys=KEYS, margin=3):
+def reporter(
+    value=None,
+    store=None,
+    keys=KEYS,
+    margin=3,
+    submitter_key=SUBMITTER_KEY,
+):
     gateway = Gateway(value)
     service = NavReporter(
         gateway,
         store or Store(),
         private_keys=keys,
+        submitter_private_key=submitter_key,
         expected_chain_id=84532,
         transaction_timeout=30,
         inclusion_margin=margin,
@@ -575,6 +596,26 @@ def test_pending_or_unknown_receipt_never_clears_transaction_material(status) ->
     assert run.reason_code == "TRANSACTION_RECONCILIATION_PENDING"
     assert store.existing == existing
     assert store.failed_transaction_hash is None
+
+
+def test_consumed_nonce_releases_transaction_and_rebuilds_same_report_nonce() -> None:
+    existing = StoredRun("run-1", "submitted", TX_HASH, Web3.to_hex(TX_RAW))
+    store = Store(existing, lease_expires=30)
+    failed, gateway = reporter(store=store)
+    gateway.tx_status = "unknown"
+    gateway.nonce_consumed = True
+
+    run = failed.run_once()
+
+    assert run.status == "failed"
+    assert run.reason_code == "TRANSACTION_NONCE_CONSUMED"
+    assert store.existing == StoredRun("run-1", "failed", None)
+    assert store.failed_transaction_hash == TX_HASH
+    assert store.failed_transaction_error == "SIGNED_TRANSACTION_NONCE_ALREADY_USED"
+
+    rebuilt, gateway = reporter(store=store)
+    assert rebuilt.run_once().status == "confirmed"
+    assert gateway.builds == gateway.submissions == 1
 
 
 def test_pending_submitted_transaction_is_reconciled_before_retry() -> None:

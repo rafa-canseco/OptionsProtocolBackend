@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from eth_abi import encode
 from eth_account import Account
+from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
@@ -15,6 +16,7 @@ from src.config import (
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
+    get_fund_nav_submitter_private_key,
     settings,
 )
 from src.db.database import get_client
@@ -254,6 +256,33 @@ class SupabaseNavRepository:
         recorded = result.data[0] if isinstance(result.data, list) else result.data
         return recorded is True
 
+    def record_failed_transaction(
+        self,
+        snapshot: ReporterSnapshot,
+        report_nonce: int,
+        run: StoredRun,
+        reason_code: str,
+        error: str,
+    ) -> bool:
+        result = (
+            get_client()
+            .rpc(
+                "v2_release_failed_nav_report_transaction",
+                {
+                    "p_chain_id": snapshot.chain_id,
+                    "p_fund_address": snapshot.fund,
+                    "p_report_nonce": report_nonce,
+                    "p_run_id": run.run_id,
+                    "p_transaction_hash": run.transaction_hash,
+                    "p_reason_code": reason_code,
+                    "p_error": error,
+                },
+            )
+            .execute()
+        )
+        recorded = result.data[0] if isinstance(result.data, list) else result.data
+        return recorded is True
+
     def record_blocked(self, fund: TrustedFund | None, reason: str) -> ReportRun:
         run = ReportRun(status="blocked", reason_code=reason)
         nonce = int(fund.state.get("last_report_nonce", 0)) + 1 if fund else None
@@ -345,6 +374,13 @@ class SupabaseRunStore:
 
     def record_revert(self, snapshot, report_nonce, run, error) -> bool:
         return self.repository.record_reverted_run(snapshot, report_nonce, run, error)
+
+    def record_failed_transaction(
+        self, snapshot, report_nonce, run, reason_code, error
+    ) -> bool:
+        return self.repository.record_failed_transaction(
+            snapshot, report_nonce, run, reason_code, error
+        )
 
 
 class Web3ReporterGateway:
@@ -1000,12 +1036,27 @@ class Web3ReporterGateway:
         function = self._submit_function(report_nonce, reports, reporters, signatures)
         transaction = {"from": account.address}
         gas = function.estimate_gas(transaction, block_identifier="pending")
+        pending_block = self.w3.eth.get_block("pending")
+        base_fee = int(
+            pending_block.get("baseFeePerGas") or self.w3.eth.gas_price
+        )
+        try:
+            priority_fee = int(self.w3.eth.max_priority_fee)
+        except Exception:
+            priority_fee = 1_000_000
+        priority_fee = max(priority_fee, 1_000_000)
+        max_fee = max(
+            base_fee * 4 + priority_fee,
+            int(self.w3.eth.gas_price) * 2 + priority_fee,
+        )
         built = function.build_transaction(
             {
                 "from": account.address,
                 "chainId": self.fund.chain_id,
                 "nonce": self.w3.eth.get_transaction_count(account.address, "pending"),
                 "gas": gas * 12 // 10,
+                "maxFeePerGas": max_fee,
+                "maxPriorityFeePerGas": priority_fee,
             }
         )
         signed = account.sign_transaction(built)
@@ -1056,6 +1107,13 @@ class Web3ReporterGateway:
                 return "unknown"
             return "pending"
         return "confirmed" if int(receipt["status"]) == 1 else "reverted"
+
+    def transaction_nonce_consumed(self, signed_transaction: str) -> bool:
+        raw = HexBytes(signed_transaction)
+        sender = Account.recover_transaction(raw)
+        transaction = TypedTransaction.from_bytes(raw).as_dict()
+        nonce = int(transaction["nonce"])
+        return int(self.w3.eth.get_transaction_count(sender, "latest")) > nonce
 
     def _submit_function(self, report_nonce, reports, reporters, signatures):
         return self.accounting.functions.submitNav(
@@ -1195,6 +1253,7 @@ def _build_fund_reporter(repository, fund):
         gateway,
         SupabaseRunStore(repository),
         private_keys=get_fund_nav_reporter_private_keys(),
+        submitter_private_key=get_fund_nav_submitter_private_key(),
         expected_chain_id=fund.chain_id,
         transaction_timeout=settings.fund_nav_reporter_tx_timeout_seconds,
         inclusion_margin=settings.fund_nav_inclusion_margin_blocks,

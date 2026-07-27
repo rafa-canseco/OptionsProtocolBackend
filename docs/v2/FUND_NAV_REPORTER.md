@@ -71,11 +71,12 @@ with the active share price.
 
 `FUND_NAV_REPORTER_ENABLED` defaults to false and is independent from the
 product API and indexer. Enabling it requires `RPC_URL` and a comma-separated
-`FUND_NAV_REPORTER_PRIVATE_KEYS` set before any background task starts. Every
-key is parsed, required to contain at least one key, and deduplicated during
-startup. Active signers are recovered,
-sorted and limited to the on-chain threshold. The submitting signer must have
-immediate `ACCOUNTING_ROLE`. It never falls back to `OPERATOR_PRIVATE_KEY`.
+`FUND_NAV_REPORTER_PRIVATE_KEYS` plus a
+`FUND_NAV_SUBMITTER_PRIVATE_KEY` set before any background task starts. Every
+key is parsed and validated during startup. Active signers are recovered,
+sorted and limited to the on-chain threshold. The dedicated submitter must
+have immediate `ACCOUNTING_ROLE` and must be distinct from both the NAV
+reporters and CSP observers. It never falls back to `OPERATOR_PRIVATE_KEY`.
 Interval and receipt timeout use
 `FUND_NAV_REPORTER_INTERVAL_SECONDS` and
 `FUND_NAV_REPORTER_TX_TIMEOUT_SECONDS`. `FUND_NAV_REPORTER_LEASE_SECONDS`
@@ -86,6 +87,12 @@ controls the bounded claim lease and must remain within the database-enforced
 head. The runtime rechecks the head, snapshot hash and report nonce immediately
 before pending-block simulation and submission. A consumed margin blocks the
 run instead of submitting a window likely to fail at inclusion.
+
+If a signed transaction is no longer known and its account nonce was consumed
+by another transaction, the runtime atomically archives the failed hash,
+clears the immutable transaction material and rebuilds the same report nonce
+from a fresh snapshot. This prevents an ambiguous or replaced transaction from
+pinning the reporter indefinitely.
 
 `FUND_CSP_SEPOLIA_CONSERVATIVE_OBSERVATIONS_ENABLED` gates the test-only
 publisher. When enabled it requires exactly two unique dedicated keys in
