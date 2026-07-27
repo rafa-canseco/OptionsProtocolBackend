@@ -324,27 +324,33 @@ def _parse_covered_call_deployment(
     role_values = {
         "fund_vault": (
             *_proxy(contracts, "fundVault"),
-            _deployment_block(contracts, "fundVault", start_block, fund_last),
+            _covered_call_proxy_block(contracts, "fundVault", start_block, fund_last),
         ),
         "fund_share": (
             *_proxy(contracts, "fundShare"),
-            _deployment_block(contracts, "fundShare", start_block, fund_last),
+            _covered_call_proxy_block(contracts, "fundShare", start_block, fund_last),
         ),
         "fund_accounting": (
             *_proxy(contracts, "fundAccounting"),
-            _deployment_block(contracts, "fundAccounting", start_block, fund_last),
+            _covered_call_proxy_block(
+                contracts, "fundAccounting", start_block, fund_last
+            ),
         ),
         "fund_flow_manager": (
             *_proxy(contracts, "fundFlowManager"),
-            _deployment_block(contracts, "fundFlowManager", start_block, fund_last),
+            _covered_call_proxy_block(
+                contracts, "fundFlowManager", start_block, fund_last
+            ),
         ),
         "strategy_manager": (
             *_proxy(contracts, "strategyManager"),
-            _deployment_block(contracts, "strategyManager", start_block, fund_last),
+            _covered_call_proxy_block(
+                contracts, "strategyManager", start_block, fund_last
+            ),
         ),
         "covered_call_adapter": (
             *adapter,
-            _deployment_block(
+            _covered_call_proxy_block(
                 contracts, "coveredCallFundAdapter", start_block, fund_last
             ),
         ),
@@ -353,18 +359,22 @@ def _parse_covered_call_deployment(
         "claim_escrow": (
             _address(contracts, "claimEscrow"),
             None,
-            _deployment_block(contracts, "claimEscrow", start_block, fund_last),
+            _covered_call_address_block(
+                contracts, "claimEscrow", start_block, fund_last
+            ),
         ),
         "access_manager": (
             _address(contracts, "accessManager"),
             None,
-            _deployment_block(contracts, "accessManager", start_block, fund_last),
+            _covered_call_address_block(
+                contracts, "accessManager", start_block, fund_last
+            ),
         ),
         "address_book": (_v1_address(boundary, "addressBook"), None, start_block),
         "covered_call_valuator": (
             _address(contracts, "coveredCallFundValuator"),
             None,
-            _deployment_block(
+            _covered_call_address_block(
                 contracts, "coveredCallFundValuator", start_block, fund_last
             ),
         ),
@@ -372,7 +382,9 @@ def _parse_covered_call_deployment(
         "nav_verifier": (
             _address(contracts, "navReportVerifier"),
             None,
-            _deployment_block(contracts, "navReportVerifier", start_block, fund_last),
+            _covered_call_address_block(
+                contracts, "navReportVerifier", start_block, fund_last
+            ),
         ),
         "oracle": (_v1_address(boundary, "oracle"), None, start_block),
         "otoken_factory": (
@@ -660,6 +672,65 @@ def _deployment_block(
                 f"contracts.{key}.{field} must match network deployment window"
             )
     return start_block
+
+
+def _covered_call_proxy_block(
+    parent: dict[str, Any], key: str, start_block: int, fund_last: int
+) -> int:
+    """Return the exact proxy activation block from the B1N-360 handoff."""
+    value = _object(parent, key)
+    valid_from = value.get("validFromBlock")
+    if not isinstance(valid_from, dict) or set(valid_from) != {
+        "proxy",
+        "implementation",
+    }:
+        raise ValueError(
+            f"contracts.{key}.validFromBlock must contain exact proxy and "
+            "implementation blocks"
+        )
+    proxy_block = _bounded_deployment_block(
+        valid_from.get("proxy"),
+        f"contracts.{key}.validFromBlock.proxy",
+        start_block,
+        fund_last,
+    )
+    implementation_block = _bounded_deployment_block(
+        valid_from.get("implementation"),
+        f"contracts.{key}.validFromBlock.implementation",
+        start_block,
+        fund_last,
+    )
+    if implementation_block > proxy_block:
+        raise ValueError(
+            f"contracts.{key}.validFromBlock implementation must not follow proxy"
+        )
+    return proxy_block
+
+
+def _covered_call_address_block(
+    parent: dict[str, Any], key: str, start_block: int, fund_last: int
+) -> int:
+    """Return the exact immutable-contract activation block from B1N-360."""
+    value = _object(parent, key)
+    return _bounded_deployment_block(
+        value.get("validFromBlock"),
+        f"contracts.{key}.validFromBlock",
+        start_block,
+        fund_last,
+    )
+
+
+def _bounded_deployment_block(
+    value: Any, label: str, start_block: int, fund_last: int
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+    if value < start_block or value > fund_last:
+        raise ValueError(
+            f"{label} must be within network deployment window "
+            f"[{start_block}, {fund_last}]"
+        )
+    return value
 
 
 def _require_final_readiness(manifest: dict[str, Any]) -> None:

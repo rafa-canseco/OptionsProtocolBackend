@@ -696,6 +696,32 @@ def b1n360_manifest() -> dict:
     contracts = manifest["contracts"]
     contracts["coveredCallFundAdapter"] = contracts.pop("cspFundAdapter")
     contracts["coveredCallFundValuator"] = contracts.pop("cspFundValuator")
+    for key, implementation_block in (
+        ("fundVault", 124),
+        ("fundShare", 125),
+        ("fundAccounting", 126),
+        ("fundFlowManager", 127),
+        ("strategyManager", 128),
+    ):
+        contracts[key]["validFromBlock"] = {
+            "proxy": 130,
+            "implementation": implementation_block,
+        }
+    contracts["coveredCallFundAdapter"]["validFromBlock"] = {
+        "proxy": 132,
+        "implementation": 131,
+    }
+    for key, block in (
+        ("claimEscrow", 130),
+        ("accessManager", 130),
+        ("coveredCallFundValuator", 133),
+        ("navReportVerifier", 129),
+    ):
+        value = contracts[key]
+        if isinstance(value, str):
+            contracts[key] = {"address": value, "validFromBlock": block}
+        else:
+            value["validFromBlock"] = block
     boundary = manifest["v1Boundary"]
     boundary["activeStagingV1Touched"] = True
     boundary["implementationsOrOwnersChanged"] = False
@@ -798,13 +824,49 @@ def test_b1n360_manifest_maps_exact_v1_mutations_and_weth_roles() -> None:
     manifest = b1n360_manifest()
 
     deployment = parse_b1n360(manifest)
+    rows = {row["contract_role"]: row for row in deployment.contracts}
 
     assert deployment.registry["strategy_kind"] == "covered_call"
     assert deployment.registry["accounting_asset"] == WETH.lower()
     assert deployment.registry["quote_asset"] == USDC.lower()
-    assert {row["contract_role"] for row in deployment.contracts} == (
-        required_trusted_roles("covered_call")
-    )
+    assert set(rows) == required_trusted_roles("covered_call")
+    assert rows["nav_verifier"]["valid_from_block"] == 129
+    assert rows["fund_vault"]["valid_from_block"] == 130
+    assert rows["covered_call_adapter"]["valid_from_block"] == 132
+    assert rows["covered_call_valuator"]["valid_from_block"] == 133
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            lambda value: value["contracts"]["fundVault"].pop("validFromBlock"),
+            "must contain exact proxy and implementation blocks",
+        ),
+        (
+            lambda value: value["contracts"]["fundVault"]["validFromBlock"].update(
+                proxy=141
+            ),
+            "must be within network deployment window",
+        ),
+        (
+            lambda value: value["contracts"]["fundVault"]["validFromBlock"].update(
+                implementation=131
+            ),
+            "implementation must not follow proxy",
+        ),
+        (
+            lambda value: value["contracts"]["claimEscrow"].pop("validFromBlock"),
+            "must be an integer",
+        ),
+    ],
+)
+def test_b1n360_manifest_requires_exact_contract_start_blocks(mutation, reason) -> None:
+    manifest = b1n360_manifest()
+    mutation(manifest)
+
+    with pytest.raises(ValueError, match=reason):
+        parse_b1n360(manifest)
 
 
 @pytest.mark.parametrize(
