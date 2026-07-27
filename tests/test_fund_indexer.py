@@ -1,5 +1,7 @@
-import pytest
+import asyncio
 from types import SimpleNamespace
+
+import pytest
 from web3 import Web3
 
 from src.fund_indexer import indexer
@@ -160,6 +162,23 @@ def test_cycle_reuses_one_confirmed_head_when_rpc_advances(
         (client.row["block_number"], client.row["block_hash"]),
         (client.row["block_number"], client.row["block_hash"]),
     ]
+
+
+def test_run_offloads_blocking_index_cycle(monkeypatch) -> None:
+    calls = []
+
+    async def fake_to_thread(function, *args):
+        calls.append((function, args))
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(indexer.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
+
+    asyncio.run(indexer.run())
+
+    assert len(calls) == 1
+    assert calls[0][0] is indexer._index_registered_funds
+    assert len(calls[0][1]) == 1
 
 
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:

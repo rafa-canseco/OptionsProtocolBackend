@@ -769,13 +769,17 @@ def _index_cycle(w3: Web3, registries: list[FundRegistry]) -> None:
         index_registry_once(w3, registry, confirmed_head)
 
 
+def _index_registered_funds(w3: Web3) -> None:
+    _index_cycle(w3, _load_registries())
+
+
 async def run() -> None:
     if not settings.rpc_url:
         raise RuntimeError("RPC_URL is required for the tokenized fund indexer")
     w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     while True:
         try:
-            _index_cycle(w3, _load_registries())
+            await asyncio.to_thread(_index_registered_funds, w3)
         except asyncio.CancelledError:
             return
         except Exception:
