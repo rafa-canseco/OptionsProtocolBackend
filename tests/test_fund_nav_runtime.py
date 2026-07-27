@@ -6,7 +6,14 @@ from eth_account import Account
 from web3 import Web3
 
 from src.bots import fund_nav_reporter
+from src.config import (
+    get_fund_csp_sepolia_fair_value_policy,
+    get_fund_csp_sepolia_observer_private_keys,
+    settings,
+)
 from src.fund_nav import runtime
+from src.fund_nav.fair_value import FairValuePolicy, observation_model_version
+from src.fund_nav.fair_value import versioned_observation_nonce
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
@@ -23,6 +30,9 @@ from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
 FUND = "0xf000000000000000000000000000000000000001"
 VALUATOR = "0xf000000000000000000000000000000000000002"
 ADAPTER = "0xf000000000000000000000000000000000000003"
+OTOKEN = "0xf000000000000000000000000000000000000004"
+USDC = "0xf000000000000000000000000000000000000005"
+WETH = "0xf000000000000000000000000000000000000006"
 CAST_VALUATION_DATA_FIXTURE = (
     "0000000000000000000000000000000000000000000000000000000000000020"
     "0000000000000000000000000000000000000000000000000000000000000020"
@@ -85,6 +95,35 @@ def test_registry_loader_requires_complete_supported_bindings() -> None:
     assert trusted.trust_reason is None
     assert missing.trust_reason == "MISSING_TRUSTED_DEPLOYMENT"
     assert unsupported.trust_reason == "UNSUPPORTED_INTERFACE"
+
+
+def test_gateway_detects_when_signed_transaction_nonce_was_consumed() -> None:
+    account = Account.from_key("0x" + f"{99:064x}")
+    signed = account.sign_transaction(
+        {
+            "type": 2,
+            "chainId": 84532,
+            "nonce": 7,
+            "to": Web3.to_checksum_address(FUND),
+            "value": 0,
+            "gas": 21_000,
+            "maxFeePerGas": 30_000_000,
+            "maxPriorityFeePerGas": 1_000_000,
+        }
+    )
+    gateway = object.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(
+        eth=SimpleNamespace(get_transaction_count=lambda _sender, _tag: 8)
+    )
+
+    assert gateway.transaction_nonce_consumed(
+        Web3.to_hex(signed.raw_transaction)
+    )
+
+    gateway.w3.eth.get_transaction_count = lambda _sender, _tag: 7
+    assert not gateway.transaction_nonce_consumed(
+        Web3.to_hex(signed.raw_transaction)
+    )
 
 
 @pytest.mark.asyncio
@@ -216,6 +255,12 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
         def isApprovedObserver(self, _observer):
             return Call(True)
 
+        def requiredModelVersion(self):
+            return Call(1)
+
+        def maxObservationDivergenceBps(self):
+            return Call(500)
+
     valuator = SimpleNamespace(
         address=Web3.to_checksum_address(VALUATOR), functions=Functions()
     )
@@ -237,7 +282,7 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
             "valid_until_block": 110,
             "liability": "20",
             "base_exit_cost": "2",
-            "observation_nonce": str(index + 1),
+            "observation_nonce": str(versioned_observation_nonce(index + 1)),
             "signature": Web3.to_hex(sign_digest(digest, key)),
             "digest": Web3.to_hex(digest),
             "observer_address": observers[index],
@@ -257,6 +302,19 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
     )
     assert len(accepted) == 2
 
+    divergent_rows = [dict(row) for row in rows]
+    divergent_rows[1]["liability"] = "22"
+    with pytest.raises(RuntimeError, match="DIVERGENCE_EXCEEDED"):
+        gateway._position_observations(
+            valuator=valuator,
+            adapter=ADAPTER,
+            block=100,
+            position_id=1,
+            market_maker=observers[0],
+            rows=divergent_rows,
+            quorum=2,
+        )
+
     with pytest.raises(RuntimeError, match="INCOMPLETE_OBSERVER_QUORUM"):
         gateway._position_observations(
             valuator=valuator,
@@ -267,3 +325,344 @@ def test_concrete_gateway_requires_independent_exact_observer_quorum() -> None:
             rows=rows[:1],
             quorum=1,
         )
+
+
+def test_observation_chain_normalizes_stored_addresses_for_web3() -> None:
+    seen = []
+
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    class Functions:
+        def observationDigest(self, adapter, *_args):
+            assert Web3.is_checksum_address(adapter)
+            return Call(bytes.fromhex("34" * 32))
+
+        def isApprovedObserver(self, observer):
+            assert Web3.is_checksum_address(observer)
+            return Call(True)
+
+        def position(self, _position_id):
+            return Call((FUND, ADAPTER))
+
+        def maxObservationWindow(self):
+            return Call(120)
+
+    class Eth:
+        def contract(self, address, abi):
+            assert Web3.is_checksum_address(address)
+            seen.append(address)
+            return SimpleNamespace(functions=Functions())
+
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(eth=Eth())
+    observation = OptionObservation(
+        chain_id=84532,
+        fund_address=FUND,
+        valuator_address=VALUATOR.lower(),
+        adapter_address=ADAPTER.lower(),
+        position_id=1,
+        snapshot_block=100,
+        snapshot_block_hash="0x" + "12" * 32,
+        valid_until_block=110,
+        liability=25,
+        base_exit_cost=0,
+        observation_nonce=1,
+        signature="0x" + "00" * 65,
+    )
+
+    assert gateway.observation_digest(observation) == bytes.fromhex("34" * 32)
+    assert gateway.observer_approved(VALUATOR.lower(), FUND, 100) is True
+    assert gateway.market_maker(ADAPTER.lower(), 1, 100) == ADAPTER
+    assert gateway.max_observation_window(VALUATOR.lower(), 100) == 120
+    assert seen == [
+        Web3.to_checksum_address(VALUATOR),
+        Web3.to_checksum_address(VALUATOR),
+        Web3.to_checksum_address(ADAPTER),
+        Web3.to_checksum_address(VALUATOR),
+    ]
+
+
+class FairValueObservationRepository:
+    def __init__(self):
+        self.rows = []
+        self.marks = []
+
+    def insert_verified_idempotent(self, row):
+        identity = (
+            row["chain_id"],
+            row["valuator_address"],
+            row["adapter_address"],
+            row["position_id"],
+            row["snapshot_block"],
+            row["observer_address"],
+        )
+        if not any(
+            (
+                item["chain_id"],
+                item["valuator_address"],
+                item["adapter_address"],
+                item["position_id"],
+                item["snapshot_block"],
+                item["observer_address"],
+            )
+            == identity
+            for item in self.rows
+        ):
+            self.rows.append(row)
+
+    def upsert_fair_value_mark(self, row):
+        self.marks = [row]
+
+
+class FairValueValuatorFunctions:
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    def interfaceVersion(self):
+        return self.Call(1)
+
+    def valuationPolicyVersion(self):
+        return self.Call(2)
+
+    def requiredModelVersion(self):
+        return self.Call(1)
+
+    def liabilityBufferBps(self):
+        return self.Call(0)
+
+    def maxObservationDivergenceBps(self):
+        return self.Call(500)
+
+
+def fair_value_valuator():
+    return SimpleNamespace(
+        address=Web3.to_checksum_address(VALUATOR),
+        functions=FairValueValuatorFunctions(),
+    )
+
+
+def fair_value_gateway(keys):
+    market_maker = Account.from_key("0x" + f"{3:064x}").address.lower()
+    repository = FairValueObservationRepository()
+    fund = TrustedFund({"chain_id": 84532, "fund_address": FUND}, {}, {}, None)
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.fund = fund
+    gateway.repository = repository
+    gateway.sepolia_observer_private_keys = keys
+    gateway.fair_value_policy = FairValuePolicy(
+        implied_volatility_bps=4_200,
+        implied_volatility_source="approved-testnet-snapshot",
+        risk_free_rate_bps=500,
+        settlement_cost_bps=0,
+    )
+    gateway.chain_id = lambda: 84532
+    gateway.block_hash = lambda _block: bytes.fromhex("12" * 32)
+    gateway.head_block = lambda: 101
+    gateway.max_observation_window = lambda _valuator, _block: 20
+    gateway.observer_approved = lambda _valuator, _observer, _block: True
+    gateway.market_maker = lambda _adapter, _position, _block: market_maker
+    gateway.observation_digest = lambda observation: Web3.keccak(
+        text=f"{observation.position_id}:{observation.observation_nonce}"
+    )
+    gateway._approved_spot_snapshot = lambda **_kwargs: {
+        "round_id": 7,
+        "price_8": 191_213_078_641,
+        "updated_at": 1_785_090_000,
+    }
+
+    class Call:
+        def __init__(self, value):
+            self.value = value
+
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return self.value
+
+    class AdapterFunctions:
+        def accountingAsset(self):
+            return Call(USDC)
+
+        def weth(self):
+            return Call(WETH)
+
+    class TokenFunctions:
+        def decimals(self):
+            return Call(6)
+
+    class OTokenFunctions:
+        def isPut(self):
+            return Call(True)
+
+        def underlying(self):
+            return Call(WETH)
+
+        def strikeAsset(self):
+            return Call(USDC)
+
+        def collateralAsset(self):
+            return Call(USDC)
+
+        def strikePrice(self):
+            return Call(157_500_000_000)
+
+        def expiry(self):
+            return Call(1_785_139_200)
+
+    class Eth:
+        def get_block(self, _block):
+            return {"timestamp": 1_785_090_604}
+
+        def contract(self, address, abi):
+            functions = {
+                Web3.to_checksum_address(ADAPTER): AdapterFunctions(),
+                Web3.to_checksum_address(USDC): TokenFunctions(),
+                Web3.to_checksum_address(OTOKEN): OTokenFunctions(),
+            }[Web3.to_checksum_address(address)]
+            return SimpleNamespace(functions=functions)
+
+    gateway.w3 = SimpleNamespace(eth=Eth())
+    position = (
+        OTOKEN,
+        market_maker,
+        1,
+        50_793_650,
+        799_999_988,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        bytes(32),
+    )
+    return gateway, repository, position
+
+
+def test_sepolia_fair_value_observations_are_exact_and_idempotent() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, repository, position = fair_value_gateway(keys)
+    valuator = fair_value_valuator()
+
+    gateway._publish_sepolia_fair_value_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        quorum=2,
+        positions=[(1, position)],
+        existing_rows=[],
+    )
+    gateway._publish_sepolia_fair_value_observations(
+        valuator=valuator,
+        adapter=ADAPTER,
+        block=100,
+        quorum=2,
+        positions=[(1, position)],
+        existing_rows=repository.rows,
+    )
+
+    assert len(repository.rows) == 2
+    assert {int(row["liability"]) for row in repository.rows} == {1}
+    assert {int(row["base_exit_cost"]) for row in repository.rows} == {0}
+    assert len({row["observation_nonce"] for row in repository.rows}) == 2
+    assert {
+        observation_model_version(int(row["observation_nonce"]))
+        for row in repository.rows
+    } == {1}
+    assert {row["snapshot_block_hash"] for row in repository.rows} == {"0x" + "12" * 32}
+    assert repository.marks[0]["fair_liability_assets"] == "1"
+    assert repository.marks[0]["stress_liability_assets"] == "799999988"
+    assert repository.marks[0]["source_quality"] == "single_model_multi_signer"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda gateway: setattr(gateway, "chain_id", lambda: 8453), "WRONG_CHAIN"),
+        (
+            lambda gateway: setattr(
+                gateway, "sepolia_observer_private_keys", ("0x" + f"{1:064x}",)
+            ),
+            "QUORUM_MISMATCH",
+        ),
+        (
+            lambda gateway: setattr(
+                gateway,
+                "observer_approved",
+                lambda _valuator, _observer, _block: False,
+            ),
+            "NOT_APPROVED",
+        ),
+    ],
+)
+def test_sepolia_fair_value_observations_fail_closed(mutation, reason) -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = fair_value_gateway(keys)
+    mutation(gateway)
+
+    with pytest.raises(RuntimeError, match=reason):
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=[],
+        )
+
+
+def test_sepolia_fair_value_observations_reject_policy_mismatch() -> None:
+    keys = ("0x" + f"{1:064x}", "0x" + f"{2:064x}")
+    gateway, _repository, position = fair_value_gateway(keys)
+    existing = [
+        {
+            "position_id": 1,
+            "observer_address": Account.from_key(keys[0]).address.lower(),
+            "liability": 2,
+            "base_exit_cost": 0,
+            "observation_nonce": str(1 << 192),
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="POLICY_MISMATCH"):
+        gateway._publish_sepolia_fair_value_observations(
+            valuator=fair_value_valuator(),
+            adapter=ADAPTER,
+            block=100,
+            quorum=2,
+            positions=[(1, position)],
+            existing_rows=existing,
+        )
+
+
+def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None:
+    assert settings.fund_csp_sepolia_fair_value_observations_enabled is False
+    key = "0x" + f"{1:064x}"
+    monkeypatch.setattr(settings, "fund_csp_sepolia_observer_private_keys", key)
+    with pytest.raises(ValueError, match="exactly two"):
+        get_fund_csp_sepolia_observer_private_keys()
+
+    monkeypatch.setattr(
+        settings, "fund_csp_sepolia_observer_private_keys", f"{key},{key}"
+    )
+    with pytest.raises(ValueError, match="duplicate observers"):
+        get_fund_csp_sepolia_observer_private_keys()
+
+
+def test_sepolia_fair_value_policy_has_no_implicit_iv_default(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_bps", 0)
+    monkeypatch.setattr(settings, "fund_csp_sepolia_fair_value_iv_source", "")
+
+    with pytest.raises(ValueError, match="IV_BPS"):
+        get_fund_csp_sepolia_fair_value_policy()

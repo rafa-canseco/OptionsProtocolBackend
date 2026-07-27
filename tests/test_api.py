@@ -425,6 +425,111 @@ def test_nav_reporter_lease_is_bounded_before_task_creation(monkeypatch):
             pass
 
 
+def test_nav_reporter_requires_dedicated_submitter_key(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_reporter_private_keys",
+        "0x" + f"{1:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_submitter_private_key", ""
+    )
+
+    with pytest.raises(RuntimeError, match="FUND_NAV_SUBMITTER_PRIVATE_KEY"):
+        with TestClient(main_module.app):
+            pass
+
+
+@pytest.mark.parametrize(
+    ("reporter_enabled", "chain_id", "observer_keys", "message"),
+    [
+        (
+            False,
+            84532,
+            ",".join(["0x" + f"{2:064x}", "0x" + f"{3:064x}"]),
+            "FUND_NAV_REPORTER_ENABLED",
+        ),
+        (
+            True,
+            8453,
+            ",".join(["0x" + f"{2:064x}", "0x" + f"{3:064x}"]),
+            "restricted to Base Sepolia",
+        ),
+        (
+            True,
+            84532,
+            ",".join(["0x" + f"{1:064x}", "0x" + f"{2:064x}"]),
+            "separate from NAV reporter keys",
+        ),
+    ],
+)
+def test_sepolia_fair_value_observation_validation_precedes_tasks(
+    monkeypatch, reporter_enabled, chain_id, observer_keys, message
+):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_reporter_enabled", reporter_enabled
+    )
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_reporter_private_keys",
+        "0x" + f"{1:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_nav_submitter_private_key",
+        "0x" + f"{4:064x}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module.settings, "chain_id", chain_id)
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_observer_private_keys",
+        observer_keys,
+    )
+    monkeypatch.setattr(
+        main_module.settings, "fund_csp_sepolia_fair_value_iv_bps", 4_200
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_iv_source",
+        "approved-testnet-snapshot",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_risk_free_rate_bps",
+        500,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_settlement_cost_bps",
+        0,
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        with TestClient(main_module.app):
+            pass
+
+
 # --- Rate limiting ---
 
 

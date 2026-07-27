@@ -62,9 +62,10 @@ def get_expiries(
 
     Selection:
       0. Daily: next 08:00 UTC (after short cutoff)
-      1. Near Friday: first Friday after short cutoff
-      2. Weekly: first Friday after standard cutoff
-      3. Biweekly: weekly + 7 days
+      1. Rolling CSP: first 08:00 UTC at least 36h away
+      2. Near Friday: first Friday after short cutoff
+      3. Weekly: first Friday after standard cutoff
+      4. Biweekly: weekly + 7 days
 
     Dedup via set handles overlap (e.g. near_fri == weekly when no
     Friday falls in the gap, or 1d == near_fri on Thursday night).
@@ -79,6 +80,10 @@ def get_expiries(
     # Daily: next 08:00 UTC after short cutoff
     exp_1d = _next_0800_utc(short_cutoff)
 
+    # Rolling CSP: an 08:00 UTC expiry is always available 36–60 hours out.
+    # This preserves the approved 48h strategy even between standard expiries.
+    exp_2d = _next_0800_utc(now + timedelta(hours=36))
+
     # Near Friday: first Friday after short cutoff
     exp_near_fri = _next_friday_8am(short_cutoff)
 
@@ -86,7 +91,7 @@ def get_expiries(
     exp_7d = _next_friday_8am(standard_cutoff)
     exp_14d = exp_7d + timedelta(weeks=1)
 
-    result = sorted({exp_1d, exp_near_fri, exp_7d, exp_14d})
+    result = sorted({exp_1d, exp_2d, exp_near_fri, exp_7d, exp_14d})
     return [int(f.timestamp()) for f in result]
 
 

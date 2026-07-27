@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
+from eth_account import Account
 from web3 import Web3
 
 from src.fund_nav.models import (
@@ -13,6 +14,9 @@ from src.fund_nav.models import (
     sign_digest,
     signature_digest,
 )
+
+EXECUTION_BUFFER_BLOCKS = 15
+SUBMISSION_LEAD_BLOCKS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +105,7 @@ class ReporterGateway(Protocol):
     def head_block(self) -> int: ...
     def report_nonce(self) -> int: ...
     def transaction_status(self, transaction_hash: str) -> str: ...
+    def transaction_nonce_consumed(self, signed_transaction: str) -> bool: ...
     def contract_digest(self, report_nonce: int, reports) -> bytes: ...
     def accounting_role_immediate(self, account: str) -> bool: ...
     def simulate(
@@ -116,6 +121,7 @@ class ReporterGateway(Protocol):
         private_key: str,
     ) -> SignedTransaction: ...
     def broadcast(self, transaction: SignedTransaction) -> str: ...
+    def wait_until_block(self, block_number: int, timeout: int) -> bool: ...
     def wait(self, transaction_hash: str, timeout: int) -> bool: ...
 
 
@@ -129,6 +135,14 @@ class ReportRunStore(Protocol):
         run: StoredRun,
         error: str,
     ) -> bool: ...
+    def record_failed_transaction(
+        self,
+        snapshot: ReporterSnapshot,
+        report_nonce: int,
+        run: StoredRun,
+        reason_code: str,
+        error: str,
+    ) -> bool: ...
 
 
 class NavReporter:
@@ -138,6 +152,7 @@ class NavReporter:
         store: ReportRunStore,
         *,
         private_keys: tuple[str, ...],
+        submitter_private_key: str,
         expected_chain_id: int,
         transaction_timeout: int,
         inclusion_margin: int,
@@ -145,6 +160,7 @@ class NavReporter:
         self.gateway = gateway
         self.store = store
         self.private_keys = private_keys
+        self.submitter_private_key = submitter_private_key
         self.expected_chain_id = expected_chain_id
         self.transaction_timeout = transaction_timeout
         self.inclusion_margin = max(1, inclusion_margin)
@@ -227,7 +243,7 @@ class NavReporter:
         # Leave a small execution buffer for the simulation and submission RPCs;
         # the contract still enforces the snapshot age and activation window.
         valid_after = max(
-            current_head + self.inclusion_margin + 10,
+            current_head + self.inclusion_margin + EXECUTION_BUFFER_BLOCKS,
             snapshot.snapshot_block + snapshot.activation_delay,
         )
         valid_until = valid_after + snapshot.max_window_length
@@ -309,6 +325,23 @@ class NavReporter:
     ) -> ReportRun:
         run_id = prepared.run_id
         token = prepared.ownership_token
+        valid_after = prepared.reports[0].valid_after_block
+        build_at = max(prepared.snapshot.head_block, valid_after - 10)
+        if (
+            self.gateway.head_block() < build_at
+            and not self.gateway.wait_until_block(build_at, self.transaction_timeout)
+        ):
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    "ACTIVATION_WAIT_TIMEOUT",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
         try:
             transaction = self.gateway.build_transaction(
                 report_nonce=prepared.report_nonce,
@@ -324,6 +357,35 @@ class NavReporter:
                 self._detailed_run(
                     "failed",
                     "SUBMISSION_FAILED",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
+        submission_block = valid_after - SUBMISSION_LEAD_BLOCKS
+        if not self.gateway.wait_until_block(
+            submission_block,
+            self.transaction_timeout,
+        ):
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    "ACTIVATION_WAIT_TIMEOUT",
+                    report_rows,
+                    prepared.reporters,
+                    signature_rows,
+                ),
+            )
+        reason = self._broadcast_reason(prepared.snapshot, prepared.reports[0])
+        if reason:
+            return self._finish(
+                run_id,
+                token,
+                self._detailed_run(
+                    "blocked",
+                    reason,
                     report_rows,
                     prepared.reporters,
                     signature_rows,
@@ -437,8 +499,18 @@ class NavReporter:
                 signed_transaction=existing.signed_transaction,
             )
         if status == "unknown":
+            if self.gateway.transaction_nonce_consumed(
+                existing.signed_transaction
+            ):
+                return self._record_failed_transaction(
+                    existing,
+                    snapshot,
+                    report_nonce,
+                    "TRANSACTION_NONCE_CONSUMED",
+                    "SIGNED_TRANSACTION_NONCE_ALREADY_USED",
+                )
             return self._rebroadcast_existing(existing, report_nonce)
-        if status in {"pending", "unknown"}:
+        if status == "pending":
             return ReportRun(
                 status="submitted",
                 reason_code="TRANSACTION_RECONCILIATION_PENDING",
@@ -463,6 +535,26 @@ class NavReporter:
             reason_code=(
                 "TRANSACTION_REVERTED" if recorded else "REVERT_FINALIZATION_REFUSED"
             ),
+        )
+
+    def _record_failed_transaction(
+        self,
+        existing: StoredRun,
+        snapshot: ReporterSnapshot,
+        report_nonce: int,
+        reason_code: str,
+        error: str,
+    ) -> ReportRun:
+        recorded = self.store.record_failed_transaction(
+            snapshot,
+            report_nonce,
+            existing,
+            reason_code,
+            error,
+        )
+        return ReportRun(
+            status="failed",
+            reason_code=reason_code if recorded else "FAILURE_FINALIZATION_REFUSED",
         )
 
     def _rebroadcast_existing(
@@ -570,19 +662,11 @@ class NavReporter:
         return [by_address[address] for address in sorted(by_address)]
 
     def _select_signers(self, signed, threshold):
-        sender = next(
-            (
-                item
-                for item in signed
-                if self.gateway.accounting_role_immediate(item[0])
-            ),
-            None,
-        )
-        if sender is None:
+        selected = sorted(signed, key=lambda item: item[0])[:threshold]
+        submitter = Account.from_key(self.submitter_private_key)
+        sender = (submitter.address.lower(), self.submitter_private_key, b"")
+        if not self.gateway.accounting_role_immediate(sender[0]):
             return [], None
-        selected = [sender]
-        selected.extend(item for item in signed if item != sender)
-        selected = sorted(selected[:threshold], key=lambda item: item[0])
         return selected, sender
 
     def _execution_reason(
@@ -597,6 +681,25 @@ class NavReporter:
         if head - snapshot.snapshot_block > snapshot.max_snapshot_age:
             return "STALE_SNAPSHOT"
         if head + self.inclusion_margin > report.valid_after_block:
+            return "REPORT_WINDOW_MARGIN_CONSUMED"
+        if self.gateway.report_nonce() != snapshot.last_report_nonce:
+            return "REPORT_NONCE_CHANGED"
+        return None
+
+    def _broadcast_reason(
+        self, snapshot: ReporterSnapshot, report: ComponentReport
+    ) -> str | None:
+        if (
+            self.gateway.block_hash(snapshot.snapshot_block)
+            != snapshot.snapshot_block_hash
+        ):
+            return "SNAPSHOT_BLOCK_CHANGED"
+        head = self.gateway.head_block()
+        if head - snapshot.snapshot_block > snapshot.max_snapshot_age:
+            return "STALE_SNAPSHOT"
+        if head > report.valid_until_block:
+            return "REPORT_WINDOW_EXPIRED"
+        if head + SUBMISSION_LEAD_BLOCKS - 1 >= report.valid_after_block:
             return "REPORT_WINDOW_MARGIN_CONSUMED"
         if self.gateway.report_nonce() != snapshot.last_report_nonce:
             return "REPORT_NONCE_CHANGED"

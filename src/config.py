@@ -54,7 +54,14 @@ class Settings(BaseSettings):
     fund_nav_reporter_tx_timeout_seconds: int = 120
     fund_nav_reporter_lease_seconds: int = 180
     fund_nav_reporter_private_keys: str = ""
+    fund_nav_submitter_private_key: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
+    fund_csp_sepolia_fair_value_observations_enabled: bool = False
+    fund_csp_sepolia_observer_private_keys: str = ""
+    fund_csp_sepolia_fair_value_iv_bps: int = 0
+    fund_csp_sepolia_fair_value_iv_source: str = ""
+    fund_csp_sepolia_fair_value_risk_free_rate_bps: int = 0
+    fund_csp_sepolia_fair_value_settlement_cost_bps: int = 0
     fund_state_freshness_seconds: int = 180
     confirmed_head_freshness_seconds: int = 90
     circuit_breaker_poll_seconds: int = 10
@@ -215,6 +222,60 @@ def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
     if len(addresses) != len(set(addresses)):
         raise ValueError("FUND_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters")
     return keys
+
+
+def get_fund_nav_submitter_private_key() -> str:
+    """Return the dedicated key used only to submit signed NAV reports."""
+    from eth_account import Account
+
+    key = settings.fund_nav_submitter_private_key.strip()
+    if not key:
+        raise ValueError("FUND_NAV_SUBMITTER_PRIVATE_KEY is required")
+    try:
+        Account.from_key(key)
+    except Exception as exc:
+        raise ValueError("Invalid FUND_NAV_SUBMITTER_PRIVATE_KEY") from exc
+    return key
+
+
+def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:
+    """Return the two dedicated keys for the Base Sepolia fair-value policy."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_csp_sepolia_observer_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS must contain exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS contains duplicate observers"
+        )
+    return keys
+
+
+def get_fund_csp_sepolia_fair_value_policy():
+    """Return the strict, explicitly versioned Base Sepolia fair-value policy."""
+    from src.fund_nav.fair_value import FairValuePolicy
+
+    return FairValuePolicy(
+        implied_volatility_bps=settings.fund_csp_sepolia_fair_value_iv_bps,
+        implied_volatility_source=settings.fund_csp_sepolia_fair_value_iv_source,
+        risk_free_rate_bps=(settings.fund_csp_sepolia_fair_value_risk_free_rate_bps),
+        settlement_cost_bps=(settings.fund_csp_sepolia_fair_value_settlement_cost_bps),
+    )
 
 
 @functools.lru_cache(maxsize=None)

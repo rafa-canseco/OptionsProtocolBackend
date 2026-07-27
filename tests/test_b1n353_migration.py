@@ -4,6 +4,10 @@ MIGRATION = (
     Path(__file__).parents[1]
     / "supabase/migrations/20260722_b1n353_fund_product_nav.sql"
 ).read_text()
+FAIR_VALUE_MIGRATION = (
+    Path(__file__).parents[1]
+    / "supabase/migrations/202607260001_b1n366_csp_fair_value_marks.sql"
+).read_text()
 
 
 def test_registry_metadata_is_required_for_enabled_deployments() -> None:
@@ -95,6 +99,18 @@ def test_verified_observations_and_confirmed_heads_are_persisted() -> None:
     assert "snapshot_block, observer_address" in MIGRATION
     assert "UNIQUE (chain_id, valuator_address, digest)" in MIGRATION
     assert "CREATE TABLE v2_confirmed_chain_heads" in MIGRATION
+
+
+def test_fair_value_metadata_is_exact_block_and_service_only() -> None:
+    assert "CREATE TABLE v2_csp_fair_value_marks" in FAIR_VALUE_MIGRATION
+    assert "snapshot_block_hash TEXT NOT NULL" in FAIR_VALUE_MIGRATION
+    assert "fair_liability_assets NUMERIC" in FAIR_VALUE_MIGRATION
+    assert "stress_liability_assets NUMERIC" in FAIR_VALUE_MIGRATION
+    assert "source_quality TEXT NOT NULL" in FAIR_VALUE_MIGRATION
+    assert "ENABLE ROW LEVEL SECURITY" in FAIR_VALUE_MIGRATION
+    assert "GRANT ALL ON v2_csp_fair_value_marks TO service_role" in (
+        FAIR_VALUE_MIGRATION
+    )
 
 
 def test_latest_redemption_batch_state_is_persisted_per_controller() -> None:

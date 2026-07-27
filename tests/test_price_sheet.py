@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from src.pricing.price_sheet import generate_otoken_specs, generate_strikes
 from src.pricing.utils import get_expiries
 
@@ -45,6 +47,26 @@ def test_otoken_specs_default_expiries():
     assert len(expiry_ts_set) >= 3  # 1d + near_fri + 7d + 14d (dedup may collapse)
     for ts in expiry_ts_set:
         assert ts % 86400 == 28800, f"{ts} is not 08:00 UTC"
+
+
+def test_rolling_csp_expiry_lists_exact_15pct_otm_tick(monkeypatch):
+    now = datetime(2026, 3, 3, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("src.pricing.price_sheet.time.time", lambda: now.timestamp())
+    expiries = get_expiries(now=now)
+    rolling = next(
+        ts
+        for ts in expiries
+        if 36 * 3600 <= ts - int(now.timestamp()) <= 60 * 3600
+    )
+
+    specs = generate_otoken_specs(spot=2000.0, expiry_timestamps=[rolling])
+
+    assert any(
+        spec.expiry_ts == rolling
+        and spec.option_type.value == "put"
+        and spec.strike == 1700.0
+        for spec in specs
+    )
 
 
 def test_otoken_specs_both_types():

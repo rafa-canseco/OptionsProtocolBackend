@@ -37,6 +37,19 @@ class FundComposition(FundModel):
     strategy_accounting_assets: str
     assigned_weth: str
     reserved_claim_assets: str
+    gross_assets: str = "0"
+    adapter_free_accounting_assets: str = "0"
+    locked_collateral_assets: str = "0"
+    fair_option_liability_assets: str = "0"
+    assigned_weth_value_assets: str = "0"
+    settlement_receivable_assets: str = "0"
+    settlement_cost_assets: str = "0"
+
+
+class StressNav(FundModel):
+    net_assets: str
+    share_price_assets: str
+    option_liability_assets: str
 
 
 class NavWindow(FundModel):
@@ -44,6 +57,11 @@ class NavWindow(FundModel):
     valid_after_block: int | None
     valid_until_block: int | None
     stale: bool
+    methodology: str | None = None
+    model_version: int | None = None
+    observed_at: str | None = None
+    source_quality: str | None = None
+    stress: StressNav | None = None
 
 
 class FundStatus(FundModel):
@@ -61,14 +79,34 @@ class FundActions(FundModel):
     claim_redemption: ActionAvailability
 
 
+class CspPositionSummary(FundModel):
+    position_id: int
+    lifecycle: str
+    strike_price_usd_8: str | None = None
+    expiry_timestamp: int | None = None
+    option_amount_8: str
+    collateral_assets: str
+    premium_earned_assets: str
+
+
+class FundStrategySnapshot(FundModel):
+    latest_position: CspPositionSummary | None = None
+    total_premium_collected_assets: str = "0"
+    next_open_after: int | None = None
+    next_open_condition: str
+
+
 class FundSummaryResponse(FundModel):
     fund: FundRegistryItem
     net_assets: str
     share_supply: str
     virtual_shares: str
     share_price_assets: str
+    market_price_assets: str | None = None
+    stress_price_assets: str | None = None
     composition: FundComposition
     nav: NavWindow
+    strategy: FundStrategySnapshot
     status: FundStatus
     actions: FundActions
     as_of_block: int | None
