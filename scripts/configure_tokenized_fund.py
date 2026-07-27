@@ -1,4 +1,4 @@
-"""Validate or apply a finalized B1N-352 manifest to the staging registry."""
+"""Validate or apply a finalized option-fund manifest to the staging registry."""
 
 import argparse
 import json
@@ -16,6 +16,8 @@ def main() -> None:
     parser.add_argument("--share-decimals", type=int, required=True)
     parser.add_argument("--accounting-asset-symbol", required=True)
     parser.add_argument("--accounting-asset-decimals", type=int, required=True)
+    parser.add_argument("--quote-asset-symbol")
+    parser.add_argument("--quote-asset-decimals", type=int)
     parser.add_argument(
         "--apply",
         action="store_true",
@@ -31,6 +33,8 @@ def main() -> None:
         share_decimals=args.share_decimals,
         accounting_asset_symbol=args.accounting_asset_symbol,
         accounting_asset_decimals=args.accounting_asset_decimals,
+        quote_asset_symbol=args.quote_asset_symbol,
+        quote_asset_decimals=args.quote_asset_decimals,
     )
     if args.apply:
         from src.db.database import get_client

@@ -17,16 +17,18 @@ Before simulation or submission, the reporter requires:
 - current reporter set, version, threshold and next report nonce;
 - a dedicated active reporter key and immediate `ACCOUNTING_ROLE`;
 - no active flow processing and successful transaction simulation;
-- CSP output from the configured on-chain valuator, backed by its approved
-  observer quorum including an observer independent of the executing MM.
+- option-fund output from the strategy-specific configured on-chain valuator,
+  backed by its approved observer quorum including an observer independent of
+  the executing MM.
 
 Option observations enter through `ObservationIngestor`. It recovers each
-signature against `CspFundValuator.observationDigest` at the exact snapshot,
+signature against the strategy valuator's `observationDigest` at the exact snapshot,
 checks the approved observer set and observation window, and stores the bound
 digest once per observer, position and snapshot. The runtime re-verifies stored
-digests, signatures, market-maker independence and exact quorum before passing
-`ValuationData` to `CspFundValuator.value`. The default runtime never computes
-option liability.
+digests, signatures, model version, maximum divergence, market-maker
+independence and exact quorum before passing `ValuationData` to the valuator.
+The default runtime never computes option liability; the testnet publishers
+below must be enabled explicitly.
 
 The operational ingestion boundary is service-role only and intentionally not
 exposed as a public API. Submit one observer-produced JSON document with:
@@ -51,7 +53,7 @@ amount, strike and expiry, the valuator-approved Chainlink spot at the snapshot
 block, and an explicit versioned IV/rate policy. Full collateral is retained as
 an API-only stress liability and is never signed as transactional NAV.
 
-The initial approved testnet policy is model
+The initial approved CSP testnet policy is model
 `b1nary-european-bs-put-v1`, IV `4200` bps, risk-free rate `500` bps,
 settlement cost `0`, and IV source
 `deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-operator-approved`. The two
@@ -61,6 +63,21 @@ market evidence or mainnet readiness. The policy is restricted to chain
 `84532`, requires the on-chain buffer to be zero, validates model version in
 the high 64 bits of every nonce, rejects keys shared with NAV reporters, and
 fails closed on signer, quorum, lifecycle, block, spot, or policy mismatch.
+
+Covered calls use a separate disabled-by-default publisher, keys, policy,
+nonce domain, and model `b1nary-european-bs-call-v1`. Its approved Base Sepolia
+inputs are IV `4200` bps, risk-free rate `500` bps, settlement cost `0`, and IV
+source
+`deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-b1n358-covered-call-v2-approved`.
+It values a European call in USD and converts the liability to WETH using the
+same pinned Chainlink ETH/USD spot. It requires valuation policy version `2`,
+model version `1`, zero on-chain liability buffer, `500` bps maximum
+observation divergence and a `120`-block observation window. Locked WETH is
+gross assets; full collateral remains stress liability rather than
+transactional liability. The runtime stores policy reference
+`policies/covered_call_fund_policy.v2.base-sepolia.json` and SHA-256
+`4ecb60fc6a19ac0a10c37ca380998b3566a3193693a10fb211f86bb61a2bebf3`
+with each covered-call mark.
 
 The transactional product API keeps `sharePriceAssets` as fair NAV per share
 and exposes stress NAV separately. Fair-value metadata is joined to the exact
@@ -76,7 +93,8 @@ product API and indexer. Enabling it requires `RPC_URL` and a comma-separated
 key is parsed and validated during startup. Active signers are recovered,
 sorted and limited to the on-chain threshold. The dedicated submitter must
 have immediate `ACCOUNTING_ROLE` and must be distinct from both the NAV
-reporters and CSP observers. It never falls back to `OPERATOR_PRIVATE_KEY`.
+reporters and either strategy's observers. It never falls back to
+`OPERATOR_PRIVATE_KEY`.
 Interval and receipt timeout use
 `FUND_NAV_REPORTER_INTERVAL_SECONDS` and
 `FUND_NAV_REPORTER_TX_TIMEOUT_SECONDS`. `FUND_NAV_REPORTER_LEASE_SECONDS`
@@ -94,11 +112,19 @@ clears the immutable transaction material and rebuilds the same report nonce
 from a fresh snapshot. This prevents an ambiguous or replaced transaction from
 pinning the reporter indefinitely.
 
-`FUND_CSP_SEPOLIA_CONSERVATIVE_OBSERVATIONS_ENABLED` gates the test-only
+`FUND_CSP_SEPOLIA_FAIR_VALUE_OBSERVATIONS_ENABLED` gates the CSP test-only
 publisher. When enabled it requires exactly two unique dedicated keys in
 `FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS`, Base Sepolia chain ID, and an enabled
 NAV reporter. The configured addresses must match the approved on-chain CSP
 valuator quorum. The keys must never be configured in production.
+
+`FUND_COVERED_CALL_SEPOLIA_FAIR_VALUE_OBSERVATIONS_ENABLED` independently
+gates the covered-call publisher and requires exactly two keys in
+`FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS`, plus explicit `IV_BPS`,
+`IV_SOURCE`, `RISK_FREE_RATE_BPS`, and `SETTLEMENT_COST_BPS` fields with the
+same prefix. Startup rejects wrong-chain activation, invalid or incomplete
+policy, key reuse with NAV reporters or the submitter, and reuse of an observer
+key across CSP and covered-call publishers.
 
 Run identity is `(chain_id, fund_address, report_nonce)`. Its unique insert is
 the atomic ownership claim, so a losing instance does not sign, simulate, or

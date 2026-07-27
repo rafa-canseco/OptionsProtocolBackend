@@ -1,4 +1,4 @@
-"""Operational entry point for verified CSP option observations."""
+"""Operational entry point for verified option-fund observations."""
 
 from collections.abc import Callable
 from typing import Any
@@ -8,6 +8,7 @@ from web3 import Web3
 from src.config import settings
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
 from src.fund_nav.runtime import (
+    IdempotentObservationStore,
     SupabaseNavRepository,
     TrustedFund,
     TrustedRegistryLoader,
@@ -50,4 +51,10 @@ def ingest_observation_document(
 
         gateway_factory = build_gateway
 
-    return ObservationIngestor(gateway_factory(fund), repository).ingest(observation)
+    return ObservationIngestor(
+        gateway_factory(fund),
+        IdempotentObservationStore(
+            repository,
+            fund.registry.get("strategy_kind", "csp"),
+        ),
+    ).ingest(observation)

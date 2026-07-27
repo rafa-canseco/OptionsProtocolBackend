@@ -190,6 +190,15 @@ class NavReporter:
         # Refresh the inclusion window immediately before signing while keeping
         # the already-validated snapshot and component values unchanged.
         reports = self._refresh_inclusion_window(snapshot, reports)
+        if (
+            reports[0].valid_after_block
+            > snapshot.snapshot_block + snapshot.max_snapshot_age
+        ):
+            return self._finish(
+                run_id,
+                token,
+                ReportRun(status="blocked", reason_code="STALE_SNAPSHOT"),
+            )
         digest = signature_digest(
             chain_id=snapshot.chain_id,
             accounting=snapshot.accounting,
@@ -351,12 +360,15 @@ class NavReporter:
                 private_key=prepared.sender[1],
             )
         except Exception:
+            reason = self._execution_reason(
+                prepared.snapshot, prepared.reports[0]
+            )
             return self._finish(
                 run_id,
                 token,
                 self._detailed_run(
-                    "failed",
-                    "SUBMISSION_FAILED",
+                    "blocked" if reason else "failed",
+                    reason or "SUBMISSION_FAILED",
                     report_rows,
                     prepared.reporters,
                     signature_rows,

@@ -13,6 +13,8 @@ from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
 from src.config import (
+    get_fund_covered_call_sepolia_fair_value_policy,
+    get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
@@ -25,6 +27,7 @@ from src.fund_nav.abis import (
     ACCOUNTING_ABI,
     ADAPTER_ABI,
     CHAINLINK_SPOT_ABI,
+    COVERED_CALL_ADAPTER_ABI,
     ERC20_ABI,
     FLOW_ABI,
     OTOKEN_ABI,
@@ -33,11 +36,19 @@ from src.fund_nav.abis import (
     VAULT_ABI,
 )
 from src.fund_nav.fair_value import (
+    CALL_POLICY_IV_BPS,
+    CALL_POLICY_IV_SOURCE,
+    CALL_POLICY_REFERENCE,
+    CALL_POLICY_RISK_FREE_RATE_BPS,
+    CALL_POLICY_SHA256,
+    CALL_POLICY_SETTLEMENT_COST_BPS,
     METHODOLOGY,
-    MODEL_VERSION,
     SOURCE_QUALITY,
+    CoveredCallFairValuePolicy,
+    EuropeanCallInputs,
     EuropeanPutInputs,
     FairValuePolicy,
+    mark_european_call,
     mark_european_put,
     observation_model_version,
     versioned_observation_nonce,
@@ -53,10 +64,20 @@ from src.fund_nav.reporter import (
     SignedTransaction,
     StoredRun,
 )
-from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
+from src.vaults.csp_service import (
+    COMMON_PROXY_ROLES,
+    PROXY_ROLES,
+    required_trusted_roles,
+)
 
 ACCOUNTING_ROLE = 2
 BASE_SEPOLIA_CHAIN_ID = 84532
+COVERED_CALL_MAX_OBSERVATION_WINDOW_BLOCKS = 120
+COVERED_CALL_MAX_SPOT_STALENESS_SECONDS = 3_600
+COVERED_CALL_SPOT_FEED_DECIMALS = 8
+COVERED_CALL_SPOT_FEED = Web3.to_checksum_address(
+    "0x4aDC67696bA383F43DD60A9e78F2C97Fbbfc7cb1"
+)
 EIP1967_IMPLEMENTATION_SLOT = int(
     "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16
 )
@@ -322,7 +343,10 @@ class TrustedRegistryLoader:
         self.repository = repository
 
     def load(self) -> list[TrustedFund]:
-        return [self._load(row) for row in self.repository.enabled_funds()]
+        return [self.load_one(row) for row in self.repository.enabled_funds()]
+
+    def load_one(self, registry: dict[str, Any]) -> TrustedFund:
+        return self._load(registry)
 
     def _load(self, registry: dict[str, Any]) -> TrustedFund:
         chain_id = int(registry["chain_id"])
@@ -349,12 +373,18 @@ class TrustedRegistryLoader:
             return "MISSING_TRUSTED_DEPLOYMENT"
         if len(contracts) != active_count:
             return "AMBIGUOUS_BINDING"
-        if not REQUIRED_TRUSTED_ROLES.issubset(contracts):
+        strategy_kind = registry.get("strategy_kind", "csp")
+        if not required_trusted_roles(strategy_kind).issubset(contracts):
             return "MISSING_TRUSTED_DEPLOYMENT"
         if any(int(row["interface_version"]) != 1 for row in contracts.values()):
             return "UNSUPPORTED_INTERFACE"
+        adapter_role = (
+            "covered_call_adapter" if strategy_kind == "covered_call" else "csp_adapter"
+        )
+        required_proxies = COMMON_PROXY_ROLES | {adapter_role}
         if any(
-            not contracts[role].get("implementation_address") for role in PROXY_ROLES
+            not contracts[role].get("implementation_address")
+            for role in required_proxies
         ):
             return "UNTRUSTED_IMPLEMENTATION"
         if not state.get("reconciled", False):
@@ -391,13 +421,30 @@ class Web3ReporterGateway:
         repository: SupabaseNavRepository,
         *,
         sepolia_observer_private_keys: tuple[str, ...] = (),
-        fair_value_policy: FairValuePolicy | None = None,
+        fair_value_policy: FairValuePolicy | CoveredCallFairValuePolicy | None = None,
     ) -> None:
         self.w3 = w3
         self.fund = fund
         self.repository = repository
         self.sepolia_observer_private_keys = sepolia_observer_private_keys
         self.fair_value_policy = fair_value_policy
+        self.strategy_kind = fund.registry.get("strategy_kind", "csp")
+        self.adapter_role = (
+            "covered_call_adapter"
+            if self.strategy_kind == "covered_call"
+            else "csp_adapter"
+        )
+        self.valuator_role = (
+            "covered_call_valuator"
+            if self.strategy_kind == "covered_call"
+            else "csp_valuator"
+        )
+        self.adapter_abi = (
+            COVERED_CALL_ADAPTER_ABI
+            if self.strategy_kind == "covered_call"
+            else ADAPTER_ABI
+        )
+        self.lifecycle_index = 13 if self.strategy_kind == "covered_call" else 11
         self.addresses = {
             role: Web3.to_checksum_address(row["contract_address"])
             for role, row in fund.contracts.items()
@@ -422,7 +469,9 @@ class Web3ReporterGateway:
             (component_id, *self._component_state(component_id, block)[2:4])
             for component_id in component_ids
         )
-        csp_reports, quorum = self._csp_reports(block, expected_hash, component_states)
+        strategy_reports, quorum = self._strategy_reports(
+            block, expected_hash, component_states
+        )
         reporter_count = self.accounting.functions.activeReporterCount().call(
             block_identifier=block
         )
@@ -491,7 +540,7 @@ class Web3ReporterGateway:
                 Web3.to_hex(strategy_hash) == self.fund.state.get("positions_hash")
             ),
             component_states=component_states,
-            csp_reports=tuple(csp_reports),
+            csp_reports=tuple(strategy_reports),
         )
 
     def _active_components(self, block: int) -> tuple[bytes, ...]:
@@ -531,26 +580,26 @@ class Web3ReporterGateway:
             block_identifier=block
         )
 
-    def _csp_reports(self, block, block_hash, states):
+    def _strategy_reports(self, block, block_hash, states):
         reports = []
-        expected_csp_id = bytes(
+        expected_strategy_id = bytes(
             Web3.solidity_keccak(
                 ["string", "address"],
-                ["STRATEGY", self.addresses["csp_adapter"]],
+                ["STRATEGY", self.addresses[self.adapter_role]],
             )
         )
         for component_id, nonce, state_hash in states:
             if component_id == IDLE_COMPONENT_ID:
                 continue
-            if component_id != expected_csp_id:
+            if component_id != expected_strategy_id:
                 raise RuntimeError("UNSUPPORTED_COMPONENT")
             valuator, version, _, _, active = self._component_state(component_id, block)
             if not active or int(version) != 1:
                 raise RuntimeError("UNSUPPORTED_COMPONENT")
-            if valuator.lower() != self.addresses["csp_valuator"].lower():
+            if valuator.lower() != self.addresses[self.valuator_role].lower():
                 raise RuntimeError("UNTRUSTED_COMPONENT_VALUATOR")
             reports.append(
-                self._value_csp(
+                self._value_strategy(
                     component_id=component_id,
                     nonce=nonce,
                     state_hash=state_hash,
@@ -560,21 +609,24 @@ class Web3ReporterGateway:
             )
         return reports, True
 
-    def _value_csp(self, *, component_id, nonce, state_hash, block, block_hash):
-        adapter = self.addresses["csp_adapter"]
-        adapter_contract = self.w3.eth.contract(address=adapter, abi=ADAPTER_ABI)
+    def _value_strategy(self, *, component_id, nonce, state_hash, block, block_hash):
+        adapter = self.addresses[self.adapter_role]
+        adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
         adapter_state = adapter_contract.functions.adapterState().call(
             block_identifier=block
         )
         observed_hash = adapter_contract.functions.positionStateHash().call(
             block_identifier=block
         )
-        if int(adapter_state[0]) != int(nonce) or bytes(observed_hash) != bytes(
-            state_hash
+        if not self._strategy_state_matches(
+            adapter_state=adapter_state,
+            observed_hash=observed_hash,
+            component_nonce=nonce,
+            component_hash=state_hash,
         ):
             raise RuntimeError("WRONG_POSITION_STATE_HASH")
         valuator = self.w3.eth.contract(
-            address=self.addresses["csp_valuator"], abi=VALUATOR_ABI
+            address=self.addresses[self.valuator_role], abi=VALUATOR_ABI
         )
         observations = self._valuation_observations(valuator, adapter, block)
         data = encode_valuation_data(observations)
@@ -603,11 +655,36 @@ class Web3ReporterGateway:
             data_hash=bytes(value[4]),
         )
 
+    @staticmethod
+    def _strategy_state_matches(
+        *,
+        adapter_state,
+        observed_hash,
+        component_nonce,
+        component_hash,
+    ) -> bool:
+        if int(adapter_state[0]) != int(component_nonce):
+            return False
+        if bytes(observed_hash) == bytes(component_hash):
+            return True
+
+        # A freshly onboarded strategy has not emitted a position transition yet,
+        # so FundAccounting intentionally keeps the component at its canonical
+        # nonce/hash zero state. The adapter's live positionStateHash is still a
+        # non-zero keccak over that empty state. Accept only this fully empty
+        # bootstrap case; any inventory or position state must first be synced by
+        # StrategyManager and match byte-for-byte.
+        return (
+            int(component_nonce) == 0
+            and bytes(component_hash) == bytes(32)
+            and all(int(value) == 0 for value in adapter_state[2:])
+        )
+
     def _valuation_observations(self, valuator, adapter: str, block: int):
         rows = self.repository.observations(
             self.fund.chain_id, self.fund.address, adapter.lower(), block
         )
-        adapter_contract = self.w3.eth.contract(address=adapter, abi=ADAPTER_ABI)
+        adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
         count = int(
             adapter_contract.functions.adapterState().call(block_identifier=block)[2]
         )
@@ -625,7 +702,7 @@ class Web3ReporterGateway:
                 .functions.expiry()
                 .call(block_identifier=block)
             )
-            if int(position[11]) == 1 and timestamp < expiry:
+            if int(position[self.lifecycle_index]) == 1 and timestamp < expiry:
                 open_positions.append((position_id, position))
 
         if self.sepolia_observer_private_keys and open_positions:
@@ -672,6 +749,19 @@ class Web3ReporterGateway:
             raise RuntimeError("FAIR_VALUE_OBSERVATIONS_WRONG_CHAIN")
         if self.fair_value_policy is None:
             raise RuntimeError("FAIR_VALUE_POLICY_REQUIRED")
+        if self.strategy_kind == "covered_call" and (
+            not isinstance(self.fair_value_policy, CoveredCallFairValuePolicy)
+            or self.fair_value_policy.implied_volatility_bps
+            != CALL_POLICY_IV_BPS
+            or self.fair_value_policy.implied_volatility_source
+            != CALL_POLICY_IV_SOURCE
+            or self.fair_value_policy.risk_free_rate_bps
+            != CALL_POLICY_RISK_FREE_RATE_BPS
+            or self.fair_value_policy.settlement_cost_bps
+            != CALL_POLICY_SETTLEMENT_COST_BPS
+        ):
+            raise RuntimeError("COVERED_CALL_FAIR_VALUE_POLICY_MISMATCH")
+        model_version = self.fair_value_policy.model_version
         if len(self.sepolia_observer_private_keys) != quorum:
             raise RuntimeError("FAIR_VALUE_OBSERVATION_QUORUM_MISMATCH")
         if int(valuator.functions.interfaceVersion().call(block_identifier=block)) != 1:
@@ -685,7 +775,7 @@ class Web3ReporterGateway:
             raise RuntimeError("FAIR_VALUE_POLICY_VERSION_MISMATCH")
         if (
             int(valuator.functions.requiredModelVersion().call(block_identifier=block))
-            != MODEL_VERSION
+            != model_version
         ):
             raise RuntimeError("FAIR_VALUE_MODEL_VERSION_MISMATCH")
         if (
@@ -712,6 +802,11 @@ class Web3ReporterGateway:
             raise RuntimeError("FAIR_VALUE_OBSERVATION_SIGNER_MISMATCH")
 
         max_window = self.max_observation_window(valuator.address, block)
+        if (
+            self.strategy_kind == "covered_call"
+            and max_window != COVERED_CALL_MAX_OBSERVATION_WINDOW_BLOCKS
+        ):
+            raise RuntimeError("COVERED_CALL_OBSERVATION_WINDOW_POLICY_MISMATCH")
         valid_until = block + max_window
         if valid_until < self.head_block():
             raise RuntimeError("FAIR_VALUE_OBSERVATION_WINDOW_EXPIRED")
@@ -723,13 +818,19 @@ class Web3ReporterGateway:
         )
         block_hash = Web3.to_hex(self.block_hash(block))
         ingestor = ObservationIngestor(
-            self, _IdempotentObservationStore(self.repository)
+            self,
+            IdempotentObservationStore(self.repository, self.strategy_kind),
         )
-        adapter_contract = self.w3.eth.contract(address=adapter, abi=ADAPTER_ABI)
+        adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
         accounting_asset = adapter_contract.functions.accountingAsset().call(
             block_identifier=block
         )
         underlying = adapter_contract.functions.weth().call(block_identifier=block)
+        strike_asset = (
+            adapter_contract.functions.usdc().call(block_identifier=block)
+            if self.strategy_kind == "covered_call"
+            else accounting_asset
+        )
         accounting_decimals = int(
             self.w3.eth.contract(address=accounting_asset, abi=ERC20_ABI)
             .functions.decimals()
@@ -742,38 +843,69 @@ class Web3ReporterGateway:
                 raise RuntimeError("FAIR_VALUE_OBSERVATION_NOT_INDEPENDENT")
             otoken = self.w3.eth.contract(address=position[0], abi=OTOKEN_ABI)
             if (
-                not bool(otoken.functions.isPut().call(block_identifier=block))
+                bool(otoken.functions.isPut().call(block_identifier=block))
+                != (self.strategy_kind == "csp")
                 or otoken.functions.underlying().call(block_identifier=block).lower()
                 != underlying.lower()
                 or otoken.functions.strikeAsset().call(block_identifier=block).lower()
-                != accounting_asset.lower()
+                != strike_asset.lower()
                 or otoken.functions.collateralAsset()
                 .call(block_identifier=block)
                 .lower()
                 != accounting_asset.lower()
             ):
-                raise RuntimeError("FAIR_VALUE_REQUIRES_EUROPEAN_PUT")
+                raise RuntimeError(
+                    "FAIR_VALUE_REQUIRES_EUROPEAN_CALL"
+                    if self.strategy_kind == "covered_call"
+                    else "FAIR_VALUE_REQUIRES_EUROPEAN_PUT"
+                )
             strike = int(otoken.functions.strikePrice().call(block_identifier=block))
             expiry = int(otoken.functions.expiry().call(block_identifier=block))
             collateral = int(position[4])
-            mark = mark_european_put(
-                EuropeanPutInputs(
-                    spot_price_8=spot["price_8"],
-                    strike_price_8=strike,
-                    option_amount_8=int(position[3]),
-                    expiry_timestamp=expiry,
-                    snapshot_timestamp=snapshot_timestamp,
-                    collateral_assets=collateral,
-                    accounting_asset_decimals=accounting_decimals,
-                ),
-                self.fair_value_policy,
-            )
-            observed_liability = mark.fair_liability_assets
-            base_exit_cost = mark.settlement_cost_assets
+            if self.strategy_kind == "covered_call":
+                if not isinstance(
+                    self.fair_value_policy, CoveredCallFairValuePolicy
+                ) or accounting_decimals != 18:
+                    raise RuntimeError("COVERED_CALL_FAIR_VALUE_POLICY_MISMATCH")
+                mark = mark_european_call(
+                    EuropeanCallInputs(
+                        spot_price_8=spot["price_8"],
+                        strike_price_8=strike,
+                        option_amount_8=int(position[3]),
+                        expiry_timestamp=expiry,
+                        snapshot_timestamp=snapshot_timestamp,
+                        collateral_weth=collateral,
+                    ),
+                    self.fair_value_policy,
+                )
+                observed_liability = mark.fair_liability_weth
+                stress_liability = mark.stress_liability_weth
+                base_exit_cost = mark.settlement_cost_weth
+                option_price_8 = mark.option_price_usd_8
+            else:
+                if not isinstance(self.fair_value_policy, FairValuePolicy):
+                    raise RuntimeError("CSP_FAIR_VALUE_POLICY_MISMATCH")
+                mark = mark_european_put(
+                    EuropeanPutInputs(
+                        spot_price_8=spot["price_8"],
+                        strike_price_8=strike,
+                        option_amount_8=int(position[3]),
+                        expiry_timestamp=expiry,
+                        snapshot_timestamp=snapshot_timestamp,
+                        collateral_assets=collateral,
+                        accounting_asset_decimals=accounting_decimals,
+                    ),
+                    self.fair_value_policy,
+                )
+                observed_liability = mark.fair_liability_assets
+                stress_liability = mark.stress_liability_assets
+                base_exit_cost = mark.settlement_cost_assets
+                option_price_8 = mark.option_price_8
             self.repository.upsert_fair_value_mark(
                 {
                     "chain_id": self.fund.chain_id,
                     "fund_address": self.fund.address.lower(),
+                    "strategy_kind": self.strategy_kind,
                     "valuator_address": valuator.address.lower(),
                     "adapter_address": adapter.lower(),
                     "position_id": str(position_id),
@@ -782,6 +914,16 @@ class Web3ReporterGateway:
                     "otoken_address": position[0].lower(),
                     "model_name": self.fair_value_policy.model_name,
                     "model_version": self.fair_value_policy.model_version,
+                    "policy_reference": (
+                        CALL_POLICY_REFERENCE
+                        if self.strategy_kind == "covered_call"
+                        else None
+                    ),
+                    "policy_sha256": (
+                        CALL_POLICY_SHA256
+                        if self.strategy_kind == "covered_call"
+                        else None
+                    ),
                     "methodology": METHODOLOGY,
                     "source_quality": SOURCE_QUALITY,
                     "iv_bps": self.fair_value_policy.implied_volatility_bps,
@@ -795,9 +937,9 @@ class Web3ReporterGateway:
                     "expiry_timestamp": expiry,
                     "collateral_assets": str(collateral),
                     "fair_liability_assets": str(observed_liability),
-                    "stress_liability_assets": str(mark.stress_liability_assets),
+                    "stress_liability_assets": str(stress_liability),
                     "settlement_cost_assets": str(base_exit_cost),
-                    "option_price_8": str(mark.option_price_8),
+                    "option_price_8": str(option_price_8),
                 }
             )
             position_rows = [
@@ -811,7 +953,7 @@ class Web3ReporterGateway:
                     int(row["liability"]) != observed_liability
                     or int(row["base_exit_cost"]) != base_exit_cost
                     or observation_model_version(int(row["observation_nonce"]))
-                    != MODEL_VERSION
+                    != model_version
                 ):
                     raise RuntimeError("FAIR_VALUE_OBSERVATION_POLICY_MISMATCH")
                 existing_signers.add(row["observer_address"])
@@ -819,16 +961,17 @@ class Web3ReporterGateway:
             for observer, private_key in signers:
                 if observer in existing_signers:
                     continue
+                issue = "B1N-361" if self.strategy_kind == "covered_call" else "B1N-366"
                 sequence = int.from_bytes(
                     Web3.keccak(
                         text=(
-                            f"B1N-366:{self.fair_value_policy.model_name}:"
+                            f"{issue}:{self.fair_value_policy.model_name}:"
                             f"{observer}:{position_id}:{block}:{valid_until}"
                         )
                     ),
                     "big",
                 ) & (2**192 - 1)
-                nonce = versioned_observation_nonce(sequence)
+                nonce = versioned_observation_nonce(sequence, model_version)
                 unsigned = OptionObservation(
                     chain_id=self.fund.chain_id,
                     fund_address=self.fund.address,
@@ -865,6 +1008,12 @@ class Web3ReporterGateway:
         max_staleness = int(
             valuator.functions.maxSpotStaleness().call(block_identifier=block)
         )
+        if self.strategy_kind == "covered_call" and (
+            Web3.to_checksum_address(feed_address) != COVERED_CALL_SPOT_FEED
+            or expected_decimals != COVERED_CALL_SPOT_FEED_DECIMALS
+            or max_staleness != COVERED_CALL_MAX_SPOT_STALENESS_SECONDS
+        ):
+            raise RuntimeError("COVERED_CALL_SPOT_POLICY_MISMATCH")
         feed = self.w3.eth.contract(address=feed_address, abi=CHAINLINK_SPOT_ABI)
         observed_decimals = int(feed.functions.decimals().call(block_identifier=block))
         if observed_decimals != expected_decimals:
@@ -1037,9 +1186,7 @@ class Web3ReporterGateway:
         transaction = {"from": account.address}
         gas = function.estimate_gas(transaction, block_identifier="pending")
         pending_block = self.w3.eth.get_block("pending")
-        base_fee = int(
-            pending_block.get("baseFeePerGas") or self.w3.eth.gas_price
-        )
+        base_fee = int(pending_block.get("baseFeePerGas") or self.w3.eth.gas_price)
         try:
             priority_fee = int(self.w3.eth.max_priority_fee)
         except Exception:
@@ -1156,7 +1303,8 @@ class Web3ReporterGateway:
 
     def market_maker(self, adapter: str, position_id: int, block: int) -> str:
         contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(adapter), abi=ADAPTER_ABI
+            address=Web3.to_checksum_address(adapter),
+            abi=getattr(self, "adapter_abi", ADAPTER_ABI),
         )
         return contract.functions.position(position_id).call(block_identifier=block)[1]
 
@@ -1169,12 +1317,18 @@ class Web3ReporterGateway:
         )
 
 
-class _IdempotentObservationStore:
-    def __init__(self, repository: SupabaseNavRepository):
+class IdempotentObservationStore:
+    def __init__(self, repository: SupabaseNavRepository, strategy_kind: str):
         self.repository = repository
+        self.strategy_kind = strategy_kind
 
     def insert_verified(self, row: dict[str, Any]) -> None:
-        self.repository.insert_verified_idempotent(row)
+        payload = {**row, "strategy_kind": self.strategy_kind}
+        insert = getattr(self.repository, "insert_verified_idempotent", None)
+        if insert is None:
+            self.repository.insert_verified(payload)
+        else:
+            insert(payload)
 
 
 class BlockedReporter:
@@ -1209,11 +1363,15 @@ class RuntimeReporter:
 
 
 class ReporterFleet:
-    def __init__(self, reporters):
-        self.reporters = reporters
+    def __init__(self, reporter_factories):
+        self.reporter_factories = reporter_factories
 
     def run_once(self) -> ReportRun:
-        results = [reporter.run_once() for reporter in self.reporters]
+        # A report can wait across several testnet blocks for activation and
+        # submission. Build each fund reporter immediately before its own run so
+        # later funds do not inherit the state snapshot loaded for an earlier
+        # fund.
+        results = [factory().run_once() for factory in self.reporter_factories]
         return next(
             (result for result in results if result.status != "confirmed"), results[-1]
         )
@@ -1224,24 +1382,37 @@ def build_reporter():
     funds = TrustedRegistryLoader(repository).load()
     if not funds:
         return UndeployedReporter(repository)
-    reporters = [_build_fund_reporter(repository, fund) for fund in funds]
-    return reporters[0] if len(reporters) == 1 else ReporterFleet(reporters)
+    if len(funds) == 1:
+        return _build_fund_reporter(repository, funds[0])
+    registries = [fund.registry for fund in funds]
+    return ReporterFleet(
+        [
+            lambda registry=registry: _build_fund_reporter(
+                repository,
+                TrustedRegistryLoader(repository).load_one(registry),
+            )
+            for registry in registries
+        ]
+    )
 
 
 def _build_fund_reporter(repository, fund):
     if fund.trust_reason:
         return BlockedReporter(repository, fund, fund.trust_reason)
     w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
-    observer_keys = (
-        get_fund_csp_sepolia_observer_private_keys()
-        if settings.fund_csp_sepolia_fair_value_observations_enabled
-        else ()
-    )
-    fair_value_policy = (
-        get_fund_csp_sepolia_fair_value_policy()
-        if settings.fund_csp_sepolia_fair_value_observations_enabled
-        else None
-    )
+    is_csp = fund.registry.get("strategy_kind", "csp") == "csp"
+    if is_csp and settings.fund_csp_sepolia_fair_value_observations_enabled:
+        observer_keys = get_fund_csp_sepolia_observer_private_keys()
+        fair_value_policy = get_fund_csp_sepolia_fair_value_policy()
+    elif (
+        not is_csp
+        and settings.fund_covered_call_sepolia_fair_value_observations_enabled
+    ):
+        observer_keys = get_fund_covered_call_sepolia_observer_private_keys()
+        fair_value_policy = get_fund_covered_call_sepolia_fair_value_policy()
+    else:
+        observer_keys = ()
+        fair_value_policy = None
     gateway = Web3ReporterGateway(
         w3,
         fund,

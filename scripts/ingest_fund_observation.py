@@ -1,4 +1,4 @@
-"""Validate and persist a signed CSP option observation."""
+"""Validate and persist a signed option-fund observation."""
 
 import argparse
 import json

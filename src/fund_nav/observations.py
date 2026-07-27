@@ -1,4 +1,4 @@
-"""Verified storage boundary for signed CSP option observations."""
+"""Verified storage boundary for signed option-fund observations."""
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone

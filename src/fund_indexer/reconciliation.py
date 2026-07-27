@@ -16,6 +16,15 @@ class PositionLedger:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionMetadata:
+    adapter_address: str
+    position_id: int
+    strike_price_8: int
+    expiry_timestamp: int
+    is_put: bool
+
+
+@dataclass(frozen=True, slots=True)
 class OnchainFundSnapshot:
     chain_id: int
     fund_address: str
@@ -28,6 +37,9 @@ class OnchainFundSnapshot:
     adapter_usdc: int
     adapter_weth: int
     position_ledgers: tuple[PositionLedger, ...]
+    position_metadata: tuple[PositionMetadata, ...] = ()
+    strategy_kind: str = "csp"
+    normalization_slippage_bps: int = 0
     nav_positions_hash: str = "0x" + "00" * 32
     strategy_positions_hash: str = "0x" + "00" * 32
     adapter_nonces: tuple[tuple[str, int], ...] = ()
@@ -61,10 +73,18 @@ def reconcile(
 
     accounting_asset = projection.fund.get("accounting_asset")
     weth = projection.fund.get("weth")
-    projected_usdc = projection.inventory.get(
-        (accounting_asset, "strategy_accounted"), 0
-    )
-    projected_weth = projection.inventory.get((weth, "assigned"), 0)
+    strategy_kind = projection.fund.get("strategy_kind", "csp")
+    if strategy_kind == "covered_call":
+        quote_asset = projection.fund.get("quote_asset")
+        projected_usdc = projection.inventory.get((quote_asset, "transient_usdc"), 0)
+        projected_weth = projection.inventory.get(
+            (accounting_asset, "strategy_accounted"), 0
+        )
+    else:
+        projected_usdc = projection.inventory.get(
+            (accounting_asset, "strategy_accounted"), 0
+        )
+        projected_weth = projection.inventory.get((weth, "assigned"), 0)
     checks = {
         "share_supply": _check(
             int(projection.fund["share_supply"]), snapshot.share_supply
@@ -101,6 +121,9 @@ def reconcile(
             snapshot.last_report_nonce,
         ),
         "v1_ledgers": _reconcile_positions(projection, snapshot.position_ledgers),
+        "position_series": _reconcile_position_metadata(
+            projection, snapshot.position_metadata
+        ),
     }
     return {
         "chain_id": snapshot.chain_id,
@@ -165,6 +188,19 @@ def _position_failure(adapter: str, position_id: int, reason: str) -> dict[str, 
         "position_id": position_id,
         "reason": reason,
     }
+
+
+def _reconcile_position_metadata(
+    projection: FundProjection,
+    metadata: tuple[PositionMetadata, ...],
+) -> dict[str, Any]:
+    expected_is_put = projection.fund.get("strategy_kind", "csp") == "csp"
+    failures = [
+        _position_failure(item.adapter_address, item.position_id, "option_side")
+        for item in metadata
+        if item.is_put is not expected_is_put
+    ]
+    return {"passed": not failures, "failures": failures}
 
 
 def _reconcile_adapter_nonces(

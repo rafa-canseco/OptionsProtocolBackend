@@ -1,4 +1,6 @@
-"""Product models for tokenized CSP funds."""
+"""Product models for tokenized option funds."""
+
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
@@ -21,10 +23,12 @@ class ActionAvailability(FundModel):
 
 class FundRegistryItem(FundModel):
     fund_key: str
+    strategy_kind: Literal["csp", "covered_call"] = "csp"
     chain_id: int
     fund_address: str
     share_token: TokenMetadata
     accounting_asset: TokenMetadata
+    quote_asset: TokenMetadata | None = None
     deployment_status: str
 
 
@@ -44,6 +48,10 @@ class FundComposition(FundModel):
     assigned_weth_value_assets: str = "0"
     settlement_receivable_assets: str = "0"
     settlement_cost_assets: str = "0"
+    transient_usdc: str = "0"
+    transient_usdc_value_assets: str = "0"
+    normalization_cost_assets: str = "0"
+    option_exit_cost_assets: str = "0"
 
 
 class StressNav(FundModel):
@@ -87,10 +95,21 @@ class CspPositionSummary(FundModel):
     option_amount_8: str
     collateral_assets: str
     premium_earned_assets: str
+    called_away_usdc: str = "0"
+    fallback_weth_recovered_assets: str = "0"
+    mm_weth_payout_assets: str = "0"
+
+
+class StrategyOperationSummary(FundModel):
+    operation_type: str
+    position_id: int | None = None
+    block_number: int | None = None
 
 
 class FundStrategySnapshot(FundModel):
+    strategy_kind: Literal["csp", "covered_call"] = "csp"
     latest_position: CspPositionSummary | None = None
+    latest_operation: StrategyOperationSummary | None = None
     total_premium_collected_assets: str = "0"
     next_open_after: int | None = None
     next_open_condition: str

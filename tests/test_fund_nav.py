@@ -381,6 +381,48 @@ def test_refreshes_consumed_margin_and_submits_at_activation() -> None:
     assert gateway.submissions == 1
 
 
+def test_stale_projected_window_never_builds_and_fresh_retry_submits() -> None:
+    store = Store()
+    stale_snapshot = snapshot(
+        head_block=101,
+        max_snapshot_age=50,
+    )
+    stale, gateway = reporter(stale_snapshot, store=store)
+    gateway.current_head = 140
+
+    run = stale.run_once()
+
+    assert run.status == "blocked"
+    assert run.reason_code == "STALE_SNAPSHOT"
+    assert gateway.simulations == gateway.builds == gateway.submissions == 0
+
+    fresh_snapshot = snapshot(
+        snapshot_block=130,
+        head_block=140,
+        max_snapshot_age=50,
+    )
+    recovered, gateway = reporter(fresh_snapshot, store=store)
+    gateway.current_head = 140
+
+    assert recovered.run_once().status == "confirmed"
+    assert gateway.builds == gateway.submissions == 1
+
+
+def test_snapshot_that_expires_during_build_is_blocked_not_failed() -> None:
+    service, gateway = reporter(snapshot(max_snapshot_age=20))
+
+    def expire_before_build(**_kwargs):
+        gateway.current_head = 121
+        raise RuntimeError("estimate reverted")
+
+    gateway.build_transaction = expire_before_build
+    run = service.run_once()
+
+    assert run.status == "blocked"
+    assert run.reason_code == "STALE_SNAPSHOT"
+    assert gateway.submissions == 0
+
+
 def test_activation_wait_timeout_never_sends() -> None:
     service, gateway = reporter()
     gateway.activation_wait_result = False
