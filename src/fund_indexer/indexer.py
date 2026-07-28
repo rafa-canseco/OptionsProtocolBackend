@@ -1,9 +1,11 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from supabase import Client, create_client
 from web3 import Web3
 from web3._utils.events import get_event_data
 
@@ -82,8 +84,8 @@ class ConfirmedHead:
     block_hash: str
 
 
-def _load_registries() -> list[FundRegistry]:
-    client = get_client()
+def _load_registries(client: Client | None = None) -> list[FundRegistry]:
+    client = client or get_client()
     rows = client.table("v2_fund_registry").select("*").eq("enabled", True).execute()
     registries = []
     for row in rows.data or []:
@@ -153,10 +155,10 @@ def _validate_binding(binding: ContractBinding) -> None:
         raise ValueError(f"Proxy role {binding.role} requires implementation_address")
 
 
-def _checkpoint(registry: FundRegistry) -> dict[str, Any]:
+def _checkpoint(registry: FundRegistry, client: Client | None = None) -> dict[str, Any]:
+    client = client or get_client()
     result = (
-        get_client()
-        .table("v2_indexer_checkpoints")
+        client.table("v2_indexer_checkpoints")
         .select("*")
         .eq("chain_id", registry.chain_id)
         .eq("fund_address", registry.fund_address)
@@ -235,13 +237,15 @@ def _json_values(value: Any) -> Any:
     return value
 
 
-def _load_events(registry: FundRegistry) -> list[FundEvent]:
+def _load_events(
+    registry: FundRegistry, client: Client | None = None
+) -> list[FundEvent]:
+    client = client or get_client()
     rows = []
     offset = 0
     while True:
         result = (
-            get_client()
-            .table("v2_chain_events")
+            client.table("v2_chain_events")
             .select("*")
             .eq("chain_id", registry.chain_id)
             .eq("fund_address", registry.fund_address)
@@ -314,8 +318,9 @@ def _persist_window(
     to_block: int,
     block_hash: str,
     new_events: list[FundEvent],
+    client: Client | None = None,
 ) -> None:
-    known = {event.identity: event for event in _load_events(registry)}
+    known = {event.identity: event for event in _load_events(registry, client)}
     known.update({event.identity: event for event in new_events})
     canonical = sorted(
         known.values(),
@@ -416,7 +421,8 @@ def _persist_window(
             projection["fund_state"][0].update(snapshot_state)
             projection["reconciliations"] = [reconciliation]
     _verify_terminal_hash(w3, to_block, block_hash)
-    get_client().rpc(
+    client = client or get_client()
+    client.rpc(
         "v2_ingest_fund_window",
         {
             "p_chain_id": registry.chain_id,
@@ -488,8 +494,13 @@ def _missing_reconciliation_roles(
     return sorted(_required_reconciliation_roles(registry.strategy_kind) - active_roles)
 
 
-def _rewind(registry: FundRegistry, block_number: int) -> None:
-    get_client().rpc(
+def _rewind(
+    registry: FundRegistry,
+    block_number: int,
+    client: Client | None = None,
+) -> None:
+    client = client or get_client()
+    client.rpc(
         "v2_rewind_fund_indexer",
         {
             "p_chain_id": registry.chain_id,
@@ -593,8 +604,13 @@ def _apply_position_metadata(
 
 
 def index_registry_once(
-    w3: Web3, registry: FundRegistry, confirmed_head: ConfirmedHead
+    w3: Web3,
+    registry: FundRegistry,
+    confirmed_head: ConfirmedHead,
+    *,
+    client: Client | None = None,
 ) -> int:
+    client = client or get_client()
     if not registry.contracts:
         raise ValueError(f"Fund {registry.fund_address} has no indexed contracts")
     _validate_chain(w3, registry)
@@ -603,13 +619,13 @@ def index_registry_once(
             "Confirmed head chain mismatch: "
             f"head={confirmed_head.chain_id}, registry={registry.chain_id}"
         )
-    checkpoint = _checkpoint(registry)
+    checkpoint = _checkpoint(registry, client)
     next_block = int(checkpoint["next_block"])
     if checkpoint.get("last_block_hash") and next_block > registry.start_block:
         parent = w3.eth.get_block(next_block - 1)
         if Web3.to_hex(parent["hash"]) != checkpoint["last_block_hash"]:
             rewind = registry.start_block
-            _rewind(registry, rewind)
+            _rewind(registry, rewind, client)
             logger.warning(
                 "Reorg detected for %s; rewound to %d", registry.fund_address, rewind
             )
@@ -638,7 +654,15 @@ def index_registry_once(
             window = max(MIN_WINDOW, window // 2)
             logger.warning("Reducing fund log window after RPC/decode error: %s", error)
     _validate_proxy_implementations(w3, registry, to_block)
-    _persist_window(w3, registry, next_block, to_block, block_hash, events)
+    _persist_window(
+        w3,
+        registry,
+        next_block,
+        to_block,
+        block_hash,
+        events,
+        client,
+    )
     return len(events)
 
 
@@ -746,8 +770,11 @@ def _capture_confirmed_head(w3: Web3, chain_id: int) -> ConfirmedHead:
     )
 
 
-def _store_confirmed_head(confirmed_head: ConfirmedHead) -> None:
-    get_client().table("v2_confirmed_chain_heads").upsert(
+def _store_confirmed_head(
+    confirmed_head: ConfirmedHead, client: Client | None = None
+) -> None:
+    client = client or get_client()
+    client.table("v2_confirmed_chain_heads").upsert(
         {
             "chain_id": confirmed_head.chain_id,
             "block_number": confirmed_head.block_number,
@@ -758,19 +785,107 @@ def _store_confirmed_head(confirmed_head: ConfirmedHead) -> None:
     ).execute()
 
 
-def _index_cycle(w3: Web3, registries: list[FundRegistry]) -> None:
+def _index_cycle(
+    w3: Web3,
+    registries: list[FundRegistry],
+    client: Client | None = None,
+) -> None:
+    client = client or get_client()
     confirmed_heads: dict[int, ConfirmedHead] = {}
     for registry in registries:
         confirmed_head = confirmed_heads.get(registry.chain_id)
         if confirmed_head is None:
             confirmed_head = _capture_confirmed_head(w3, registry.chain_id)
-            _store_confirmed_head(confirmed_head)
+            _store_confirmed_head(confirmed_head, client)
             confirmed_heads[registry.chain_id] = confirmed_head
-        index_registry_once(w3, registry, confirmed_head)
+        index_registry_once(w3, registry, confirmed_head, client=client)
 
 
 def _index_registered_funds(w3: Web3) -> None:
     _index_cycle(w3, _load_registries())
+
+
+def _create_worker_client() -> Client:
+    return create_client(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+    )
+
+
+def _close_worker_client(client: Client) -> None:
+    client.postgrest.aclose()
+
+
+def _index_registry_identity_once(
+    w3: Web3,
+    client: Client,
+    chain_id: int,
+    fund_address: str,
+    store_confirmed_head: bool,
+) -> int:
+    registry = next(
+        (
+            item
+            for item in _load_registries(client)
+            if item.chain_id == chain_id and item.fund_address == fund_address
+        ),
+        None,
+    )
+    if registry is None:
+        return 0
+    confirmed_head = _capture_confirmed_head(w3, chain_id)
+    if store_confirmed_head:
+        _store_confirmed_head(confirmed_head, client)
+    return index_registry_once(
+        w3,
+        registry,
+        confirmed_head,
+        client=client,
+    )
+
+
+async def _run_registry_worker(
+    chain_id: int,
+    fund_address: str,
+    rpc_url: str,
+    *,
+    store_confirmed_head: bool,
+) -> None:
+    client = _create_worker_client()
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix=f"fund-index-{fund_address[-6:]}",
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            try:
+                await loop.run_in_executor(
+                    executor,
+                    _index_registry_identity_once,
+                    w3,
+                    client,
+                    chain_id,
+                    fund_address,
+                    store_confirmed_head,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception(
+                    "Tokenized fund indexing failed for %s:%s",
+                    chain_id,
+                    fund_address,
+                )
+            await asyncio.sleep(settings.tokenized_fund_indexer_poll_interval_seconds)
+    finally:
+        await asyncio.to_thread(
+            executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
+        _close_worker_client(client)
 
 
 async def run() -> None:
@@ -780,12 +895,37 @@ async def run() -> None:
             "TOKENIZED_FUND_RPC_URL or RPC_URL is required for the "
             "tokenized fund indexer"
         )
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
-    while True:
-        try:
-            await asyncio.to_thread(_index_registered_funds, w3)
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("Tokenized fund indexing failed")
-        await asyncio.sleep(settings.tokenized_fund_indexer_poll_interval_seconds)
+    bootstrap_client = _create_worker_client()
+    try:
+        registries = await asyncio.to_thread(
+            _load_registries,
+            bootstrap_client,
+        )
+    finally:
+        _close_worker_client(bootstrap_client)
+    if not registries:
+        raise RuntimeError("No enabled tokenized funds are registered")
+
+    head_chains: set[int] = set()
+    tasks = []
+    for registry in registries:
+        store_confirmed_head = registry.chain_id not in head_chains
+        head_chains.add(registry.chain_id)
+        tasks.append(
+            asyncio.create_task(
+                _run_registry_worker(
+                    registry.chain_id,
+                    registry.fund_address,
+                    rpc_url,
+                    store_confirmed_head=store_confirmed_head,
+                )
+            )
+        )
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        return
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

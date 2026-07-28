@@ -1,4 +1,6 @@
 import asyncio
+import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -143,7 +145,7 @@ def test_cycle_reuses_one_confirmed_head_when_rpc_advances(
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 2_995, "last_block_hash": None},
+        lambda *_: {"next_block": 2_995, "last_block_hash": None},
     )
     monkeypatch.setattr(indexer, "_fetch_window", lambda *_: [])
     projected_terminals = []
@@ -164,25 +166,129 @@ def test_cycle_reuses_one_confirmed_head_when_rpc_advances(
     ]
 
 
-def test_run_offloads_blocking_index_cycle(monkeypatch) -> None:
-    calls = []
+class ClosableWorkerClient:
+    def __init__(self):
+        self.postgrest = self
+        self.closed = False
 
-    async def fake_to_thread(function, *args):
-        calls.append((function, args))
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(indexer.settings, "rpc_url", "https://rpc.example")
-    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
-
-    asyncio.run(indexer.run())
-
-    assert len(calls) == 1
-    assert calls[0][0] is indexer._index_registered_funds
-    assert len(calls[0][1]) == 1
+    def aclose(self):
+        self.closed = True
 
 
-def test_run_constructs_provider_from_selected_fund_rpc(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
+    monkeypatch, registry
+) -> None:
+    covered_call = replace(
+        registry,
+        fund_address="0xf000000000000000000000000000000000000099",
+        strategy_kind="covered_call",
+    )
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    covered_call_ran = asyncio.Event()
+    worker_clients = []
+    cycle_clients = {}
+    loop = asyncio.get_running_loop()
+
+    def create_client():
+        client = ClosableWorkerClient()
+        worker_clients.append(client)
+        return client
+
+    def index_cycle(_w3, client, _chain_id, fund_address, _store_head):
+        cycle_clients[fund_address] = client
+        if fund_address == registry.fund_address:
+            slow_started.set()
+            release_slow.wait(timeout=2)
+            return
+        loop.call_soon_threadsafe(covered_call_ran.set)
+
+    monkeypatch.setattr(
+        indexer,
+        "get_tokenized_fund_rpc_url",
+        lambda: "https://fund-rpc.example",
+    )
+    monkeypatch.setattr(indexer, "_create_worker_client", create_client)
+    monkeypatch.setattr(
+        indexer,
+        "_load_registries",
+        lambda _client=None: [registry, covered_call],
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_index_registry_identity_once",
+        index_cycle,
+    )
+
+    task = asyncio.create_task(indexer.run())
+    await asyncio.wait_for(covered_call_ran.wait(), timeout=1)
+    assert slow_started.is_set()
+    release_slow.set()
+    task.cancel()
+    await task
+
+    assert len(worker_clients) == 3
+    assert all(client.closed for client in worker_clients)
+    assert (
+        cycle_clients[registry.fund_address]
+        is not cycle_clients[covered_call.fund_address]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fund_worker_error_does_not_stop_peer(monkeypatch, registry) -> None:
+    covered_call = replace(
+        registry,
+        fund_address="0xf000000000000000000000000000000000000099",
+        strategy_kind="covered_call",
+    )
+    failed_fund_ran = threading.Event()
+    covered_call_ran = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def index_cycle(_w3, _client, _chain_id, fund_address, _store_head):
+        if fund_address == registry.fund_address:
+            failed_fund_ran.set()
+            raise RuntimeError("temporary CSP indexing failure")
+        loop.call_soon_threadsafe(covered_call_ran.set)
+
+    monkeypatch.setattr(
+        indexer,
+        "get_tokenized_fund_rpc_url",
+        lambda: "https://fund-rpc.example",
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_create_worker_client",
+        ClosableWorkerClient,
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_load_registries",
+        lambda _client=None: [registry, covered_call],
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_index_registry_identity_once",
+        index_cycle,
+    )
+
+    task = asyncio.create_task(indexer.run())
+    await asyncio.wait_for(covered_call_ran.wait(), timeout=1)
+    task.cancel()
+    await task
+
+    assert failed_fund_ran.is_set()
+
+
+@pytest.mark.asyncio
+async def test_workers_construct_provider_from_selected_fund_rpc(
+    monkeypatch, registry
+) -> None:
     provider_urls = []
+    cycle_ran = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
     class FakeWeb3:
         @staticmethod
@@ -193,10 +299,9 @@ def test_run_constructs_provider_from_selected_fund_rpc(monkeypatch) -> None:
         def __init__(self, provider):
             self.provider = provider
 
-    async def fake_to_thread(function, w3):
-        assert function is indexer._index_registered_funds
+    def index_cycle(w3, *_args):
         assert w3.provider == ("provider", "https://fund-rpc.example")
-        raise asyncio.CancelledError
+        loop.call_soon_threadsafe(cycle_ran.set)
 
     monkeypatch.setattr(
         indexer,
@@ -204,46 +309,40 @@ def test_run_constructs_provider_from_selected_fund_rpc(monkeypatch) -> None:
         lambda: "https://fund-rpc.example",
     )
     monkeypatch.setattr(indexer, "Web3", FakeWeb3)
-    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(
+        indexer,
+        "_create_worker_client",
+        ClosableWorkerClient,
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_load_registries",
+        lambda _client=None: [registry],
+    )
+    monkeypatch.setattr(
+        indexer,
+        "_index_registry_identity_once",
+        index_cycle,
+    )
 
-    asyncio.run(indexer.run())
+    task = asyncio.create_task(indexer.run())
+    await asyncio.wait_for(cycle_ran.wait(), timeout=1)
+    task.cancel()
+    await task
 
     assert provider_urls == ["https://fund-rpc.example"]
-
-
-def test_run_uses_dedicated_fund_indexer_poll_interval(monkeypatch) -> None:
-    sleeps = []
-
-    async def fake_to_thread(_function, *_args):
-        return None
-
-    async def fake_sleep(seconds):
-        sleeps.append(seconds)
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(indexer.settings, "rpc_url", "https://rpc.example")
-    monkeypatch.setattr(
-        indexer.settings,
-        "tokenized_fund_indexer_poll_interval_seconds",
-        5,
-    )
-    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
-    monkeypatch.setattr(indexer.asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(indexer.run())
-
-    assert sleeps == [5]
 
 
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 200, "last_block_hash": "0xdead"},
+        lambda *_: {"next_block": 200, "last_block_hash": "0xdead"},
     )
     rewinds = []
-    monkeypatch.setattr(indexer, "_rewind", lambda _, block: rewinds.append(block))
+    monkeypatch.setattr(
+        indexer, "_rewind", lambda _, block, *_rest: rewinds.append(block)
+    )
     monkeypatch.setattr(
         indexer,
         "_fetch_window",
@@ -260,7 +359,7 @@ def test_rpc_range_error_reduces_window(monkeypatch, registry) -> None:
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 100, "last_block_hash": None},
+        lambda *_: {"next_block": 100, "last_block_hash": None},
     )
     calls = []
 
@@ -300,7 +399,7 @@ def test_window_stops_before_next_contract_binding(monkeypatch, registry) -> Non
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 100, "last_block_hash": None},
+        lambda *_: {"next_block": 100, "last_block_hash": None},
     )
     fetched = []
     monkeypatch.setattr(
@@ -338,7 +437,7 @@ def test_window_stops_when_binding_expires_without_successor(
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 100, "last_block_hash": None},
+        lambda *_: {"next_block": 100, "last_block_hash": None},
     )
     fetched = []
     monkeypatch.setattr(
@@ -369,7 +468,7 @@ def test_proxy_mismatch_at_terminal_or_new_binding_stops_ingestion(
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": next_block, "last_block_hash": None},
+        lambda *_: {"next_block": next_block, "last_block_hash": None},
     )
     fetched = []
     monkeypatch.setattr(
@@ -409,7 +508,7 @@ def test_binding_valid_to_is_inclusive(registry) -> None:
 
 def test_persistence_failure_does_not_run_another_window(monkeypatch, registry) -> None:
     checkpoint = {"next_block": 100, "last_block_hash": None}
-    monkeypatch.setattr(indexer, "_checkpoint", lambda _: checkpoint)
+    monkeypatch.setattr(indexer, "_checkpoint", lambda *_: checkpoint)
     monkeypatch.setattr(indexer, "_fetch_window", lambda *_: [])
     monkeypatch.setattr(
         indexer,
@@ -425,7 +524,7 @@ def test_persistence_failure_does_not_run_another_window(monkeypatch, registry) 
 
 def test_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(
-        indexer, "_checkpoint", lambda _: pytest.fail("checkpoint must not be read")
+        indexer, "_checkpoint", lambda *_: pytest.fail("checkpoint must not be read")
     )
     w3 = FakeWeb3()
     w3.eth.chain_id = 1
@@ -437,7 +536,7 @@ def test_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) -> None:
 def test_settings_chain_mismatch_fails_before_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(indexer.settings, "chain_id", 8453)
     monkeypatch.setattr(
-        indexer, "_checkpoint", lambda _: pytest.fail("checkpoint must not be read")
+        indexer, "_checkpoint", lambda *_: pytest.fail("checkpoint must not be read")
     )
 
     with pytest.raises(ValueError, match="chain mismatch"):
@@ -462,7 +561,7 @@ def test_proxy_slot_mismatch_stops_before_log_fetch(monkeypatch, registry) -> No
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 100, "last_block_hash": None},
+        lambda *_: {"next_block": 100, "last_block_hash": None},
     )
     w3 = FakeWeb3()
     w3.eth.get_storage_at = lambda *_args, **_kwargs: bytes.fromhex("00" * 32)
@@ -484,7 +583,7 @@ def test_missing_registered_bytecode_stops_before_log_fetch(
     monkeypatch.setattr(
         indexer,
         "_checkpoint",
-        lambda _: {"next_block": 100, "last_block_hash": None},
+        lambda *_: {"next_block": 100, "last_block_hash": None},
     )
     monkeypatch.setattr(
         indexer, "_fetch_window", lambda *_: pytest.fail("logs must not be fetched")
@@ -520,7 +619,7 @@ def test_unknown_upgraded_implementation_is_rejected(registry) -> None:
 
 
 def test_terminal_hash_change_prevents_rpc_persistence(monkeypatch, registry) -> None:
-    monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [])
     monkeypatch.setattr(
         indexer, "get_client", lambda: pytest.fail("database RPC must not run")
     )
@@ -556,7 +655,7 @@ def test_persist_window_projects_nav_at_terminal_block(monkeypatch, registry) ->
         projected_blocks.append(kwargs["to_block"])
         return None
 
-    monkeypatch.setattr(indexer, "_load_events", lambda _: [event])
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [event])
     monkeypatch.setattr(indexer, "project_events", capture_projection)
     monkeypatch.setattr(indexer, "get_client", lambda: CapturingRpcClient())
     block_hash = f"0x{115:064x}"
@@ -586,7 +685,7 @@ def test_staggered_activation_defers_reconciliation_and_advances_state(
     client = CapturingRpcClient()
     indexed_at = "2026-07-27T22:03:44+00:00"
     block_hash = f"0x{101:064x}"
-    monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [])
     monkeypatch.setattr(
         indexer,
         "_missing_reconciliation_roles",
@@ -660,7 +759,7 @@ def test_authoritative_accounting_state_is_reconciled_then_persisted(
         return {"passed": False}
 
     client = CapturingRpcClient()
-    monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [])
     monkeypatch.setattr(indexer, "_missing_reconciliation_roles", lambda *_: [])
     monkeypatch.setattr(indexer, "_snapshot_contracts", lambda *_: object())
     monkeypatch.setattr(indexer, "read_onchain_snapshot", lambda *_: snapshot)
@@ -680,7 +779,7 @@ def test_authoritative_accounting_state_is_reconciled_then_persisted(
 
 
 def test_ambiguous_rpc_response_retries_exact_window(monkeypatch, registry) -> None:
-    monkeypatch.setattr(indexer, "_load_events", lambda _: [])
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [])
     client = AmbiguousRpcClient()
     monkeypatch.setattr(indexer, "get_client", lambda: client)
     block_hash = "0x" + f"{100:064x}"
