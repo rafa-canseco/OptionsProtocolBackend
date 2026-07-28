@@ -2,8 +2,10 @@
 
 import asyncio
 import hashlib
+import logging
 import threading
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from web3 import Web3
 
@@ -19,6 +21,7 @@ from src.vaults.csp_service import FundService, UnknownFundError, build_fund_ser
 router = APIRouter(prefix="/v2/vaults", tags=["Tokenized Funds"])
 _service: FundService | None = None
 _lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def get_fund_service() -> FundService:
@@ -68,6 +71,12 @@ async def _call(method, *args):
         raise HTTPException(status_code=404, detail="Unknown fund") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.TransportError as exc:
+        logger.warning("Fund data transport failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Fund data temporarily unavailable",
+        ) from exc
 
 
 @router.get("", response_model=FundListResponse)
