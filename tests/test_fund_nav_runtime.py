@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -23,10 +24,16 @@ from src.fund_nav.fair_value import versioned_observation_nonce
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
+from src.fund_nav.reporter import (
+    EXECUTION_BUFFER_BLOCKS,
+    SUBMISSION_LEAD_BLOCKS,
+    _submitter_transaction_lock,
+)
 from src.fund_nav.runtime import (
     BlockedReporter,
     ReporterFleet,
     RuntimeReporter,
+    SupabaseNavRepository,
     TrustedFund,
     TrustedRegistryLoader,
     Web3ReporterGateway,
@@ -123,14 +130,10 @@ def test_gateway_detects_when_signed_transaction_nonce_was_consumed() -> None:
         eth=SimpleNamespace(get_transaction_count=lambda _sender, _tag: 8)
     )
 
-    assert gateway.transaction_nonce_consumed(
-        Web3.to_hex(signed.raw_transaction)
-    )
+    assert gateway.transaction_nonce_consumed(Web3.to_hex(signed.raw_transaction))
 
     gateway.w3.eth.get_transaction_count = lambda _sender, _tag: 7
-    assert not gateway.transaction_nonce_consumed(
-        Web3.to_hex(signed.raw_transaction)
-    )
+    assert not gateway.transaction_nonce_consumed(Web3.to_hex(signed.raw_transaction))
 
 
 @pytest.mark.asyncio
@@ -165,22 +168,23 @@ async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> No
     assert built == [100, 101]
 
 
-def test_reporter_fleet_loads_each_fund_immediately_before_its_run() -> None:
-    state = {"block": 100}
+def test_reporter_fleet_runs_fund_waits_concurrently() -> None:
+    barrier = threading.Barrier(2)
     loaded = []
+    loaded_lock = threading.Lock()
 
     class Reporter:
         def __init__(self, name):
             self.name = name
 
         def run_once(self):
-            if self.name == "first":
-                state["block"] = 200
+            barrier.wait(timeout=1)
             return ReportRun(status="confirmed")
 
     def factory(name):
         def build():
-            loaded.append((name, state["block"]))
+            with loaded_lock:
+                loaded.append((name, threading.get_ident()))
             return Reporter(name)
 
         return build
@@ -188,7 +192,143 @@ def test_reporter_fleet_loads_each_fund_immediately_before_its_run() -> None:
     result = ReporterFleet([factory("first"), factory("second")]).run_once()
 
     assert result.status == "confirmed"
-    assert loaded == [("first", 100), ("second", 200)]
+    assert {name for name, _thread in loaded} == {"first", "second"}
+    assert len({thread for _name, thread in loaded}) == 2
+
+
+def test_reporter_fleet_exception_does_not_cancel_other_fund() -> None:
+    completed = threading.Event()
+
+    class Reporter:
+        def run_once(self):
+            completed.set()
+            return ReportRun(status="confirmed")
+
+    def failed_factory():
+        raise RuntimeError("isolated factory failure")
+
+    result = ReporterFleet([failed_factory, Reporter]).run_once()
+
+    assert completed.is_set()
+    assert result.status == "failed"
+    assert result.reason_code == "REPORT_BUILD_FAILED"
+
+
+def test_reporter_fleet_cleanup_failure_does_not_replace_confirmed_run(
+    caplog,
+) -> None:
+    class Reporter:
+        def run_once(self):
+            return ReportRun(status="confirmed")
+
+        def close(self):
+            raise RuntimeError("client close failed")
+
+    result = ReporterFleet([Reporter, Reporter]).run_once()
+
+    assert result.status == "confirmed"
+    assert caplog.messages.count("Fund NAV reporter client cleanup failed") == 2
+
+
+def test_parallel_fleet_cadence_overlaps_at_worst_inclusion_latency() -> None:
+    previous_valid_after = 1_000
+    max_window_length = 50
+    previous_valid_until = previous_valid_after + max_window_length
+    inclusion_margin = 3
+    loop_interval_blocks = 1
+    activation_delay = 43
+    confirmed_snapshot_lag = 15
+    worst_inclusion_blocks = SUBMISSION_LEAD_BLOCKS
+
+    previous_broadcast = previous_valid_after - SUBMISSION_LEAD_BLOCKS
+    next_head = previous_broadcast + worst_inclusion_blocks + loop_interval_blocks
+    next_snapshot = next_head - confirmed_snapshot_lag
+    next_valid_after = max(
+        next_head + inclusion_margin + EXECUTION_BUFFER_BLOCKS,
+        next_snapshot + activation_delay,
+    )
+
+    assert next_valid_after <= previous_valid_until
+
+
+def test_submitter_lock_is_keyed_by_chain_and_sender() -> None:
+    sender = "0x0000000000000000000000000000000000000001"
+
+    first = _submitter_transaction_lock(84532, sender)
+
+    assert first is _submitter_transaction_lock(84532, sender.upper())
+    assert first is not _submitter_transaction_lock(1, sender)
+
+
+def test_registered_factories_bound_client_lifetime_per_cycle(monkeypatch) -> None:
+    barrier = threading.Barrier(2)
+    created = []
+    closed = []
+    created_lock = threading.Lock()
+
+    class Repository:
+        def __init__(self, client, *, owns_client):
+            self.client = client
+            self.owns_client = owns_client
+            with created_lock:
+                created.append((threading.get_ident(), client))
+
+        def close(self):
+            assert self.owns_client
+            with created_lock:
+                closed.append(self.client)
+
+    class Loader:
+        def __init__(self, repository):
+            self.repository = repository
+
+        def load_one(self, registry):
+            return registry
+
+    class Reporter:
+        def __init__(self, repository):
+            self.repository = repository
+
+        def run_once(self):
+            barrier.wait(timeout=1)
+            return ReportRun(status="confirmed")
+
+        def close(self):
+            self.repository.close()
+
+    monkeypatch.setattr(runtime, "create_client", lambda _url, _key: object())
+    monkeypatch.setattr(runtime, "SupabaseNavRepository", Repository)
+    monkeypatch.setattr(runtime, "TrustedRegistryLoader", Loader)
+    monkeypatch.setattr(
+        runtime,
+        "_build_fund_reporter",
+        lambda repository, _fund: Reporter(repository),
+    )
+
+    factories = [
+        lambda: runtime._build_registered_fund_reporter({"fund": "first"}),
+        lambda: runtime._build_registered_fund_reporter({"fund": "second"}),
+    ]
+    first = ReporterFleet(factories).run_once()
+    second = ReporterFleet(factories).run_once()
+
+    assert first.status == second.status == "confirmed"
+    assert len(created) == 4
+    assert len({client for _thread, client in created}) == 4
+    assert set(closed) == {client for _thread, client in created}
+
+
+def test_owned_repository_client_closes_exactly_once() -> None:
+    calls = []
+    client = SimpleNamespace(
+        postgrest=SimpleNamespace(aclose=lambda: calls.append("closed"))
+    )
+    repository = SupabaseNavRepository(client, owns_client=True)
+
+    repository.close()
+    repository.close()
+
+    assert calls == ["closed"]
 
 
 def test_blocked_and_runtime_reporters_record_without_rpc_send() -> None:
@@ -537,9 +677,7 @@ class FairValueValuatorFunctions:
         _base_exit_cost,
         observation_nonce,
     ):
-        return self.Call(
-            Web3.keccak(text=f"{position_id}:{observation_nonce}")
-        )
+        return self.Call(Web3.keccak(text=f"{position_id}:{observation_nonce}"))
 
     def isApprovedObserver(self, _observer):
         return self.Call(True)
@@ -634,9 +772,7 @@ def fair_value_gateway(keys, strategy_kind="csp"):
 
         def strikePrice(self):
             return Call(
-                220_000_000_000
-                if strategy_kind == "covered_call"
-                else 157_500_000_000
+                220_000_000_000 if strategy_kind == "covered_call" else 157_500_000_000
             )
 
         def expiry(self):
@@ -940,10 +1076,7 @@ def test_sepolia_observer_key_config_is_disabled_and_strict(monkeypatch) -> None
 def test_covered_call_observer_config_is_separate_disabled_and_strict(
     monkeypatch,
 ) -> None:
-    assert (
-        settings.fund_covered_call_sepolia_fair_value_observations_enabled
-        is False
-    )
+    assert settings.fund_covered_call_sepolia_fair_value_observations_enabled is False
     key = "0x" + f"{1:064x}"
     monkeypatch.setattr(
         settings, "fund_covered_call_sepolia_observer_private_keys", key
@@ -971,21 +1104,15 @@ def test_sepolia_fair_value_policy_has_no_implicit_iv_default(monkeypatch) -> No
 def test_covered_call_fair_value_policy_has_no_implicit_iv_default(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        settings, "fund_covered_call_sepolia_fair_value_iv_bps", 0
-    )
-    monkeypatch.setattr(
-        settings, "fund_covered_call_sepolia_fair_value_iv_source", ""
-    )
+    monkeypatch.setattr(settings, "fund_covered_call_sepolia_fair_value_iv_bps", 0)
+    monkeypatch.setattr(settings, "fund_covered_call_sepolia_fair_value_iv_source", "")
 
     with pytest.raises(ValueError, match="IV_BPS"):
         get_fund_covered_call_sepolia_fair_value_policy()
 
 
 def test_covered_call_config_requires_exact_approved_policy(monkeypatch) -> None:
-    monkeypatch.setattr(
-        settings, "fund_covered_call_sepolia_fair_value_iv_bps", 4_200
-    )
+    monkeypatch.setattr(settings, "fund_covered_call_sepolia_fair_value_iv_bps", 4_200)
     monkeypatch.setattr(
         settings,
         "fund_covered_call_sepolia_fair_value_iv_source",

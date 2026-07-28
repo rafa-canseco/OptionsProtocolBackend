@@ -1,6 +1,8 @@
 """Concrete DB and Web3 runtime for fail-closed NAV reporting."""
 
+import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
@@ -9,6 +11,7 @@ from eth_abi import encode
 from eth_account import Account
 from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
+from supabase import Client, create_client
 from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
@@ -70,6 +73,8 @@ from src.vaults.csp_service import (
     required_trusted_roles,
 )
 
+logger = logging.getLogger(__name__)
+
 ACCOUNTING_ROLE = 2
 BASE_SEPOLIA_CHAIN_ID = 84532
 COVERED_CALL_MAX_OBSERVATION_WINDOW_BLOCKS = 120
@@ -111,10 +116,18 @@ class TrustedFund:
 
 
 class SupabaseNavRepository:
+    def __init__(self, client: Client | None = None, *, owns_client: bool = False):
+        self.client = client or get_client()
+        self.owns_client = owns_client and client is not None
+
+    def close(self) -> None:
+        if self.owns_client:
+            self.client.postgrest.aclose()
+            self.owns_client = False
+
     def enabled_funds(self) -> list[dict[str, Any]]:
         result = (
-            get_client()
-            .table("v2_fund_registry")
+            self.client.table("v2_fund_registry")
             .select("*")
             .eq("enabled", True)
             .execute()
@@ -144,12 +157,11 @@ class SupabaseNavRepository:
         return result.data or []
 
     def insert_verified(self, row: dict[str, Any]) -> None:
-        get_client().table("v2_csp_option_observations").insert(row).execute()
+        self.client.table("v2_csp_option_observations").insert(row).execute()
 
     def insert_verified_idempotent(self, row: dict[str, Any]) -> None:
         (
-            get_client()
-            .table("v2_csp_option_observations")
+            self.client.table("v2_csp_option_observations")
             .upsert(
                 row,
                 on_conflict=(
@@ -163,8 +175,7 @@ class SupabaseNavRepository:
 
     def upsert_fair_value_mark(self, row: dict[str, Any]) -> None:
         (
-            get_client()
-            .table("v2_csp_fair_value_marks")
+            self.client.table("v2_csp_fair_value_marks")
             .upsert(
                 row,
                 on_conflict=(
@@ -194,22 +205,18 @@ class SupabaseNavRepository:
 
     def claim_run(self, snapshot: ReporterSnapshot, nonce: int) -> RunClaim:
         ownership_token = str(uuid4())
-        result = (
-            get_client()
-            .rpc(
-                "v2_claim_nav_report_run",
-                {
-                    "p_chain_id": snapshot.chain_id,
-                    "p_fund_address": snapshot.fund,
-                    "p_snapshot_block": snapshot.snapshot_block,
-                    "p_snapshot_block_hash": Web3.to_hex(snapshot.snapshot_block_hash),
-                    "p_report_nonce": nonce,
-                    "p_ownership_token": ownership_token,
-                    "p_lease_seconds": settings.fund_nav_reporter_lease_seconds,
-                },
-            )
-            .execute()
-        )
+        result = self.client.rpc(
+            "v2_claim_nav_report_run",
+            {
+                "p_chain_id": snapshot.chain_id,
+                "p_fund_address": snapshot.fund,
+                "p_snapshot_block": snapshot.snapshot_block,
+                "p_snapshot_block_hash": Web3.to_hex(snapshot.snapshot_block_hash),
+                "p_report_nonce": nonce,
+                "p_ownership_token": ownership_token,
+                "p_lease_seconds": settings.fund_nav_reporter_lease_seconds,
+            },
+        ).execute()
         payload = result.data
         row = payload[0] if isinstance(payload, list) else payload
         run = row["run"]
@@ -235,19 +242,15 @@ class SupabaseNavRepository:
             "reporters": run.reporters,
             "signatures": run.signatures,
         }
-        result = (
-            get_client()
-            .rpc(
-                "v2_update_nav_report_run",
-                {
-                    "p_run_id": run_id,
-                    "p_ownership_token": ownership_token,
-                    "p_lease_seconds": settings.fund_nav_reporter_lease_seconds,
-                    "p_run": row,
-                },
-            )
-            .execute()
-        )
+        result = self.client.rpc(
+            "v2_update_nav_report_run",
+            {
+                "p_run_id": run_id,
+                "p_ownership_token": ownership_token,
+                "p_lease_seconds": settings.fund_nav_reporter_lease_seconds,
+                "p_run": row,
+            },
+        ).execute()
         updated = result.data[0] if isinstance(result.data, list) else result.data
         if updated is not True:
             raise RuntimeError("RUN_OWNERSHIP_LOST")
@@ -259,21 +262,17 @@ class SupabaseNavRepository:
         run: StoredRun,
         error: str,
     ) -> bool:
-        result = (
-            get_client()
-            .rpc(
-                "v2_record_reverted_nav_report_run",
-                {
-                    "p_chain_id": snapshot.chain_id,
-                    "p_fund_address": snapshot.fund,
-                    "p_report_nonce": report_nonce,
-                    "p_run_id": run.run_id,
-                    "p_transaction_hash": run.transaction_hash,
-                    "p_error": error,
-                },
-            )
-            .execute()
-        )
+        result = self.client.rpc(
+            "v2_record_reverted_nav_report_run",
+            {
+                "p_chain_id": snapshot.chain_id,
+                "p_fund_address": snapshot.fund,
+                "p_report_nonce": report_nonce,
+                "p_run_id": run.run_id,
+                "p_transaction_hash": run.transaction_hash,
+                "p_error": error,
+            },
+        ).execute()
         recorded = result.data[0] if isinstance(result.data, list) else result.data
         return recorded is True
 
@@ -285,22 +284,18 @@ class SupabaseNavRepository:
         reason_code: str,
         error: str,
     ) -> bool:
-        result = (
-            get_client()
-            .rpc(
-                "v2_release_failed_nav_report_transaction",
-                {
-                    "p_chain_id": snapshot.chain_id,
-                    "p_fund_address": snapshot.fund,
-                    "p_report_nonce": report_nonce,
-                    "p_run_id": run.run_id,
-                    "p_transaction_hash": run.transaction_hash,
-                    "p_reason_code": reason_code,
-                    "p_error": error,
-                },
-            )
-            .execute()
-        )
+        result = self.client.rpc(
+            "v2_release_failed_nav_report_transaction",
+            {
+                "p_chain_id": snapshot.chain_id,
+                "p_fund_address": snapshot.fund,
+                "p_report_nonce": report_nonce,
+                "p_run_id": run.run_id,
+                "p_transaction_hash": run.transaction_hash,
+                "p_reason_code": reason_code,
+                "p_error": error,
+            },
+        ).execute()
         recorded = result.data[0] if isinstance(result.data, list) else result.data
         return recorded is True
 
@@ -324,14 +319,12 @@ class SupabaseNavRepository:
             "status": run.status,
             "reason_code": reason,
         }
-        get_client().table("v2_nav_report_runs").insert(row).execute()
+        self.client.table("v2_nav_report_runs").insert(row).execute()
         return run
 
-    @staticmethod
-    def _fund_table(table: str, chain_id: int, fund: str):
+    def _fund_table(self, table: str, chain_id: int, fund: str):
         return (
-            get_client()
-            .table(table)
+            self.client.table(table)
             .select("*")
             .eq("chain_id", chain_id)
             .eq("fund_address", fund)
@@ -751,10 +744,8 @@ class Web3ReporterGateway:
             raise RuntimeError("FAIR_VALUE_POLICY_REQUIRED")
         if self.strategy_kind == "covered_call" and (
             not isinstance(self.fair_value_policy, CoveredCallFairValuePolicy)
-            or self.fair_value_policy.implied_volatility_bps
-            != CALL_POLICY_IV_BPS
-            or self.fair_value_policy.implied_volatility_source
-            != CALL_POLICY_IV_SOURCE
+            or self.fair_value_policy.implied_volatility_bps != CALL_POLICY_IV_BPS
+            or self.fair_value_policy.implied_volatility_source != CALL_POLICY_IV_SOURCE
             or self.fair_value_policy.risk_free_rate_bps
             != CALL_POLICY_RISK_FREE_RATE_BPS
             or self.fair_value_policy.settlement_cost_bps
@@ -863,9 +854,10 @@ class Web3ReporterGateway:
             expiry = int(otoken.functions.expiry().call(block_identifier=block))
             collateral = int(position[4])
             if self.strategy_kind == "covered_call":
-                if not isinstance(
-                    self.fair_value_policy, CoveredCallFairValuePolicy
-                ) or accounting_decimals != 18:
+                if (
+                    not isinstance(self.fair_value_policy, CoveredCallFairValuePolicy)
+                    or accounting_decimals != 18
+                ):
                     raise RuntimeError("COVERED_CALL_FAIR_VALUE_POLICY_MISMATCH")
                 mark = mark_european_call(
                     EuropeanCallInputs(
@@ -1340,6 +1332,9 @@ class BlockedReporter:
     def run_once(self) -> ReportRun:
         return self.repository.record_blocked(self.fund, self.reason)
 
+    def close(self) -> None:
+        self.repository.close()
+
 
 class UndeployedReporter(BlockedReporter):
     def __init__(self, repository: SupabaseNavRepository):
@@ -1361,20 +1356,54 @@ class RuntimeReporter:
                 reason = "REPORT_BUILD_FAILED"
             return self.repository.record_blocked(self.fund, reason)
 
+    def close(self) -> None:
+        self.repository.close()
+
 
 class ReporterFleet:
     def __init__(self, reporter_factories):
         self.reporter_factories = reporter_factories
 
     def run_once(self) -> ReportRun:
-        # A report can wait across several testnet blocks for activation and
-        # submission. Build each fund reporter immediately before its own run so
-        # later funds do not inherit the state snapshot loaded for an earlier
-        # fund.
-        results = [factory().run_once() for factory in self.reporter_factories]
+        # Valuation and activation waits are independent per fund and can span
+        # most of a short testnet NAV window. Run them concurrently; the
+        # reporter state machine serializes only the shared submitter EOA's
+        # pending nonce selection through broadcast.
+        with ThreadPoolExecutor(
+            max_workers=len(self.reporter_factories),
+            thread_name_prefix="fund-nav",
+        ) as executor:
+            futures = [
+                executor.submit(self._run_factory, factory)
+                for factory in self.reporter_factories
+            ]
+            results = []
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except Exception:
+                    results.append(
+                        ReportRun(
+                            status="failed",
+                            reason_code="REPORT_BUILD_FAILED",
+                        )
+                    )
         return next(
             (result for result in results if result.status != "confirmed"), results[-1]
         )
+
+    @staticmethod
+    def _run_factory(factory) -> ReportRun:
+        reporter = factory()
+        try:
+            return reporter.run_once()
+        finally:
+            close = getattr(reporter, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    logger.exception("Fund NAV reporter client cleanup failed")
 
 
 def build_reporter():
@@ -1387,13 +1416,26 @@ def build_reporter():
     registries = [fund.registry for fund in funds]
     return ReporterFleet(
         [
-            lambda registry=registry: _build_fund_reporter(
-                repository,
-                TrustedRegistryLoader(repository).load_one(registry),
-            )
+            lambda registry=registry: _build_registered_fund_reporter(registry)
             for registry in registries
         ]
     )
+
+
+def _build_registered_fund_reporter(registry):
+    repository = SupabaseNavRepository(
+        create_client(
+            settings.supabase_url,
+            settings.supabase_service_role_key,
+        ),
+        owns_client=True,
+    )
+    try:
+        fund = TrustedRegistryLoader(repository).load_one(registry)
+        return _build_fund_reporter(repository, fund)
+    except Exception:
+        repository.close()
+        raise
 
 
 def _build_fund_reporter(repository, fund):
