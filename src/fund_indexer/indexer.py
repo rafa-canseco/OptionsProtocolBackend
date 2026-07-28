@@ -26,6 +26,7 @@ MIN_WINDOW = 10
 CONFIRMATIONS = 5
 SUPPORTED_INTERFACE_VERSIONS = {1}
 EVENT_PAGE_SIZE = 1_000
+HIGH_FREQUENCY_NAV_EVENTS = ("NavCommitted", "NavSubmitted")
 EIP1967_IMPLEMENTATION_SLOT = int(
     "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16
 )
@@ -237,29 +238,67 @@ def _json_values(value: Any) -> Any:
     return value
 
 
-def _load_events(
-    registry: FundRegistry, client: Client | None = None
-) -> list[FundEvent]:
-    client = client or get_client()
+def _load_event_pages(query) -> list[dict[str, Any]]:
     rows = []
     offset = 0
     while True:
-        result = (
-            client.table("v2_chain_events")
-            .select("*")
-            .eq("chain_id", registry.chain_id)
-            .eq("fund_address", registry.fund_address)
-            .order("block_number")
-            .order("transaction_index")
-            .order("log_index")
-            .range(offset, offset + EVENT_PAGE_SIZE - 1)
-            .execute()
-        )
+        result = query.range(offset, offset + EVENT_PAGE_SIZE - 1).execute()
         page = result.data or []
         if not page:
             break
         rows.extend(page)
         offset += len(page)
+    return rows
+
+
+def _event_query(client: Client, registry: FundRegistry):
+    return (
+        client.table("v2_chain_events")
+        .select("*")
+        .eq("chain_id", registry.chain_id)
+        .eq("fund_address", registry.fund_address)
+    )
+
+
+def _load_events(
+    registry: FundRegistry, client: Client | None = None
+) -> list[FundEvent]:
+    client = client or get_client()
+    state_rows = _load_event_pages(
+        _event_query(client, registry)
+        .not_.in_("event_name", HIGH_FREQUENCY_NAV_EVENTS)
+        .order("block_number")
+        .order("transaction_index")
+        .order("log_index")
+    )
+    latest_nav_rows = []
+    for event_name in HIGH_FREQUENCY_NAV_EVENTS:
+        result = (
+            _event_query(client, registry)
+            .eq("event_name", event_name)
+            .order("block_number", desc=True)
+            .order("transaction_index", desc=True)
+            .order("log_index", desc=True)
+            .limit(1)
+            .execute()
+        )
+        latest_nav_rows.extend(result.data or [])
+    rows_by_identity = {
+        (
+            int(row["block_number"]),
+            row["transaction_hash"],
+            int(row["log_index"]),
+        ): row
+        for row in (*state_rows, *latest_nav_rows)
+    }
+    rows = sorted(
+        rows_by_identity.values(),
+        key=lambda row: (
+            int(row["block_number"]),
+            int(row["transaction_index"]),
+            int(row["log_index"]),
+        ),
+    )
     return [
         FundEvent(
             chain_id=int(row["chain_id"]),
@@ -277,6 +316,15 @@ def _load_events(
         )
         for row in rows
     ]
+
+
+def _retain_current_window_history(projection: dict[str, Any], from_block: int) -> None:
+    for key in ("nav_reports", "activities"):
+        projection[key] = [
+            row
+            for row in projection.get(key, [])
+            if int(row["block_number"]) >= from_block
+        ]
 
 
 def _fetch_window(
@@ -420,6 +468,7 @@ def _persist_window(
             projected.fund.update(snapshot_state)
             projection["fund_state"][0].update(snapshot_state)
             projection["reconciliations"] = [reconciliation]
+    _retain_current_window_history(projection, from_block)
     _verify_terminal_hash(w3, to_block, block_hash)
     client = client or get_client()
     client.rpc(
