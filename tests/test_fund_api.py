@@ -1,5 +1,6 @@
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -466,3 +467,23 @@ def test_compact_routes_validate_addresses_and_cache(monkeypatch) -> None:
     assert position.headers["cache-control"] == "private, no-cache"
     assert invalid.status_code == 400
     assert invalid_key.status_code == 400
+
+
+def test_transport_failure_returns_cors_safe_service_unavailable(
+    monkeypatch,
+) -> None:
+    class FailingService:
+        def config(self, _fund_key: str) -> None:
+            raise httpx.ReadError("temporary database transport failure")
+
+    monkeypatch.setattr(fund_api, "_service", FailingService())
+    client = TestClient(app)
+
+    response = client.get(
+        "/v2/vaults/base-sepolia:csp/config",
+        headers={"Origin": "http://localhost:3000"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Fund data temporarily unavailable"}
+    assert response.headers["access-control-allow-origin"] == "*"
