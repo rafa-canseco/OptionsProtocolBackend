@@ -179,6 +179,40 @@ def test_virtual_series_enforces_materialization_minimum(monkeypatch) -> None:
     repository.claim.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"strike_asset": "0x5555555555555555555555555555555555555555"},
+        {"collateral_asset": WETH},
+        {"strike_price_raw": "200000000001"},
+        {"strike_price": "2000.00000001"},
+        {"expiry": 2_000_003_600},
+        {"factory_address": "0x5555555555555555555555555555555555555555"},
+        {"chain_id": 84532},
+        {"underlying": "0x5555555555555555555555555555555555555555"},
+    ],
+)
+def test_canonical_product_mismatch_fails_before_claim_or_tx(
+    monkeypatch,
+    changes,
+) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = {**_virtual_row(), **changes}
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr("src.otokens.service.is_asset_tradable", lambda _asset: True)
+
+    with (
+        patch("src.otokens.service.build_and_send_tx") as send_tx,
+        pytest.raises(SeriesError) as raised,
+    ):
+        service.ensure(_request(), "did:privy:user")
+
+    assert raised.value.code == "SERIES_METADATA_INVALID"
+    repository.claim.assert_not_called()
+    send_tx.assert_not_called()
+
+
 def test_owner_materializes_once_then_concurrent_poll_is_ready(monkeypatch) -> None:
     _configure_lazy(monkeypatch)
     request = _request()

@@ -5,6 +5,7 @@ import hmac
 import logging
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from web3 import Web3
@@ -275,48 +276,79 @@ class SeriesMaterializationService:
         return recovered, digest
 
     def _validate_series(self, row: dict, expected_address: str) -> tuple[str, object]:
+        has_canonical_identity = bool(row.get("series_key"))
         if row.get("chain") != "base":
+            if has_canonical_identity:
+                raise SeriesError(
+                    "SERIES_METADATA_INVALID",
+                    "The option series metadata is inconsistent",
+                )
             raise SeriesError("UNSUPPORTED_SERIES", "Only Base series are supported")
         if row["otoken_address"].lower() != expected_address.lower():
             raise SeriesError(
                 "SERIES_ADDRESS_MISMATCH",
                 "The expected oToken address does not match the series",
             )
-        asset = _asset_for_underlying(str(row["underlying"]))
+        try:
+            asset = _asset_for_underlying(str(row["underlying"]))
+        except SeriesError as exc:
+            if has_canonical_identity:
+                raise SeriesError(
+                    "SERIES_METADATA_INVALID",
+                    "The option series metadata is inconsistent",
+                ) from exc
+            raise
         if not is_asset_tradable(asset):
             raise SeriesError(
                 "ASSET_NOT_TRADABLE",
                 "This option market is currently read-only",
             )
         expiry = int(row["expiry"])
+
+        canonical = None
+        if has_canonical_identity:
+            try:
+                canonical = canonical_series_from_row(row)
+                strike_price_raw = Decimal(str(row["strike_price"])) * Decimal(10**8)
+                expiry_time = datetime.fromtimestamp(expiry, tz=timezone.utc)
+                asset_config = get_asset_config(Asset(asset))
+                expected_collateral = (
+                    canonical.strike_asset if canonical.is_put else canonical.underlying
+                )
+                metadata_valid = all(
+                    (
+                        canonical.chain_id == settings.chain_id,
+                        canonical.factory_address.lower()
+                        == settings.otoken_factory_address.lower(),
+                        canonical.underlying.lower()
+                        == asset_config.underlying_address.lower(),
+                        canonical.strike_asset.lower() == settings.usdc_address.lower(),
+                        canonical.collateral_asset.lower()
+                        == expected_collateral.lower(),
+                        strike_price_raw == Decimal(canonical.strike_price_raw),
+                        expiry_time.hour == 8,
+                        expiry_time.minute == 0,
+                        expiry_time.second == 0,
+                        canonical.series_key == row["series_key"],
+                    )
+                )
+            except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+                raise SeriesError(
+                    "SERIES_METADATA_INVALID",
+                    "The option series metadata is inconsistent",
+                ) from exc
+            if not metadata_valid:
+                raise SeriesError(
+                    "SERIES_METADATA_INVALID",
+                    "The option series identity is inconsistent",
+                )
+
         now_ts = int(time.time())
         if expiry <= now_ts + cutoff_hours_for_expiry(expiry, now_ts) * 3600:
             raise SeriesError(
                 "SERIES_NOT_TRADABLE",
                 "The option series is too close to expiry",
             )
-
-        canonical = None
-        if row.get("series_key"):
-            try:
-                canonical = canonical_series_from_row(row)
-            except (TypeError, ValueError) as exc:
-                raise SeriesError(
-                    "SERIES_METADATA_INVALID",
-                    "The option series metadata is inconsistent",
-                    status_code=503,
-                    retryable=True,
-                ) from exc
-            if canonical.chain_id != settings.chain_id:
-                raise SeriesError(
-                    "SERIES_CHAIN_MISMATCH",
-                    "The option series belongs to another Base environment",
-                )
-            if canonical.series_key != row["series_key"]:
-                raise SeriesError(
-                    "SERIES_KEY_MISMATCH",
-                    "The option series identity is inconsistent",
-                )
         return asset, canonical
 
     @staticmethod
@@ -402,11 +434,6 @@ class SeriesMaterializationService:
                 "The virtual series lacks canonical CREATE2 metadata",
                 status_code=503,
                 retryable=True,
-            )
-        if canonical.factory_address.lower() != settings.otoken_factory_address.lower():
-            raise SeriesError(
-                "SERIES_FACTORY_MISMATCH",
-                "The virtual series targets another factory",
             )
         factory = get_otoken_factory()
         try:

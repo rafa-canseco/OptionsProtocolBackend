@@ -32,6 +32,42 @@ ALTER TABLE available_otokens
     ADD CONSTRAINT available_otokens_deployment_status_check
     CHECK (deployment_status IN ('virtual', 'creating', 'ready', 'failed'));
 
+ALTER TABLE available_otokens
+    ADD CONSTRAINT available_otokens_canonical_fields_check
+    CHECK (
+        series_key IS NULL OR (
+            chain = 'base'
+            AND chain_id IS NOT NULL
+            AND factory_address IS NOT NULL
+            AND underlying IS NOT NULL
+            AND strike_asset IS NOT NULL
+            AND collateral_asset IS NOT NULL
+            AND strike_price_raw IS NOT NULL
+        )
+    ) NOT VALID;
+ALTER TABLE available_otokens
+    ADD CONSTRAINT available_otokens_canonical_collateral_check
+    CHECK (
+        series_key IS NULL
+        OR (
+            is_put AND lower(collateral_asset) = lower(strike_asset)
+        )
+        OR (
+            NOT is_put AND lower(collateral_asset) = lower(underlying)
+        )
+    ) NOT VALID;
+ALTER TABLE available_otokens
+    ADD CONSTRAINT available_otokens_canonical_strike_check
+    CHECK (
+        series_key IS NULL
+        OR strike_price_raw = strike_price * 100000000
+    ) NOT VALID;
+ALTER TABLE available_otokens
+    ADD CONSTRAINT available_otokens_canonical_expiry_check
+    CHECK (
+        series_key IS NULL OR mod(expiry, 86400) = 28800
+    ) NOT VALID;
+
 CREATE UNIQUE INDEX IF NOT EXISTS available_otokens_chain_series_key_idx
     ON available_otokens (chain, series_key)
     WHERE series_key IS NOT NULL;

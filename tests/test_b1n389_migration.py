@@ -14,6 +14,11 @@ def test_lazy_series_migration_has_lifecycle_and_canonical_constraints() -> None
     assert "WHERE series_key IS NOT NULL" in MIGRATION
     assert "strike_price_raw NUMERIC(78, 0)" in MIGRATION
     assert "chain_id BIGINT" in MIGRATION
+    assert "available_otokens_canonical_fields_check" in MIGRATION
+    assert "available_otokens_canonical_collateral_check" in MIGRATION
+    assert "available_otokens_canonical_strike_check" in MIGRATION
+    assert "available_otokens_canonical_expiry_check" in MIGRATION
+    assert MIGRATION.count(") NOT VALID;") >= 4
 
 
 def test_available_otokens_is_service_role_only() -> None:
