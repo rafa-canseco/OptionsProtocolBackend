@@ -42,6 +42,18 @@ FINAL_READINESS = {
     "allocatorBotAuthorized": False,
     "mainnetAuthorized": False,
 }
+COVERED_CALL_ACTIVE_READINESS = {
+    "handoffReady": True,
+    "initialDeploymentReconciled": True,
+    "strictReconciliationComplete": True,
+    "depositsPaused": False,
+    "adapterOnboarded": True,
+    "strategyActive": True,
+    "publicDepositsAuthorized": True,
+    "allocatorBotAuthorized": True,
+    "navGatedDepositResume": True,
+    "mainnetAuthorized": False,
+}
 CALL_POLICY_SHA256 = (
     "0x4ecb60fc6a19ac0a10c37ca380998b3566a3193693a10fb211f86bb61a2bebf3"
 )
@@ -298,7 +310,7 @@ def _parse_covered_call_deployment(
         weth=weth,
         usdc=quote_asset,
     )
-    _require_final_readiness(manifest)
+    vault_upgrade_block = _require_covered_call_readiness(manifest, deployment_blocks)
     if (
         _object(manifest, "readiness").get("onlyApprovedV1MutationsObserved")
         is not True
@@ -321,11 +333,13 @@ def _parse_covered_call_deployment(
         or policy.get("observationQuorum") != 2
     ):
         raise ValueError("B1N-360 testnet valuation policy mismatch")
+    fund_vault_bindings = _covered_call_fund_vault_bindings(
+        contracts,
+        start_block=start_block,
+        fund_last=fund_last,
+        upgrade_block=vault_upgrade_block,
+    )
     role_values = {
-        "fund_vault": (
-            *_proxy(contracts, "fundVault"),
-            _covered_call_proxy_block(contracts, "fundVault", start_block, fund_last),
-        ),
         "fund_share": (
             *_proxy(contracts, "fundShare"),
             _covered_call_proxy_block(contracts, "fundShare", start_block, fund_last),
@@ -419,10 +433,10 @@ def _parse_covered_call_deployment(
         "swap_router",
         "whitelist",
     }
-    if set(role_values) != expected_roles:
+    if set(role_values) | {"fund_vault"} != expected_roles:
         raise ValueError("Manifest mapping does not cover the trusted role set")
 
-    rows = tuple(
+    rows = [
         {
             "contract_role": role,
             "contract_address": address,
@@ -434,10 +448,24 @@ def _parse_covered_call_deployment(
         for role, (address, implementation, valid_from_block) in sorted(
             role_values.items()
         )
+    ]
+    rows.extend(
+        {
+            "contract_role": "fund_vault",
+            "contract_address": address,
+            "implementation_address": implementation,
+            "interface_version": 1,
+            "valid_from_block": valid_from_block,
+            "valid_to_block": valid_to_block,
+        }
+        for address, implementation, valid_from_block, valid_to_block in (
+            fund_vault_bindings
+        )
     )
+    rows.sort(key=lambda row: (row["contract_role"], row["valid_from_block"]))
     registry = {
         "chain_id": 84532,
-        "fund_address": role_values["fund_vault"][0],
+        "fund_address": fund_vault_bindings[0][0],
         "fund_key": fund_key,
         "start_block": start_block,
         "accounting_asset": accounting_asset,
@@ -454,7 +482,7 @@ def _parse_covered_call_deployment(
         "quote_asset_decimals": quote_asset_decimals,
         "handoff_ready": True,
     }
-    return FundDeployment(registry, rows)
+    return FundDeployment(registry, tuple(rows))
 
 
 def _object(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -554,6 +582,58 @@ def _require_covered_call_block_order(blocks: dict[str, Any]) -> None:
         raise ValueError("B1N-360 deployment blocks must be positive integers")
     if values != sorted(values):
         raise ValueError("B1N-360 deployment blocks are not monotonic")
+
+
+def _require_covered_call_readiness(
+    manifest: dict[str, Any], blocks: dict[str, Any]
+) -> int | None:
+    """Validate either the safe handoff or the completed NAV-gated activation."""
+    readiness = _object(manifest, "readiness")
+    if all(
+        readiness.get(name) is expected for name, expected in FINAL_READINESS.items()
+    ):
+        return None
+
+    incomplete = [
+        name
+        for name, expected in COVERED_CALL_ACTIVE_READINESS.items()
+        if readiness.get(name) is not expected
+    ]
+    for name in ("activationNavNonce", "depositsOpenedNavNonce"):
+        value = readiness.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            incomplete.append(name)
+    if (
+        isinstance(readiness.get("activationNavNonce"), int)
+        and isinstance(readiness.get("depositsOpenedNavNonce"), int)
+        and readiness["depositsOpenedNavNonce"] < readiness["activationNavNonce"]
+    ):
+        incomplete.append("depositsOpenedNavNonce")
+    if incomplete:
+        raise ValueError(
+            "B1N-360 activated readiness is incomplete: "
+            + ", ".join(sorted(set(incomplete)))
+        )
+
+    lifecycle_names = (
+        "workersFinalized",
+        "processorRotated",
+        "strategyActivated",
+        "navGatedVaultImplementation",
+        "navGatedVaultUpgrade",
+        "depositsOpened",
+    )
+    lifecycle = [blocks.get(name) for name in lifecycle_names]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in lifecycle
+    ):
+        raise ValueError(
+            "B1N-360 activated deployment blocks must be positive integers"
+        )
+    if lifecycle != sorted(lifecycle) or lifecycle[0] <= blocks["reconciled"]:
+        raise ValueError("B1N-360 activated deployment blocks are not monotonic")
+    return blocks["navGatedVaultUpgrade"]
 
 
 def _require_covered_call_v1_mutations(
@@ -705,6 +785,65 @@ def _covered_call_proxy_block(
             f"contracts.{key}.validFromBlock implementation must not follow proxy"
         )
     return proxy_block
+
+
+def _covered_call_fund_vault_bindings(
+    parent: dict[str, Any],
+    *,
+    start_block: int,
+    fund_last: int,
+    upgrade_block: int | None,
+) -> tuple[tuple[str, str, int, int | None], ...]:
+    value = _object(parent, "fundVault")
+    proxy, implementation = _proxy(parent, "fundVault")
+    if upgrade_block is None:
+        return (
+            (
+                proxy,
+                implementation,
+                _covered_call_proxy_block(parent, "fundVault", start_block, fund_last),
+                None,
+            ),
+        )
+
+    valid_from = value.get("validFromBlock")
+    if not isinstance(valid_from, dict) or set(valid_from) != {
+        "proxy",
+        "implementation",
+    }:
+        raise ValueError(
+            "contracts.fundVault.validFromBlock must contain exact proxy and "
+            "implementation blocks"
+        )
+    proxy_block = _bounded_deployment_block(
+        valid_from.get("proxy"),
+        "contracts.fundVault.validFromBlock.proxy",
+        start_block,
+        fund_last,
+    )
+    if valid_from.get("implementation") != upgrade_block:
+        raise ValueError(
+            "contracts.fundVault implementation activation must match "
+            "network.deploymentBlocks.navGatedVaultUpgrade"
+        )
+    previous = _plain_address(
+        value.get("previousImplementation"),
+        "contracts.fundVault.previousImplementation",
+    )
+    if previous == implementation:
+        raise ValueError("FundVault upgrade must change the implementation")
+    _bytes32(
+        value.get("implementationCodehash"),
+        "contracts.fundVault.implementationCodehash",
+    )
+    _bytes32(
+        value.get("upgradeTransactionHash"),
+        "contracts.fundVault.upgradeTransactionHash",
+    )
+    return (
+        (proxy, previous, proxy_block, upgrade_block - 1),
+        (proxy, implementation, upgrade_block, None),
+    )
 
 
 def _covered_call_address_block(
