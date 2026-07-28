@@ -186,6 +186,7 @@ class SeriesMaterializationService:
         quote: ExecutionQuoteSnapshot,
         amount_raw: int,
         asset: str,
+        deadline_buffer_seconds: int | None = None,
     ) -> tuple[str, bytes]:
         values = quote.as_ints()
         now_ts = int(time.time())
@@ -194,9 +195,12 @@ class SeriesMaterializationService:
                 "CAPACITY_EXCEEDED",
                 "The requested size exceeds the signed quote capacity",
             )
-        if values["deadline"] <= (
-            now_ts + settings.otoken_ensure_deadline_buffer_seconds
-        ):
+        deadline_buffer = (
+            settings.otoken_ensure_deadline_buffer_seconds
+            if deadline_buffer_seconds is None
+            else deadline_buffer_seconds
+        )
+        if values["deadline"] <= now_ts + deadline_buffer:
             raise SeriesError(
                 "QUOTE_STALE",
                 "The quote does not have enough time remaining",
@@ -381,6 +385,11 @@ class SeriesMaterializationService:
             quote=request.quote,
             amount_raw=amount_raw,
             asset=asset,
+            deadline_buffer_seconds=(
+                settings.otoken_ensure_deadline_buffer_seconds
+                if status == "ready"
+                else settings.otoken_materialization_deadline_buffer_seconds
+            ),
         )
 
         if status == "ready":

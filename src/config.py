@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     otoken_materialization_lease_seconds: int = 180
     otoken_materialization_max_attempts: int = 3
     otoken_ensure_deadline_buffer_seconds: int = 30
+    otoken_materialization_deadline_buffer_seconds: int = 150
     otoken_ensure_retry_after_ms: int = 750
     otoken_min_trade_amount_raw: int = 1_000_000  # 0.01 oToken (8 decimals)
     otoken_capacity_stale_seconds: int = 120

@@ -56,6 +56,14 @@ def validate_lazy_otoken_config(series_mode: str) -> None:
         raise RuntimeError(
             "Lazy oToken mode is missing required configuration: " + ", ".join(missing)
         )
+    materialization_buffer = settings.otoken_materialization_deadline_buffer_seconds
+    execution_buffer = settings.otoken_ensure_deadline_buffer_seconds
+    if materialization_buffer <= 120 or materialization_buffer < execution_buffer + 120:
+        raise RuntimeError(
+            "OTOKEN_MATERIALIZATION_DEADLINE_BUFFER_SECONDS must exceed "
+            "120 seconds and cover the execution buffer plus the 120-second "
+            "transaction timeout"
+        )
 
 
 @asynccontextmanager

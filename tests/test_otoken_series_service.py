@@ -179,6 +179,75 @@ def test_virtual_series_enforces_materialization_minimum(monkeypatch) -> None:
     repository.claim.assert_not_called()
 
 
+@pytest.mark.parametrize("ttl_seconds", [31, 120, 149])
+def test_short_materialization_ttl_never_claims_or_broadcasts(
+    monkeypatch,
+    ttl_seconds,
+) -> None:
+    _configure_lazy(monkeypatch)
+    now = 1_000_000
+    monkeypatch.setattr("src.otokens.service.time.time", lambda: now)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+
+    with (
+        patch("src.otokens.service.recover_quote_signer") as recover,
+        patch("src.otokens.service.build_and_send_tx") as send_tx,
+        pytest.raises(SeriesError) as raised,
+    ):
+        service.ensure(
+            _request(deadline=now + ttl_seconds),
+            "did:privy:user",
+        )
+
+    assert raised.value.code == "QUOTE_STALE"
+    recover.assert_not_called()
+    repository.claim.assert_not_called()
+    send_tx.assert_not_called()
+
+
+def test_sufficient_materialization_ttl_can_reach_claim(monkeypatch) -> None:
+    _configure_lazy(monkeypatch)
+    now = 1_000_000
+    monkeypatch.setattr("src.otokens.service.time.time", lambda: now)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.get_capacity.return_value = {
+        "capacity_eth": "1",
+        "status": "active",
+        "reported_at": datetime.now(timezone.utc).isoformat(),
+    }
+    repository.claim.return_value = _claim(owned=False, status="creating")
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+    settler = MagicMock()
+    settler.functions.makerNonce.return_value.call.return_value = 7
+    settler.functions.whitelistedMMs.return_value.call.return_value = True
+    settler.functions.getQuoteState.return_value.call.return_value = (0, False)
+
+    with (
+        patch("src.otokens.service.recover_quote_signer", return_value=MM),
+        patch("src.otokens.service.quote_digest", return_value=b"\x12" * 32),
+        patch("src.otokens.service.get_batch_settler", return_value=settler),
+        patch("src.otokens.service.get_otoken_factory", return_value=factory),
+    ):
+        result = service.ensure(
+            _request(deadline=now + 151),
+            "did:privy:user",
+        )
+
+    assert result.status == "creating"
+    repository.claim.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "changes",
     [
