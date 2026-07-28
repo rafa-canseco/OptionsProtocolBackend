@@ -165,7 +165,12 @@ class NavReporter:
         expected_chain_id: int,
         transaction_timeout: int,
         inclusion_margin: int,
+        execution_buffer: int = EXECUTION_BUFFER_BLOCKS,
     ) -> None:
+        if execution_buffer <= SUBMISSION_LEAD_BLOCKS:
+            raise ValueError(
+                "NAV execution buffer must exceed the submission lead blocks"
+            )
         self.gateway = gateway
         self.store = store
         self.private_keys = private_keys
@@ -173,6 +178,7 @@ class NavReporter:
         self.expected_chain_id = expected_chain_id
         self.transaction_timeout = transaction_timeout
         self.inclusion_margin = max(1, inclusion_margin)
+        self.execution_buffer = execution_buffer
 
     def run_once(self) -> ReportRun:
         snapshot = self.gateway.snapshot()
@@ -261,7 +267,7 @@ class NavReporter:
         # Leave a small execution buffer for the simulation and submission RPCs;
         # the contract still enforces the snapshot age and activation window.
         valid_after = max(
-            current_head + self.inclusion_margin + EXECUTION_BUFFER_BLOCKS,
+            current_head + self.inclusion_margin + self.execution_buffer,
             snapshot.snapshot_block + snapshot.activation_delay,
         )
         valid_until = valid_after + snapshot.max_window_length

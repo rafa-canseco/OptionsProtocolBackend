@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     fund_nav_reporter_private_keys: str = ""
     fund_nav_submitter_private_key: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
+    fund_nav_execution_buffer_blocks: int = 15
     fund_csp_sepolia_fair_value_observations_enabled: bool = False
     fund_csp_sepolia_observer_private_keys: str = ""
     fund_csp_sepolia_fair_value_iv_bps: int = 0

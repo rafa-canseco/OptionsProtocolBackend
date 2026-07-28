@@ -1526,5 +1526,6 @@ def _build_fund_reporter(repository, fund):
         expected_chain_id=fund.chain_id,
         transaction_timeout=settings.fund_nav_reporter_tx_timeout_seconds,
         inclusion_margin=settings.fund_nav_inclusion_margin_blocks,
+        execution_buffer=settings.fund_nav_execution_buffer_blocks,
     )
     return RuntimeReporter(reporter, repository, fund)
