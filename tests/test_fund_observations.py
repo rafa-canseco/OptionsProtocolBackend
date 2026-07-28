@@ -5,6 +5,8 @@ from eth_account import Account
 from web3 import Web3
 
 from src.fund_nav.ingestion import ingest_observation_document
+from src.config import settings
+from src.fund_nav import ingestion
 from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
 from src.fund_nav.runtime import TrustedFund
@@ -145,6 +147,65 @@ def test_operational_ingestion_selects_only_reconciled_trusted_fund() -> None:
 
     assert observer == OBSERVER
     assert len(store.rows) == 1
+
+
+@pytest.mark.parametrize(
+    ("dedicated_rpc", "global_rpc", "expected_rpc"),
+    [
+        (
+            "https://fund-rpc.example",
+            "https://global-rpc.example",
+            "https://fund-rpc.example",
+        ),
+        ("", "https://global-rpc.example", "https://global-rpc.example"),
+    ],
+)
+def test_operational_ingestion_uses_selected_fund_rpc(
+    monkeypatch,
+    dedicated_rpc,
+    global_rpc,
+    expected_rpc,
+) -> None:
+    provider_urls = []
+    item = observation()
+    store = Store()
+    fund = TrustedFund(
+        registry={"chain_id": 84532, "fund_address": FUND},
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+
+    class FakeWeb3:
+        @staticmethod
+        def HTTPProvider(url):
+            provider_urls.append(url)
+            return ("provider", url)
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    monkeypatch.setattr(settings, "tokenized_fund_rpc_url", dedicated_rpc)
+    monkeypatch.setattr(settings, "rpc_url", global_rpc)
+    monkeypatch.setattr(ingestion, "Web3", FakeWeb3)
+    monkeypatch.setattr(
+        ingestion,
+        "Web3ReporterGateway",
+        lambda w3, *_args: (
+            Chain()
+            if w3.provider == ("provider", expected_rpc)
+            else pytest.fail("observation ingestion used the wrong RPC")
+        ),
+    )
+
+    observer = ingest_observation_document(
+        asdict(item),
+        repository=store,
+        funds=[fund],
+    )
+
+    assert observer == OBSERVER
+    assert provider_urls == [expected_rpc]
 
 
 def test_operational_ingestion_rejects_untrusted_or_unknown_fund() -> None:

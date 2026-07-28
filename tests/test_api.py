@@ -364,6 +364,30 @@ def test_fund_indexer_rpc_validation_precedes_task_creation(monkeypatch):
             pass
 
 
+def test_fund_services_accept_dedicated_rpc_without_global_rpc(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", True)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", False)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "")
+    monkeypatch.setattr(
+        main_module.settings,
+        "tokenized_fund_rpc_url",
+        "https://fund-rpc.example",
+    )
+
+    def task_created(coroutine):
+        coroutine.close()
+        raise RuntimeError("TASK_CREATION_REACHED")
+
+    monkeypatch.setattr(main_module.asyncio, "create_task", task_created)
+
+    with pytest.raises(RuntimeError, match="TASK_CREATION_REACHED"):
+        with TestClient(main_module.app):
+            pass
+
+
 @pytest.mark.parametrize(
     ("rpc_url", "private_keys", "message"),
     [

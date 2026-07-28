@@ -333,7 +333,9 @@ def get_fund_covered_call_sepolia_fair_value_policy():
     )
 
     policy = CoveredCallFairValuePolicy(
-        implied_volatility_bps=(settings.fund_covered_call_sepolia_fair_value_iv_bps),
+        implied_volatility_bps=(
+            settings.fund_covered_call_sepolia_fair_value_iv_bps
+        ),
         implied_volatility_source=(
             settings.fund_covered_call_sepolia_fair_value_iv_source
         ),

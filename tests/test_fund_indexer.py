@@ -181,6 +181,36 @@ def test_run_offloads_blocking_index_cycle(monkeypatch) -> None:
     assert len(calls[0][1]) == 1
 
 
+def test_run_constructs_provider_from_selected_fund_rpc(monkeypatch) -> None:
+    provider_urls = []
+
+    class FakeWeb3:
+        @staticmethod
+        def HTTPProvider(url):
+            provider_urls.append(url)
+            return ("provider", url)
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    async def fake_to_thread(function, w3):
+        assert function is indexer._index_registered_funds
+        assert w3.provider == ("provider", "https://fund-rpc.example")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        indexer,
+        "get_tokenized_fund_rpc_url",
+        lambda: "https://fund-rpc.example",
+    )
+    monkeypatch.setattr(indexer, "Web3", FakeWeb3)
+    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
+
+    asyncio.run(indexer.run())
+
+    assert provider_urls == ["https://fund-rpc.example"]
+
+
 def test_run_uses_dedicated_fund_indexer_poll_interval(monkeypatch) -> None:
     sleeps = []
 

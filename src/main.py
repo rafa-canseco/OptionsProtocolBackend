@@ -137,8 +137,13 @@ async def lifespan(app: FastAPI):
                     f"NAV submitter key must be separate from {label} observer keys"
                 )
             observer_sets[label] = observer_addresses
-        if observer_sets.get("CSP", set()) & observer_sets.get("covered-call", set()):
-            raise RuntimeError("CSP and covered-call observer keys must be separate")
+        if (
+            observer_sets.get("CSP", set())
+            & observer_sets.get("covered-call", set())
+        ):
+            raise RuntimeError(
+                "CSP and covered-call observer keys must be separate"
+            )
     elif (
         settings.fund_csp_sepolia_fair_value_observations_enabled
         or settings.fund_covered_call_sepolia_fair_value_observations_enabled

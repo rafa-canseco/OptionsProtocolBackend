@@ -82,6 +82,74 @@ def test_tokenized_fund_rpc_falls_back_to_global_endpoint(monkeypatch) -> None:
     assert get_tokenized_fund_rpc_url() == "https://global-rpc.example"
 
 
+def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
+    monkeypatch,
+) -> None:
+    provider_urls = []
+    built_gateway = object()
+    built_reporter = SimpleNamespace(run_once=lambda: ReportRun(status="confirmed"))
+
+    class FakeWeb3:
+        @staticmethod
+        def HTTPProvider(url):
+            provider_urls.append(url)
+            return ("provider", url)
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    fund = TrustedFund(
+        registry={
+            "chain_id": 84532,
+            "fund_address": FUND,
+            "strategy_kind": "csp",
+        },
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_tokenized_fund_rpc_url",
+        lambda: "https://fund-rpc.example",
+    )
+    monkeypatch.setattr(runtime, "Web3", FakeWeb3)
+    monkeypatch.setattr(
+        runtime,
+        "Web3ReporterGateway",
+        lambda w3, *_args, **_kwargs: (
+            built_gateway
+            if w3.provider == ("provider", "https://fund-rpc.example")
+            else pytest.fail("runtime reporter used the wrong RPC")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "NavReporter",
+        lambda gateway, *_args, **_kwargs: (
+            built_reporter
+            if gateway is built_gateway
+            else pytest.fail("unexpected gateway")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime, "get_fund_nav_reporter_private_keys", lambda: ("reporter-key",)
+    )
+    monkeypatch.setattr(
+        runtime, "get_fund_nav_submitter_private_key", lambda: "submitter-key"
+    )
+    monkeypatch.setattr(
+        runtime.settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        False,
+    )
+
+    reporter = runtime._build_fund_reporter(Repository(), fund)
+
+    assert reporter.reporter is built_reporter
+    assert provider_urls == ["https://fund-rpc.example"]
+
+
 class Repository:
     def __init__(self, missing_role=None, version=1):
         self.registry = {
