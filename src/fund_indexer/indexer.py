@@ -7,7 +7,7 @@ from typing import Any
 from web3 import Web3
 from web3._utils.events import get_event_data
 
-from src.config import settings
+from src.config import get_tokenized_fund_rpc_url, settings
 from src.db.database import get_client
 from src.fund_indexer.abis import EVENTS_BY_TOPIC
 from src.fund_indexer.models import FundEvent, normalize_address
@@ -774,9 +774,13 @@ def _index_registered_funds(w3: Web3) -> None:
 
 
 async def run() -> None:
-    if not settings.rpc_url:
-        raise RuntimeError("RPC_URL is required for the tokenized fund indexer")
-    w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
+    rpc_url = get_tokenized_fund_rpc_url()
+    if not rpc_url:
+        raise RuntimeError(
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required for the "
+            "tokenized fund indexer"
+        )
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
     while True:
         try:
             await asyncio.to_thread(_index_registered_funds, w3)

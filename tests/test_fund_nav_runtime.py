@@ -12,6 +12,7 @@ from src.config import (
     get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
+    get_tokenized_fund_rpc_url,
     settings,
 )
 from src.fund_nav import runtime
@@ -61,6 +62,24 @@ CAST_VALUATION_DATA_FIXTURE = (
     "0000000000000000000000000000000000000000000000000000000000000002"
     "1234000000000000000000000000000000000000000000000000000000000000"
 )
+
+
+def test_tokenized_fund_rpc_prefers_dedicated_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "rpc_url", "https://global-rpc.example")
+    monkeypatch.setattr(
+        settings,
+        "tokenized_fund_rpc_url",
+        "  https://fund-rpc.example  ",
+    )
+
+    assert get_tokenized_fund_rpc_url() == "https://fund-rpc.example"
+
+
+def test_tokenized_fund_rpc_falls_back_to_global_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "rpc_url", "  https://global-rpc.example  ")
+    monkeypatch.setattr(settings, "tokenized_fund_rpc_url", "  ")
+
+    assert get_tokenized_fund_rpc_url() == "https://global-rpc.example"
 
 
 class Repository:

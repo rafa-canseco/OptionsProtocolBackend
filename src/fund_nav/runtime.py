@@ -23,6 +23,7 @@ from src.config import (
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
     get_fund_nav_submitter_private_key,
+    get_tokenized_fund_rpc_url,
     settings,
 )
 from src.db.database import get_client
@@ -1538,7 +1539,7 @@ def _build_registered_fund_reporter(registry):
 def _build_fund_reporter(repository, fund):
     if fund.trust_reason:
         return BlockedReporter(repository, fund, fund.trust_reason)
-    w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
+    w3 = Web3(Web3.HTTPProvider(get_tokenized_fund_rpc_url()))
     is_csp = fund.registry.get("strategy_kind", "csp") == "csp"
     if is_csp and settings.fund_csp_sepolia_fair_value_observations_enabled:
         observer_keys = get_fund_csp_sepolia_observer_private_keys()
