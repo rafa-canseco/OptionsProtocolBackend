@@ -774,14 +774,14 @@ def _store_confirmed_head(
     confirmed_head: ConfirmedHead, client: Client | None = None
 ) -> None:
     client = client or get_client()
-    client.table("v2_confirmed_chain_heads").upsert(
+    client.rpc(
+        "v2_upsert_confirmed_chain_head",
         {
-            "chain_id": confirmed_head.chain_id,
-            "block_number": confirmed_head.block_number,
-            "block_hash": confirmed_head.block_hash,
-            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "p_chain_id": confirmed_head.chain_id,
+            "p_block_number": confirmed_head.block_number,
+            "p_block_hash": confirmed_head.block_hash,
+            "p_observed_at": datetime.now(timezone.utc).isoformat(),
         },
-        on_conflict="chain_id",
     ).execute()
 
 
@@ -821,7 +821,6 @@ def _index_registry_identity_once(
     client: Client,
     chain_id: int,
     fund_address: str,
-    store_confirmed_head: bool,
 ) -> int:
     registry = next(
         (
@@ -834,8 +833,7 @@ def _index_registry_identity_once(
     if registry is None:
         return 0
     confirmed_head = _capture_confirmed_head(w3, chain_id)
-    if store_confirmed_head:
-        _store_confirmed_head(confirmed_head, client)
+    _store_confirmed_head(confirmed_head, client)
     return index_registry_once(
         w3,
         registry,
@@ -848,8 +846,6 @@ async def _run_registry_worker(
     chain_id: int,
     fund_address: str,
     rpc_url: str,
-    *,
-    store_confirmed_head: bool,
 ) -> None:
     client = _create_worker_client()
     w3 = Web3(Web3.HTTPProvider(rpc_url))
@@ -868,7 +864,6 @@ async def _run_registry_worker(
                     client,
                     chain_id,
                     fund_address,
-                    store_confirmed_head,
                 )
             except asyncio.CancelledError:
                 return
@@ -880,11 +875,17 @@ async def _run_registry_worker(
                 )
             await asyncio.sleep(settings.tokenized_fund_indexer_poll_interval_seconds)
     finally:
-        await asyncio.to_thread(
-            executor.shutdown,
-            wait=True,
-            cancel_futures=True,
+        shutdown = asyncio.create_task(
+            asyncio.to_thread(
+                executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
         )
+        try:
+            await asyncio.shield(shutdown)
+        except asyncio.CancelledError:
+            await shutdown
         _close_worker_client(client)
 
 
@@ -906,18 +907,14 @@ async def run() -> None:
     if not registries:
         raise RuntimeError("No enabled tokenized funds are registered")
 
-    head_chains: set[int] = set()
     tasks = []
     for registry in registries:
-        store_confirmed_head = registry.chain_id not in head_chains
-        head_chains.add(registry.chain_id)
         tasks.append(
             asyncio.create_task(
                 _run_registry_worker(
                     registry.chain_id,
                     registry.fund_address,
                     rpc_url,
-                    store_confirmed_head=store_confirmed_head,
                 )
             )
         )
@@ -927,5 +924,6 @@ async def run() -> None:
         return
     finally:
         for task in tasks:
-            task.cancel()
+            if not task.done() and task.cancelling() == 0:
+                task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

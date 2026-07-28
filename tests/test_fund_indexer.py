@@ -117,11 +117,42 @@ def test_confirmed_head_checkpoint_is_persisted_without_api_rpc(monkeypatch) -> 
     confirmed_head = indexer._capture_confirmed_head(FakeWeb3(), 84532)
     indexer._store_confirmed_head(confirmed_head)
 
-    assert client.table_name == "v2_confirmed_chain_heads"
-    assert client.row["chain_id"] == 84532
-    assert client.row["block_number"] == 2_995
-    assert client.row["block_hash"] == f"0x{2_995:064x}"
-    assert client.conflict == "chain_id"
+    assert client.rpc_name == "v2_upsert_confirmed_chain_head"
+    assert client.params["p_chain_id"] == 84532
+    assert client.params["p_block_number"] == 2_995
+    assert client.params["p_block_hash"] == f"0x{2_995:064x}"
+
+
+def test_confirmed_head_advance_keeps_maximum_across_workers(monkeypatch) -> None:
+    class MonotonicHeadClient:
+        def __init__(self):
+            self.block_number = -1
+            self.block_hash = None
+
+        def rpc(self, name, params):
+            assert name == "v2_upsert_confirmed_chain_head"
+            if params["p_block_number"] >= self.block_number:
+                self.block_number = params["p_block_number"]
+                self.block_hash = params["p_block_hash"]
+            return self
+
+        def execute(self):
+            return None
+
+    client = MonotonicHeadClient()
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+
+    for block_number in (100, 101, 99):
+        indexer._store_confirmed_head(
+            indexer.ConfirmedHead(
+                chain_id=84532,
+                block_number=block_number,
+                block_hash=f"0x{block_number:064x}",
+            )
+        )
+
+    assert client.block_number == 101
+    assert client.block_hash == f"0x{101:064x}"
 
 
 def test_confirmed_head_rejects_wrong_rpc_chain_before_persistence(monkeypatch) -> None:
@@ -159,10 +190,10 @@ def test_cycle_reuses_one_confirmed_head_when_rpc_advances(
 
     assert w3.eth.block_number_reads == 1
     assert w3.eth.current_block == 3_001
-    assert client.row["block_number"] == 2_995
+    assert client.params["p_block_number"] == 2_995
     assert projected_terminals == [
-        (client.row["block_number"], client.row["block_hash"]),
-        (client.row["block_number"], client.row["block_hash"]),
+        (client.params["p_block_number"], client.params["p_block_hash"]),
+        (client.params["p_block_number"], client.params["p_block_hash"]),
     ]
 
 
@@ -196,7 +227,7 @@ async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
         worker_clients.append(client)
         return client
 
-    def index_cycle(_w3, client, _chain_id, fund_address, _store_head):
+    def index_cycle(_w3, client, _chain_id, fund_address):
         cycle_clients[fund_address] = client
         if fund_address == registry.fund_address:
             slow_started.set()
@@ -224,11 +255,20 @@ async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
     task = asyncio.create_task(indexer.run())
     await asyncio.wait_for(covered_call_ran.wait(), timeout=1)
     assert slow_started.is_set()
-    release_slow.set()
+    assert len(worker_clients) == 3
+
     task.cancel()
+    await asyncio.sleep(0.05)
+
+    # Cancellation stays responsive while executor shutdown safely waits for
+    # the in-flight blocking cycle. Its client must remain open until release.
+    assert not task.done()
+    assert worker_clients[0].closed
+    assert not all(client.closed for client in worker_clients[1:])
+
+    release_slow.set()
     await task
 
-    assert len(worker_clients) == 3
     assert all(client.closed for client in worker_clients)
     assert (
         cycle_clients[registry.fund_address]
@@ -247,7 +287,7 @@ async def test_fund_worker_error_does_not_stop_peer(monkeypatch, registry) -> No
     covered_call_ran = asyncio.Event()
     loop = asyncio.get_running_loop()
 
-    def index_cycle(_w3, _client, _chain_id, fund_address, _store_head):
+    def index_cycle(_w3, _client, _chain_id, fund_address):
         if fund_address == registry.fund_address:
             failed_fund_ran.set()
             raise RuntimeError("temporary CSP indexing failure")
@@ -897,13 +937,9 @@ class HeadClient:
     def __init__(self, after_execute=None):
         self.after_execute = after_execute
 
-    def table(self, name):
-        self.table_name = name
-        return self
-
-    def upsert(self, row, on_conflict):
-        self.row = row
-        self.conflict = on_conflict
+    def rpc(self, name, params):
+        self.rpc_name = name
+        self.params = params
         return self
 
     def execute(self):
