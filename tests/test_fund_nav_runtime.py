@@ -502,6 +502,124 @@ def test_gateway_requires_exact_hash_after_first_strategy_transition() -> None:
     )
 
 
+class _BlockValueCall:
+    def __init__(self, values):
+        self.values = values
+
+    def call(self, block_identifier):
+        return self.values[block_identifier]
+
+
+class _SnapshotVaultFunctions:
+    def __init__(self, *, flow_nonces, idle_hashes):
+        self.flow_nonces = flow_nonces
+        self.idle_hashes = idle_hashes
+
+    def fundFlowNonce(self):
+        return _BlockValueCall(self.flow_nonces)
+
+    def idleStateHash(self):
+        return _BlockValueCall(self.idle_hashes)
+
+
+def _gateway_before_strategy_valuation(
+    *,
+    confirmed_flow_nonce=7,
+    pending_flow_nonce=7,
+    confirmed_component_nonce=3,
+    pending_component_nonce=3,
+):
+    block = 100
+    component_id = Web3.keccak(text="strategy component")
+    idle_hash = Web3.keccak(text="idle state")
+    component_hash = Web3.keccak(text="component state")
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.fund = TrustedFund(
+        {"chain_id": 84532, "fund_address": FUND},
+        {
+            "as_of_block": block,
+            "as_of_block_hash": Web3.to_hex(Web3.keccak(text="block 100")),
+            "reconciled": True,
+        },
+        {},
+        None,
+    )
+    gateway.vault = SimpleNamespace(
+        functions=_SnapshotVaultFunctions(
+            flow_nonces={
+                block: confirmed_flow_nonce,
+                "pending": pending_flow_nonce,
+            },
+            idle_hashes={block: idle_hash, "pending": idle_hash},
+        )
+    )
+    gateway._require_block_hash = lambda *_args: None
+    gateway._validate_bindings = lambda *_args: None
+    gateway._active_components = lambda _block: (component_id,)
+    gateway._component_state = lambda _component_id, observed_block: (
+        FUND,
+        1,
+        confirmed_component_nonce
+        if observed_block == block
+        else pending_component_nonce,
+        component_hash,
+        True,
+    )
+    return gateway
+
+
+def test_snapshot_rejects_unindexed_idle_state_before_strategy_valuation() -> None:
+    gateway = _gateway_before_strategy_valuation(
+        confirmed_flow_nonce=7,
+        pending_flow_nonce=8,
+    )
+    strategy_valuations = 0
+
+    def value_strategy(*_args):
+        nonlocal strategy_valuations
+        strategy_valuations += 1
+        return (), True
+
+    gateway._strategy_reports = value_strategy
+
+    with pytest.raises(RuntimeError, match="UNINDEXED_COMPONENT_STATE"):
+        gateway.snapshot()
+
+    assert strategy_valuations == 0
+
+
+def test_snapshot_rejects_unindexed_strategy_state_before_valuation() -> None:
+    gateway = _gateway_before_strategy_valuation(
+        confirmed_component_nonce=3,
+        pending_component_nonce=4,
+    )
+    strategy_valuations = 0
+
+    def value_strategy(*_args):
+        nonlocal strategy_valuations
+        strategy_valuations += 1
+        return (), True
+
+    gateway._strategy_reports = value_strategy
+
+    with pytest.raises(RuntimeError, match="UNINDEXED_COMPONENT_STATE"):
+        gateway.snapshot()
+
+    assert strategy_valuations == 0
+
+
+def test_snapshot_starts_valuation_once_indexed_component_state_catches_up() -> None:
+    gateway = _gateway_before_strategy_valuation()
+
+    def value_strategy(*_args):
+        raise RuntimeError("VALUATION_STARTED")
+
+    gateway._strategy_reports = value_strategy
+
+    with pytest.raises(RuntimeError, match="VALUATION_STARTED"):
+        gateway.snapshot()
+
+
 def test_concrete_gateway_simulation_calls_and_estimates_without_send() -> None:
     calls = []
 
