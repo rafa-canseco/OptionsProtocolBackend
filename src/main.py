@@ -39,22 +39,61 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SUPPORTED_LAZY_OTOKEN_CHAIN_IDS = {8453, 84532}
+_LAZY_BASE_ASSET_ADDRESSES = {
+    "eth": ("WETH_ADDRESS", "weth_address"),
+    "btc": ("WBTC_ADDRESS", "wbtc_address"),
+}
+
+
+def _configured_lazy_assets() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in settings.otoken_lazy_assets.split(",")
+        if item.strip()
+    }
+
 
 def validate_lazy_otoken_config(series_mode: str) -> None:
     """Fail fast only for lazy mode; eager remains the rollback-safe default."""
     if series_mode != "lazy":
         return
+    lazy_assets = _configured_lazy_assets()
+    if not lazy_assets:
+        raise RuntimeError("OTOKEN_LAZY_ASSETS must contain at least one Base asset")
+    unsupported_assets = lazy_assets - set(_LAZY_BASE_ASSET_ADDRESSES)
+    if unsupported_assets:
+        raise RuntimeError(
+            "OTOKEN_LAZY_ASSETS contains unsupported Base assets: "
+            + ", ".join(sorted(unsupported_assets))
+        )
     required = {
+        "RPC_URL": settings.rpc_url,
+        "BATCH_SETTLER_ADDRESS": settings.batch_settler_address,
+        "OTOKEN_FACTORY_ADDRESS": settings.otoken_factory_address,
         "WHITELIST_ADDRESS": settings.whitelist_address,
+        "OPERATOR_PRIVATE_KEY": settings.operator_private_key,
+        "USDC_ADDRESS": settings.usdc_address,
         "OTOKEN_INTENT_HMAC_SECRET": settings.otoken_intent_hmac_secret,
         "PRIVY_APP_ID": settings.privy_app_id,
         "PRIVY_APP_SECRET": settings.privy_app_secret,
         "PRIVY_JWT_VERIFICATION_KEY": settings.privy_jwt_verification_key,
     }
-    missing = [name for name, value in required.items() if not value]
+    for asset in lazy_assets:
+        env_name, setting_name = _LAZY_BASE_ASSET_ADDRESSES[asset]
+        required[env_name] = getattr(settings, setting_name)
+    missing = [
+        name
+        for name, value in required.items()
+        if not value or (isinstance(value, str) and not value.strip())
+    ]
     if missing:
         raise RuntimeError(
             "Lazy oToken mode is missing required configuration: " + ", ".join(missing)
+        )
+    if settings.chain_id not in SUPPORTED_LAZY_OTOKEN_CHAIN_IDS:
+        raise RuntimeError(
+            "Lazy oToken mode only supports Base mainnet (8453) or Base Sepolia (84532)"
         )
     materialization_buffer = settings.otoken_materialization_deadline_buffer_seconds
     execution_buffer = settings.otoken_ensure_deadline_buffer_seconds
@@ -63,6 +102,177 @@ def validate_lazy_otoken_config(series_mode: str) -> None:
             "OTOKEN_MATERIALIZATION_DEADLINE_BUFFER_SECONDS must exceed "
             "120 seconds and cover the execution buffer plus the 120-second "
             "transaction timeout"
+        )
+
+
+def _lazy_contract_addresses():
+    """Return named, checksummed addresses without exposing values in errors."""
+    from web3 import Web3
+
+    configured = {
+        "BATCH_SETTLER_ADDRESS": settings.batch_settler_address,
+        "OTOKEN_FACTORY_ADDRESS": settings.otoken_factory_address,
+        "WHITELIST_ADDRESS": settings.whitelist_address,
+        "USDC_ADDRESS": settings.usdc_address,
+    }
+    for asset in _configured_lazy_assets():
+        env_name, setting_name = _LAZY_BASE_ASSET_ADDRESSES[asset]
+        configured[env_name] = getattr(settings, setting_name)
+
+    checksummed = {}
+    for name, value in configured.items():
+        try:
+            address = Web3.to_checksum_address(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{name} must be a valid EVM address") from None
+        if address == "0x0000000000000000000000000000000000000000":
+            raise RuntimeError(f"{name} must not be the zero address")
+        checksummed[name] = address
+
+    by_address: dict[str, list[str]] = {}
+    for name, address in checksummed.items():
+        by_address.setdefault(address.lower(), []).append(name)
+    duplicates = [names for names in by_address.values() if len(names) > 1]
+    if duplicates:
+        names = ", ".join(sorted(duplicates[0]))
+        raise RuntimeError(f"Lazy oToken configuration reuses one address for {names}")
+    return checksummed
+
+
+def _has_contract_code(code) -> bool:
+    if isinstance(code, str):
+        normalized = code.removeprefix("0x")
+        return bool(normalized) and any(char != "0" for char in normalized)
+    raw = bytes(code)
+    return bool(raw) and any(raw)
+
+
+def validate_lazy_otoken_chain_config(series_mode: str, w3=None) -> None:
+    """Verify lazy-mode Base deployment wiring with read-only RPC calls."""
+    if series_mode != "lazy":
+        return
+    validate_lazy_otoken_config(series_mode)
+
+    from src.contracts.abis import (
+        ADDRESS_BOOK_ABI,
+        BATCH_SETTLER_ABI,
+        OTOKEN_FACTORY_ABI,
+    )
+    from src.contracts.web3_client import get_operator_account, get_w3
+
+    addresses = _lazy_contract_addresses()
+    try:
+        expected_operator = get_operator_account().address
+    except (TypeError, ValueError):
+        raise RuntimeError("OPERATOR_PRIVATE_KEY must be a valid private key") from None
+
+    if w3 is None:
+        try:
+            w3 = get_w3()
+        except Exception:
+            raise RuntimeError(
+                "Lazy oToken RPC preflight could not initialize RPC_URL"
+            ) from None
+    try:
+        connected = w3.is_connected()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not connect to RPC_URL"
+        ) from None
+    if not connected:
+        raise RuntimeError("Lazy oToken RPC preflight could not connect to RPC_URL")
+    try:
+        rpc_chain_id = int(w3.eth.chain_id)
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not read the chain ID"
+        ) from None
+    if rpc_chain_id != settings.chain_id:
+        raise RuntimeError(
+            "Lazy oToken RPC chain mismatch: CHAIN_ID does not match RPC_URL"
+        )
+
+    for name, address in addresses.items():
+        try:
+            code = w3.eth.get_code(address)
+        except Exception:
+            raise RuntimeError(
+                f"Lazy oToken RPC preflight could not read code for {name}"
+            ) from None
+        if not _has_contract_code(code):
+            raise RuntimeError(f"{name} has no deployed bytecode on configured chain")
+
+    factory = w3.eth.contract(
+        address=addresses["OTOKEN_FACTORY_ADDRESS"],
+        abi=OTOKEN_FACTORY_ABI,
+    )
+    batch_settler = w3.eth.contract(
+        address=addresses["BATCH_SETTLER_ADDRESS"],
+        abi=BATCH_SETTLER_ABI,
+    )
+    try:
+        factory_address_book = factory.functions.addressBook().call()
+        batch_address_book = batch_settler.functions.addressBook().call()
+        configured_operator = factory.functions.operator().call()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken preflight could not read factory/settler configuration"
+        ) from None
+
+    if factory_address_book.lower() != batch_address_book.lower():
+        raise RuntimeError(
+            "Lazy oToken crossed configuration: factory and settler use "
+            "different AddressBook contracts"
+        )
+    if configured_operator.lower() != expected_operator.lower():
+        raise RuntimeError(
+            "Lazy oToken crossed configuration: OPERATOR_PRIVATE_KEY does not "
+            "match factory operator"
+        )
+
+    try:
+        address_book_code = w3.eth.get_code(factory_address_book)
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not read AddressBook code"
+        ) from None
+    if not _has_contract_code(address_book_code):
+        raise RuntimeError("Factory AddressBook has no deployed bytecode")
+
+    address_book = w3.eth.contract(
+        address=factory_address_book,
+        abi=ADDRESS_BOOK_ABI,
+    )
+    try:
+        address_book_factory = address_book.functions.oTokenFactory().call()
+        address_book_whitelist = address_book.functions.whitelist().call()
+        address_book_settler = address_book.functions.batchSettler().call()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken preflight could not read AddressBook configuration"
+        ) from None
+    expected_wiring = {
+        "OTOKEN_FACTORY_ADDRESS": (
+            address_book_factory,
+            addresses["OTOKEN_FACTORY_ADDRESS"],
+        ),
+        "WHITELIST_ADDRESS": (
+            address_book_whitelist,
+            addresses["WHITELIST_ADDRESS"],
+        ),
+        "BATCH_SETTLER_ADDRESS": (
+            address_book_settler,
+            addresses["BATCH_SETTLER_ADDRESS"],
+        ),
+    }
+    crossed = [
+        name
+        for name, (observed, expected) in expected_wiring.items()
+        if observed.lower() != expected.lower()
+    ]
+    if crossed:
+        raise RuntimeError(
+            "Lazy oToken crossed configuration in AddressBook: " + ", ".join(crossed)
         )
 
 
@@ -176,6 +386,10 @@ async def lifespan(app: FastAPI):
 
     tasks = []
 
+    configured_series_mode = settings.otoken_series_mode.strip().lower()
+    validate_lazy_otoken_config(configured_series_mode)
+    validate_lazy_otoken_chain_config(configured_series_mode)
+
     has_on_chain_config = (
         settings.batch_settler_address
         and settings.operator_private_key
@@ -184,8 +398,7 @@ async def lifespan(app: FastAPI):
     if has_on_chain_config:
         from src.bots.otoken_manager import get_otoken_series_mode
 
-        series_mode = get_otoken_series_mode()
-        validate_lazy_otoken_config(series_mode)
+        get_otoken_series_mode()
         from src.bots import (
             otoken_manager,
             event_indexer,

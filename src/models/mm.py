@@ -1,4 +1,5 @@
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -190,6 +191,10 @@ class QuoteResponse(BaseModel):
 
     id: str
     otoken_address: str
+    deployment_status: Literal["virtual", "creating", "ready", "failed"] = Field(
+        default="ready",
+        description="Series lifecycle sourced from available_otokens",
+    )
     bid_price: str
     deadline: int
     quote_id: str

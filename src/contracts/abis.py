@@ -7,6 +7,13 @@ update these ABIs to match.
 """
 
 BATCH_SETTLER_ABI = [
+    {
+        "inputs": [],
+        "name": "addressBook",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # OrderExecuted — emitted by executeOrder().
     # NOTE: if the contracts instance renames this event, update here.
     {
@@ -131,6 +138,13 @@ BATCH_SETTLER_ABI = [
 OTOKEN_FACTORY_ABI = [
     {
         "inputs": [],
+        "name": "addressBook",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
         "name": "operator",
         "outputs": [{"name": "", "type": "address"}],
         "stateMutability": "view",
@@ -206,6 +220,30 @@ OTOKEN_FACTORY_ABI = [
             {"name": "_isPut", "type": "bool"},
         ],
         "name": "getTargetOTokenAddress",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+ADDRESS_BOOK_ABI = [
+    {
+        "inputs": [],
+        "name": "oTokenFactory",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "whitelist",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "batchSettler",
         "outputs": [{"name": "", "type": "address"}],
         "stateMutability": "view",
         "type": "function",
