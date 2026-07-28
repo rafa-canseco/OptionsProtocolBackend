@@ -1,5 +1,6 @@
 """Concrete DB and Web3 runtime for fail-closed NAV reporting."""
 
+import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1363,6 +1364,61 @@ class RuntimeReporter:
 class ReporterFleet:
     def __init__(self, reporter_factories):
         self.reporter_factories = reporter_factories
+
+    async def run_forever(self, interval_seconds: float, on_result) -> None:
+        """Run each fund on an independent cadence until the task is cancelled.
+
+        A factory reloads that fund's indexed registry state on every iteration.
+        The enabled-fund topology is fixed for the lifetime of this fleet and is
+        refreshed when the process restarts.
+        """
+        executor = ThreadPoolExecutor(
+            max_workers=len(self.reporter_factories),
+            thread_name_prefix="fund-nav",
+        )
+        tasks = [
+            asyncio.create_task(
+                self._run_worker(factory, interval_seconds, on_result, executor)
+            )
+            for factory in self.reporter_factories
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.to_thread(
+                executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
+
+    @classmethod
+    async def _run_worker(
+        cls,
+        factory,
+        interval_seconds: float,
+        on_result,
+        executor: ThreadPoolExecutor,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                result = await loop.run_in_executor(
+                    executor,
+                    cls._run_factory,
+                    factory,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                result = ReportRun(
+                    status="failed",
+                    reason_code="REPORT_BUILD_FAILED",
+                )
+            on_result(result)
+            await asyncio.sleep(interval_seconds)
 
     def run_once(self) -> ReportRun:
         # Valuation and activation waits are independent per fund and can span
