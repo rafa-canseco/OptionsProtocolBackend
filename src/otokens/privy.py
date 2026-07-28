@@ -10,6 +10,7 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 _user_cache: dict[str, tuple[float, set[str]]] = {}
+MAX_PRIVY_USER_CACHE_ENTRIES = 10_000
 
 
 def _ethereum_addresses(payload: dict) -> set[str]:
@@ -25,6 +26,28 @@ def _ethereum_addresses(payload: dict) -> set[str]:
         if isinstance(address, str) and address.startswith("0x") and len(address) == 42:
             addresses.add(address.lower())
     return addresses
+
+
+def _cache_user_wallets(user_id: str, addresses: set[str], now: float) -> None:
+    """Insert a Privy lookup without allowing unbounded process memory."""
+    expiry_cutoff = now - settings.privy_user_cache_seconds
+    expired = [
+        cached_user
+        for cached_user, (cached_at, _) in _user_cache.items()
+        if cached_at <= expiry_cutoff
+    ]
+    for cached_user in expired:
+        _user_cache.pop(cached_user, None)
+
+    # Refreshing a user should make it the newest eviction candidate.
+    _user_cache.pop(user_id, None)
+    if len(_user_cache) >= MAX_PRIVY_USER_CACHE_ENTRIES:
+        oldest_user = min(
+            _user_cache,
+            key=lambda cached_user: _user_cache[cached_user][0],
+        )
+        _user_cache.pop(oldest_user, None)
+    _user_cache[user_id] = (now, addresses)
 
 
 async def get_user_ethereum_wallets(user_id: str) -> set[str]:
@@ -54,7 +77,7 @@ async def get_user_ethereum_wallets(user_id: str) -> set[str]:
     if payload.get("id") != user_id:
         raise RuntimeError("PRIVY_USER_MISMATCH")
     addresses = _ethereum_addresses(payload)
-    _user_cache[user_id] = (now, addresses)
+    _cache_user_wallets(user_id, addresses, now)
     return addresses
 
 
