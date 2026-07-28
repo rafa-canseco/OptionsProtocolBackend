@@ -189,6 +189,7 @@ class Gateway:
         self.activation_wait_result = True
         self.activation_waits = []
         self.broadcasted = []
+        self.expected_report_nonce = 9
 
     def snapshot(self):
         return self.value
@@ -223,7 +224,7 @@ class Gateway:
 
     def simulate(self, *, report_nonce, reports, reporters, signatures, sender):
         self.simulations += 1
-        assert report_nonce == 9
+        assert report_nonce == self.expected_report_nonce
         assert len(reports) == 1
         assert len(reporters) == len(signatures)
         assert sender == SUBMITTER
@@ -449,9 +450,44 @@ def test_block_or_nonce_change_prevents_submission() -> None:
     assert gateway.submissions == 0
 
     service, gateway = reporter()
-    gateway.current_nonce += 1
+    original_block_hash = gateway.block_hash
+
+    def advance_nonce_during_run(block):
+        gateway.current_nonce += 1
+        return original_block_hash(block)
+
+    gateway.block_hash = advance_nonce_during_run
     assert service.run_once().reason_code == "REPORT_NONCE_CHANGED"
     assert gateway.submissions == 0
+
+
+def test_live_nonce_advances_without_waiting_for_indexed_snapshot() -> None:
+    store = Store()
+    service, gateway = reporter(store=store)
+    gateway.current_nonce = 9
+    gateway.expected_report_nonce = 10
+
+    run = service.run_once()
+
+    assert run.status == "confirmed"
+    assert store.identity == (84532, FUND, 10)
+    assert gateway.builds == gateway.submissions == 1
+
+
+def test_live_nonce_successor_simulation_failure_remains_fail_closed() -> None:
+    store = Store()
+    service, gateway = reporter(store=store)
+    gateway.current_nonce = 9
+    gateway.expected_report_nonce = 10
+    gateway.simulate = lambda **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("pending state rejected successor")
+    )
+
+    run = service.run_once()
+
+    assert store.identity == (84532, FUND, 10)
+    assert run.reason_code == "SIMULATION_FAILED"
+    assert gateway.builds == gateway.submissions == 0
 
 
 def test_simulation_failure_is_recorded_without_send() -> None:
@@ -680,14 +716,18 @@ def test_pending_submitted_transaction_is_reconciled_before_retry() -> None:
     assert gateway.submissions == 0 and store.starts == 0
 
 
-def test_onchain_nonce_confirms_ambiguous_restart() -> None:
-    existing = StoredRun("run-1", "submitted", TX_HASH, Web3.to_hex(TX_RAW))
-    store = Store(existing, lease_expires=30)
+def test_live_nonce_does_not_reopen_ambiguous_predecessor_run() -> None:
+    predecessor = StoredRun("run-1", "submitted", TX_HASH, Web3.to_hex(TX_RAW))
+    historical_runs = {9: predecessor}
+    store = Store()
     service, gateway = reporter(store=store)
     gateway.current_nonce = 9
+    gateway.expected_report_nonce = 10
 
     assert service.run_once().status == "confirmed"
-    assert gateway.submissions == 0 and store.starts == 0
+    assert store.identity == (84532, FUND, 10)
+    assert store.starts == gateway.submissions == 1
+    assert historical_runs == {9: predecessor}
 
 
 def test_concurrent_loser_never_signs_simulates_or_submits() -> None:

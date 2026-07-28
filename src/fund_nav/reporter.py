@@ -182,7 +182,16 @@ class NavReporter:
 
     def run_once(self) -> ReportRun:
         snapshot = self.gateway.snapshot()
-        report_nonce = snapshot.last_report_nonce + 1
+        # The report nonce sequences submissions; it is not an asset value at
+        # the confirmed accounting snapshot. Advance from pending contract
+        # state so a confirmed report does not wait for the event indexer before
+        # preparing its successor. All accounting fields remain pinned to the
+        # snapshot block, and the later nonce/simulation checks fail closed if
+        # pending state changes again.
+        live_report_nonce = self.gateway.report_nonce()
+        if live_report_nonce > snapshot.last_report_nonce:
+            snapshot = replace(snapshot, last_report_nonce=live_report_nonce)
+        report_nonce = max(snapshot.last_report_nonce, live_report_nonce) + 1
         claim = self.store.claim(snapshot, report_nonce)
         if not claim.owned:
             return self._reconcile_existing(claim.run, snapshot, report_nonce)
