@@ -705,6 +705,62 @@ def test_persist_window_projects_nav_at_terminal_block(monkeypatch, registry) ->
     assert projected_blocks == [115]
 
 
+def test_persist_window_sends_only_current_history_delta(monkeypatch, registry) -> None:
+    historical = indexer.FundEvent(
+        chain_id=registry.chain_id,
+        fund_address=registry.fund_address,
+        contract_address=registry.fund_address,
+        contract_role="fund_accounting",
+        interface_version=1,
+        block_number=99,
+        block_hash=f"0x{99:064x}",
+        transaction_hash="0x01",
+        transaction_index=0,
+        log_index=0,
+        event_name="NavCommitted",
+        args={
+            "reportNonce": 1,
+            "netAssets": 1_000,
+            "validAfterBlock": 99,
+            "validUntilBlock": 109,
+        },
+    )
+    current = replace(
+        historical,
+        block_number=100,
+        block_hash=f"0x{100:064x}",
+        transaction_hash="0x02",
+        log_index=1,
+        args={
+            "reportNonce": 2,
+            "netAssets": 1_001,
+            "validAfterBlock": 100,
+            "validUntilBlock": 110,
+        },
+    )
+    client = CapturingRpcClient()
+    monkeypatch.setattr(indexer, "_load_events", lambda *_: [historical])
+    monkeypatch.setattr(
+        indexer,
+        "_missing_reconciliation_roles",
+        lambda *_: ["covered_call_adapter"],
+    )
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+
+    indexer._persist_window(
+        FakeWeb3(),
+        registry,
+        100,
+        100,
+        f"0x{100:064x}",
+        [current],
+    )
+
+    projection = client.params["p_projection"]
+    assert [row["report_nonce"] for row in projection["nav_reports"]] == [2]
+    assert [row["block_number"] for row in projection["activities"]] == [100]
+
+
 def test_staggered_activation_defers_reconciliation_and_advances_state(
     monkeypatch, registry
 ) -> None:
@@ -836,27 +892,52 @@ def test_ambiguous_rpc_response_retries_exact_window(monkeypatch, registry) -> N
 
 def test_load_events_paginates_in_canonical_order(monkeypatch, registry) -> None:
     rows = [_event_row(index) for index in range(indexer.EVENT_PAGE_SIZE + 1)]
-    query = FakeEventQuery(rows, server_limit=500)
-    monkeypatch.setattr(indexer, "get_client", lambda: query)
+    client = FakeEventClient(rows, server_limit=500)
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
 
     events = indexer._load_events(registry)
 
     assert len(events) == indexer.EVENT_PAGE_SIZE + 1
-    assert query.ranges == [
+    assert client.ranges == [
         (0, 999),
         (500, 1_499),
         (1_000, 1_999),
         (1_001, 2_000),
     ]
-    assert (
-        query.orders
-        == [
-            "block_number",
-            "transaction_index",
-            "log_index",
-        ]
-        * 4
-    )
+    assert client.orders[:3] == [
+        "block_number",
+        "transaction_index",
+        "log_index",
+    ]
+
+
+def test_load_events_compacts_high_frequency_nav_history(monkeypatch, registry) -> None:
+    rows = []
+    for nonce in range(1, 1_501):
+        submitted = _event_row(nonce * 2)
+        submitted.update(
+            event_name="NavSubmitted",
+            payload={"reportNonce": nonce},
+        )
+        committed = _event_row(nonce * 2 + 1)
+        committed.update(
+            event_name="NavCommitted",
+            payload={"reportNonce": nonce},
+        )
+        rows.extend((submitted, committed))
+    deposit = _event_row(4_000)
+    rows.append(deposit)
+    client = FakeEventClient(rows, server_limit=500)
+    monkeypatch.setattr(indexer, "get_client", lambda: client)
+
+    events = indexer._load_events(registry)
+
+    assert [event.event_name for event in events] == [
+        "NavSubmitted",
+        "NavCommitted",
+        "Deposit",
+    ]
+    assert [event.args.get("reportNonce") for event in events[:2]] == [1_500, 1_500]
 
 
 def _event_row(index: int) -> dict:
@@ -876,36 +957,73 @@ def _event_row(index: int) -> dict:
     }
 
 
-class FakeEventQuery:
+class FakeEventClient:
     def __init__(self, rows: list[dict], server_limit: int):
         self.rows = rows
         self.server_limit = server_limit
         self.orders = []
         self.ranges = []
-        self.current_range = (0, len(rows))
 
     def table(self, _name):
-        return self
+        return FakeEventQuery(self)
+
+
+class FakeEventQuery:
+    def __init__(self, client: FakeEventClient):
+        self.client = client
+        self.rows = list(client.rows)
+        self.current_range = None
+        self.current_limit = None
+        self.ordering = []
+        self.negated = False
 
     def select(self, _columns):
         return self
 
-    def eq(self, _column, _value):
+    def eq(self, column, value):
+        if column == "event_name":
+            self.rows = [row for row in self.rows if row[column] == value]
         return self
 
-    def order(self, column):
-        self.orders.append(column)
+    @property
+    def not_(self):
+        self.negated = True
+        return self
+
+    def in_(self, column, values):
+        selected = set(values)
+        if self.negated:
+            self.rows = [row for row in self.rows if row[column] not in selected]
+            self.negated = False
+        else:
+            self.rows = [row for row in self.rows if row[column] in selected]
+        return self
+
+    def order(self, column, *, desc=False):
+        self.client.orders.append(column)
+        self.ordering.append((column, desc))
         return self
 
     def range(self, start, end):
         self.current_range = (start, end)
-        self.ranges.append(self.current_range)
+        self.client.ranges.append(self.current_range)
+        return self
+
+    def limit(self, count):
+        self.current_limit = count
         return self
 
     def execute(self):
-        start, end = self.current_range
-        end = min(end, start + self.server_limit - 1)
-        return type("Result", (), {"data": self.rows[start : end + 1]})()
+        rows = list(self.rows)
+        for column, descending in reversed(self.ordering):
+            rows.sort(key=lambda row: row[column], reverse=descending)
+        if self.current_range is not None:
+            start, end = self.current_range
+            end = min(end, start + self.client.server_limit - 1)
+            rows = rows[start : end + 1]
+        if self.current_limit is not None:
+            rows = rows[: self.current_limit]
+        return type("Result", (), {"data": rows})()
 
 
 class AmbiguousRpcClient:
