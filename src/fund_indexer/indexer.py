@@ -784,4 +784,4 @@ async def run() -> None:
             return
         except Exception:
             logger.exception("Tokenized fund indexing failed")
-        await asyncio.sleep(settings.event_poll_interval_seconds)
+        await asyncio.sleep(settings.tokenized_fund_indexer_poll_interval_seconds)

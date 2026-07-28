@@ -181,6 +181,31 @@ def test_run_offloads_blocking_index_cycle(monkeypatch) -> None:
     assert len(calls[0][1]) == 1
 
 
+def test_run_uses_dedicated_fund_indexer_poll_interval(monkeypatch) -> None:
+    sleeps = []
+
+    async def fake_to_thread(_function, *_args):
+        return None
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(indexer.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        indexer.settings,
+        "tokenized_fund_indexer_poll_interval_seconds",
+        5,
+    )
+    monkeypatch.setattr(indexer.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(indexer.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(indexer.run())
+
+    assert sleeps == [5]
+
+
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:
     monkeypatch.setattr(
         indexer,
