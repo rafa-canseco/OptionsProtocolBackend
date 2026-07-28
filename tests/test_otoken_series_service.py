@@ -84,6 +84,14 @@ def _configure_lazy(monkeypatch) -> None:
     monkeypatch.setattr(settings, "otoken_lazy_assets", "eth")
     monkeypatch.setattr(settings, "otoken_factory_address", FACTORY)
     monkeypatch.setattr(settings, "otoken_intent_hmac_secret", "test-secret")
+    monkeypatch.setattr(
+        "src.otokens.service.get_balance",
+        lambda _wallet, _token: 10**30,
+    )
+    monkeypatch.setattr(
+        "src.otokens.service.get_eth_balance",
+        lambda _wallet: 10**30,
+    )
 
 
 def test_ready_series_is_idempotent_and_preserves_quote(monkeypatch) -> None:
@@ -335,3 +343,117 @@ def test_stale_market_maker_capacity_fails_closed() -> None:
         service._validate_capacity(mm_address=MM, asset="eth", amount_raw=1)
 
     assert raised.value.code == "CAPACITY_STALE"
+
+
+def test_put_collateral_checks_exact_usdc_requirement() -> None:
+    canonical = _canonical()
+    amount_raw = 2 * 10**8
+    required = amount_raw * canonical.strike_price_raw // 10**10
+
+    with (
+        patch("src.otokens.service.get_balance", return_value=required) as balance,
+        patch("src.otokens.service.get_eth_balance") as native_balance,
+    ):
+        SeriesMaterializationService._validate_user_collateral(
+            canonical=canonical,
+            asset="eth",
+            wallet_address=WALLET,
+            amount_raw=amount_raw,
+        )
+
+    balance.assert_called_once_with(WALLET, canonical.strike_asset)
+    native_balance.assert_not_called()
+
+
+def test_eth_call_combines_weth_and_native_balance() -> None:
+    canonical = CanonicalSeries(
+        **{
+            **_canonical().__dict__,
+            "collateral_asset": WETH,
+            "is_put": False,
+        }
+    )
+    amount_raw = 2 * 10**8
+
+    with (
+        patch(
+            "src.otokens.service.get_balance",
+            return_value=10**18,
+        ) as token_balance,
+        patch(
+            "src.otokens.service.get_eth_balance",
+            return_value=10**18,
+        ) as native_balance,
+    ):
+        SeriesMaterializationService._validate_user_collateral(
+            canonical=canonical,
+            asset="eth",
+            wallet_address=WALLET,
+            amount_raw=amount_raw,
+        )
+
+    token_balance.assert_called_once_with(WALLET, canonical.underlying)
+    native_balance.assert_called_once_with(WALLET)
+
+
+def test_btc_call_requires_cbbtc_without_native_balance() -> None:
+    cbbtc = "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"
+    canonical = CanonicalSeries(
+        **{
+            **_canonical().__dict__,
+            "underlying": cbbtc,
+            "collateral_asset": cbbtc,
+            "is_put": False,
+        }
+    )
+    amount_raw = 2 * 10**8
+
+    with (
+        patch(
+            "src.otokens.service.get_balance",
+            return_value=amount_raw,
+        ) as token_balance,
+        patch("src.otokens.service.get_eth_balance") as native_balance,
+    ):
+        SeriesMaterializationService._validate_user_collateral(
+            canonical=canonical,
+            asset="btc",
+            wallet_address=WALLET,
+            amount_raw=amount_raw,
+        )
+
+    token_balance.assert_called_once_with(WALLET, canonical.underlying)
+    native_balance.assert_not_called()
+
+
+def test_collateral_rpc_failure_fails_before_materialization() -> None:
+    with (
+        patch(
+            "src.otokens.service.get_balance",
+            side_effect=RuntimeError("RPC unavailable"),
+        ),
+        pytest.raises(SeriesError, match="could not be verified") as raised,
+    ):
+        SeriesMaterializationService._validate_user_collateral(
+            canonical=_canonical(),
+            asset="eth",
+            wallet_address=WALLET,
+            amount_raw=10**8,
+        )
+
+    assert raised.value.code == "USER_COLLATERAL_UNAVAILABLE"
+
+
+def test_insufficient_collateral_fails_before_materialization() -> None:
+    with (
+        patch("src.otokens.service.get_balance", return_value=0),
+        pytest.raises(SeriesError, match="cannot collateralize") as raised,
+    ):
+        SeriesMaterializationService._validate_user_collateral(
+            canonical=_canonical(),
+            asset="eth",
+            wallet_address=WALLET,
+            amount_raw=10**8,
+        )
+
+    assert raised.value.code == "USER_COLLATERAL_INSUFFICIENT"

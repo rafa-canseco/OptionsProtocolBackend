@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from web3 import Web3
 
+from src.chains.base.client import get_balance, get_eth_balance
 from src.config import settings, is_asset_tradable
 from src.contracts.web3_client import (
     build_and_send_tx,
@@ -21,7 +22,7 @@ from src.crypto.eip712 import quote_digest, recover_quote_signer
 from src.models.series import EnsureSeriesRequest, ExecutionQuoteSnapshot
 from src.otokens.models import canonical_series_from_row
 from src.otokens.repository import SeriesRepository
-from src.pricing.assets import get_base_assets, get_asset_config
+from src.pricing.assets import Asset, get_base_assets, get_asset_config
 from src.pricing.utils import cutoff_hours_for_expiry
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,39 @@ class SeriesMaterializationService:
             raise SeriesError(
                 "CAPACITY_EXCEEDED",
                 "The requested size exceeds current market-maker capacity",
+                retryable=True,
+            )
+
+    @staticmethod
+    def _validate_user_collateral(
+        *,
+        canonical,
+        asset: str,
+        wallet_address: str,
+        amount_raw: int,
+    ) -> None:
+        wallet = Web3.to_checksum_address(wallet_address)
+        try:
+            if canonical.is_put:
+                required = (amount_raw * canonical.strike_price_raw) // 10**10
+                available = get_balance(wallet, canonical.strike_asset)
+            else:
+                decimals = get_asset_config(Asset(asset)).decimals
+                required = amount_raw * (10 ** (decimals - OTOKEN_DECIMALS))
+                available = get_balance(wallet, canonical.underlying)
+                if asset == Asset.ETH.value:
+                    available += get_eth_balance(wallet)
+        except Exception as exc:
+            raise SeriesError(
+                "USER_COLLATERAL_UNAVAILABLE",
+                "Wallet collateral could not be verified; retry shortly",
+                status_code=503,
+                retryable=True,
+            ) from exc
+        if available < required:
+            raise SeriesError(
+                "USER_COLLATERAL_INSUFFICIENT",
+                "The execution wallet cannot collateralize this trade",
                 retryable=True,
             )
 
@@ -391,6 +425,13 @@ class SeriesMaterializationService:
                 "SERIES_ADDRESS_MISMATCH",
                 "The expected address does not match the factory CREATE2 target",
             )
+
+        self._validate_user_collateral(
+            canonical=canonical,
+            asset=asset,
+            wallet_address=request.wallet_address,
+            amount_raw=amount_raw,
+        )
 
         actor_key = _actor_key(user_id)
         quote_hash = Web3.to_hex(digest)
