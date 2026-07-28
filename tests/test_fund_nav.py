@@ -13,12 +13,14 @@ from src.fund_nav.models import (
 )
 from src.fund_nav.reporter import (
     AmbiguousSubmission,
+    EXECUTION_BUFFER_BLOCKS,
     NavReporter,
     ReportRun,
     ReporterSnapshot,
     RunClaim,
     SignedTransaction,
     StoredRun,
+    SUBMISSION_LEAD_BLOCKS,
 )
 
 FUND = "0xf000000000000000000000000000000000000001"
@@ -253,6 +255,7 @@ def reporter(
     keys=KEYS,
     margin=3,
     submitter_key=SUBMITTER_KEY,
+    execution_buffer=EXECUTION_BUFFER_BLOCKS,
 ):
     gateway = Gateway(value)
     service = NavReporter(
@@ -263,6 +266,7 @@ def reporter(
         expected_chain_id=84532,
         transaction_timeout=30,
         inclusion_margin=margin,
+        execution_buffer=execution_buffer,
     )
     return service, gateway
 
@@ -379,6 +383,11 @@ def test_refreshes_consumed_margin_and_submits_at_activation() -> None:
     assert run.status == "confirmed"
     assert gateway.activation_waits == [110, 117]
     assert gateway.submissions == 1
+
+
+def test_execution_buffer_must_exceed_submission_lead() -> None:
+    with pytest.raises(ValueError, match="must exceed"):
+        reporter(execution_buffer=SUBMISSION_LEAD_BLOCKS)
 
 
 def test_stale_projected_window_never_builds_and_fresh_retry_submits() -> None:

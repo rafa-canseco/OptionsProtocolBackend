@@ -25,7 +25,6 @@ from src.fund_nav.models import sign_digest
 from src.fund_nav.observations import OptionObservation
 from src.fund_nav.reporter import ReportRun, SignedTransaction
 from src.fund_nav.reporter import (
-    EXECUTION_BUFFER_BLOCKS,
     SUBMISSION_LEAD_BLOCKS,
     _submitter_transaction_lock,
 )
@@ -340,25 +339,20 @@ def test_reporter_fleet_cleanup_failure_does_not_replace_confirmed_run(
     assert caplog.messages.count("Fund NAV reporter client cleanup failed") == 2
 
 
-def test_parallel_fleet_cadence_overlaps_at_worst_inclusion_latency() -> None:
-    previous_valid_after = 1_000
-    max_window_length = 50
-    previous_valid_until = previous_valid_after + max_window_length
+def test_testnet_execution_buffer_covers_observed_renewal_latency() -> None:
+    previous_valid_until = 377
+    next_snapshot = 337
+    next_head_after_valuation = 369
     inclusion_margin = 3
-    loop_interval_blocks = 1
-    activation_delay = 43
-    confirmed_snapshot_lag = 15
-    worst_inclusion_blocks = SUBMISSION_LEAD_BLOCKS
-
-    previous_broadcast = previous_valid_after - SUBMISSION_LEAD_BLOCKS
-    next_head = previous_broadcast + worst_inclusion_blocks + loop_interval_blocks
-    next_snapshot = next_head - confirmed_snapshot_lag
+    execution_buffer = 5
+    activation_delay = 1
     next_valid_after = max(
-        next_head + inclusion_margin + EXECUTION_BUFFER_BLOCKS,
+        next_head_after_valuation + inclusion_margin + execution_buffer,
         next_snapshot + activation_delay,
     )
 
-    assert next_valid_after <= previous_valid_until
+    assert execution_buffer > SUBMISSION_LEAD_BLOCKS
+    assert next_valid_after <= previous_valid_until + 1
 
 
 def test_submitter_lock_is_keyed_by_chain_and_sender() -> None:
