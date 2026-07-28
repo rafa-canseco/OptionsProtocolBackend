@@ -69,13 +69,20 @@ def _virtual_row() -> dict:
     }
 
 
-def _claim(*, owned: bool, status: str, tx_hash: str | None = None):
+def _claim(
+    *,
+    owned: bool,
+    status: str,
+    tx_hash: str | None = None,
+    attempts_exhausted: bool = False,
+):
     return MaterializationClaim(
         owned=owned,
         status=status,
         rate_limited=False,
         ownership_token="00000000-0000-0000-0000-000000000001" if owned else None,
         tx_hash=tx_hash,
+        attempts_exhausted=attempts_exhausted,
     )
 
 
@@ -249,6 +256,72 @@ def test_non_owner_gets_polling_response_without_creating(monkeypatch) -> None:
     assert result.retry_after_ms == settings.otoken_ensure_retry_after_ms
     assert result.deployment_tx_hash == "0xpending"
     send_tx.assert_not_called()
+
+
+def test_attempts_exhausted_reconciles_already_deployed_series(
+    monkeypatch,
+) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.claim.return_value = _claim(
+        owned=False,
+        status="failed",
+        tx_hash="0xconfirmed",
+        attempts_exhausted=True,
+    )
+    repository.reconcile_ready.return_value = True
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    monkeypatch.setattr(
+        service, "_validate_quote", lambda **_kwargs: (MM, b"\x12" * 32)
+    )
+    monkeypatch.setattr(service, "_readiness", lambda _address: (True, True))
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+
+    with (
+        patch("src.otokens.service.get_otoken_factory", return_value=factory),
+        patch("src.otokens.service.build_and_send_tx") as send_tx,
+    ):
+        result = service.ensure(_request(), "did:privy:user")
+
+    assert result.status == "ready"
+    assert result.deployment_tx_hash == "0xconfirmed"
+    repository.reconcile_ready.assert_called_once_with(_canonical().series_key)
+    send_tx.assert_not_called()
+
+
+def test_attempts_exhausted_stays_blocked_when_not_deployed(monkeypatch) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.claim.return_value = _claim(
+        owned=False,
+        status="failed",
+        attempts_exhausted=True,
+    )
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    monkeypatch.setattr(
+        service, "_validate_quote", lambda **_kwargs: (MM, b"\x12" * 32)
+    )
+    monkeypatch.setattr(service, "_readiness", lambda _address: (False, False))
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+
+    with (
+        patch("src.otokens.service.get_otoken_factory", return_value=factory),
+        pytest.raises(SeriesError, match="retry limit") as raised,
+    ):
+        service.ensure(_request(), "did:privy:user")
+
+    assert raised.value.code == "MATERIALIZATION_ATTEMPTS_EXHAUSTED"
+    repository.reconcile_ready.assert_not_called()
 
 
 def test_quote_deadline_fails_before_rpc(monkeypatch) -> None:

@@ -262,6 +262,33 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION v1_reconcile_ready_otoken(
+    p_series_key TEXT
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE
+    updated_count INTEGER;
+BEGIN
+    IF p_series_key IS NULL THEN
+        RAISE EXCEPTION 'Invalid oToken reconciliation';
+    END IF;
+    UPDATE available_otokens SET
+        deployment_status = 'ready',
+        deployment_owner_token = NULL,
+        deployment_lease_expires_at = NULL,
+        last_error_code = NULL,
+        ready_at = coalesce(ready_at, now()),
+        updated_at = now()
+    WHERE series_key = p_series_key
+      AND chain = 'base';
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    RETURN updated_count = 1;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION v1_fail_otoken_materialization(
     p_series_key TEXT,
     p_ownership_token UUID,
@@ -327,6 +354,9 @@ REVOKE ALL ON FUNCTION v1_claim_otoken_materialization(
 REVOKE ALL ON FUNCTION v1_complete_otoken_materialization(
     TEXT, UUID, TEXT
 ) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION v1_reconcile_ready_otoken(
+    TEXT
+) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION v1_fail_otoken_materialization(
     TEXT, UUID, TEXT
 ) FROM PUBLIC, anon, authenticated;
@@ -344,6 +374,9 @@ BEGIN
         ) TO service_role;
         GRANT EXECUTE ON FUNCTION v1_complete_otoken_materialization(
             TEXT, UUID, TEXT
+        ) TO service_role;
+        GRANT EXECUTE ON FUNCTION v1_reconcile_ready_otoken(
+            TEXT
         ) TO service_role;
         GRANT EXECUTE ON FUNCTION v1_fail_otoken_materialization(
             TEXT, UUID, TEXT

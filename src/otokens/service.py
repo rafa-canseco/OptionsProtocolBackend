@@ -450,6 +450,31 @@ class SeriesMaterializationService:
                 retryable=True,
             )
         if claim.attempts_exhausted:
+            try:
+                factory_ready, whitelist_ready = self._readiness(
+                    request.expected_otoken_address
+                )
+            except Exception as exc:
+                raise SeriesError(
+                    "SERIES_READINESS_UNAVAILABLE",
+                    "Series readiness could not be verified",
+                    status_code=503,
+                    retryable=True,
+                ) from exc
+            if factory_ready and whitelist_ready:
+                if not self.repository.reconcile_ready(canonical.series_key):
+                    raise SeriesError(
+                        "SERIES_RECONCILIATION_FAILED",
+                        "The deployed series state could not be reconciled",
+                        status_code=503,
+                        retryable=True,
+                    )
+                return EnsureResult(
+                    status="ready",
+                    otoken_address=request.expected_otoken_address,
+                    execution_quote=request.quote,
+                    deployment_tx_hash=claim.tx_hash,
+                )
             raise SeriesError(
                 "MATERIALIZATION_ATTEMPTS_EXHAUSTED",
                 "This series reached its automatic creation retry limit",

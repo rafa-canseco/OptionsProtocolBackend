@@ -41,3 +41,6 @@ def test_materialization_functions_are_service_role_only() -> None:
     assert "FROM PUBLIC, anon, authenticated" in MIGRATION
     assert "TO service_role" in MIGRATION
     assert "otoken_materialization_intents ENABLE ROW LEVEL SECURITY" in MIGRATION
+    assert "CREATE OR REPLACE FUNCTION v1_reconcile_ready_otoken" in MIGRATION
+    assert "GRANT EXECUTE ON FUNCTION v1_reconcile_ready_otoken" in MIGRATION
+    assert "REVOKE ALL ON FUNCTION v1_reconcile_ready_otoken" in MIGRATION

@@ -107,6 +107,13 @@ class SeriesRepository:
         ).execute()
         return _payload(result.data) is True
 
+    def reconcile_ready(self, series_key: str) -> bool:
+        result = self.client.rpc(
+            "v1_reconcile_ready_otoken",
+            {"p_series_key": series_key},
+        ).execute()
+        return _payload(result.data) is True
+
     def fail(self, series_key: str, ownership_token: str, error_code: str) -> bool:
         result = self.client.rpc(
             "v1_fail_otoken_materialization",
