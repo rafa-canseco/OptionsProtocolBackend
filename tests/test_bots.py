@@ -143,20 +143,56 @@ def test_load_existing_otokens_for_specs_filters_target_specs(mock_db):
             "strike_price": "2000.0",
             "expiry": spec.expiry_ts,
             "is_put": True,
+            "deployment_status": "ready",
         },
         {
             "otoken_address": "0x2222222222222222222222222222222222222222",
             "strike_price": "2050.0",
             "expiry": spec.expiry_ts,
             "is_put": True,
+            "deployment_status": "ready",
         },
     ]
 
     existing = _load_existing_otokens_for_specs([spec])
 
     assert existing == {
-        (spec.strike, spec.expiry_ts, True): "0x1111111111111111111111111111111111111111"
+        (
+            spec.strike,
+            spec.expiry_ts,
+            True,
+        ): "0x1111111111111111111111111111111111111111"
     }
+
+
+@patch("src.bots.otoken_manager.get_client")
+def test_load_existing_otokens_for_specs_never_reuses_virtual_row(mock_db):
+    """Eager rollback must materialize virtual rows instead of trusting the DB."""
+    spec = _make_spec(strike=2000.0)
+    virtual = "0x1111111111111111111111111111111111111111"
+    ready = "0x2222222222222222222222222222222222222222"
+    table = MagicMock()
+    mock_db.return_value.table.return_value = table
+    table.select.return_value.gt.return_value.execute.return_value.data = [
+        {
+            "otoken_address": virtual,
+            "strike_price": "2000.0",
+            "expiry": spec.expiry_ts,
+            "is_put": True,
+            "deployment_status": "virtual",
+        },
+        {
+            "otoken_address": ready,
+            "strike_price": "2000.0",
+            "expiry": spec.expiry_ts,
+            "is_put": True,
+            "deployment_status": "ready",
+        },
+    ]
+
+    existing = _load_existing_otokens_for_specs([spec])
+
+    assert existing == {(spec.strike, spec.expiry_ts, True): ready}
 
 
 @patch("src.bots.otoken_manager.get_whitelist")
@@ -455,9 +491,7 @@ def test_publish_once_full_reconcile_on_schedule():
     spec = _make_spec()
     period = otoken_manager.FULL_RECONCILE_EVERY_CYCLES
     cycles = period * 3
-    expected_full_reconciles = sum(
-        1 for i in range(1, cycles + 1) if i % period == 1
-    )
+    expected_full_reconciles = sum(1 for i in range(1, cycles + 1) if i % period == 1)
     expected_db_shortcut = (cycles - expected_full_reconciles) * len(
         list(otoken_manager.get_base_assets())
     )
@@ -466,14 +500,14 @@ def test_publish_once_full_reconcile_on_schedule():
         for _ in range(n):
             await otoken_manager.publish_once()
 
-    with patch("src.bots.otoken_manager._prune_near_expiry_otokens"), patch(
-        "src.bots.otoken_manager.get_asset_price", return_value=(2000.0, None)
-    ), patch(
-        "src.bots.otoken_manager.generate_otoken_specs", return_value=[spec]
-    ), patch(
-        "src.bots.otoken_manager._load_existing_otokens_for_specs", return_value={}
-    ) as mock_load, patch(
-        "src.bots.otoken_manager.ensure_otokens_exist", return_value=[]
+    with (
+        patch("src.bots.otoken_manager._prune_near_expiry_otokens"),
+        patch("src.bots.otoken_manager.get_asset_price", return_value=(2000.0, None)),
+        patch("src.bots.otoken_manager.generate_otoken_specs", return_value=[spec]),
+        patch(
+            "src.bots.otoken_manager._load_existing_otokens_for_specs", return_value={}
+        ) as mock_load,
+        patch("src.bots.otoken_manager.ensure_otokens_exist", return_value=[]),
     ):
         try:
             asyncio.run(run_n(cycles))

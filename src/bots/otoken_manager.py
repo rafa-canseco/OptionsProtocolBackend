@@ -361,7 +361,9 @@ def _load_existing_otokens_for_specs(
     client = get_client()
     result = (
         client.table("available_otokens")
-        .select("otoken_address,strike_price,expiry,is_put,underlying")
+        .select(
+            "otoken_address,strike_price,expiry,is_put,underlying,deployment_status"
+        )
         .gt("expiry", now_ts)
         .execute()
     )
@@ -371,6 +373,8 @@ def _load_existing_otokens_for_specs(
     existing: dict[OTokenKey, str] = {}
     for row in result.data:
         try:
+            if row.get("deployment_status", "ready") != "ready":
+                continue
             row_underlying = row.get("underlying")
             if row_underlying is not None and str(row_underlying).lower() != underlying:
                 continue
