@@ -1,6 +1,7 @@
 """Fail-closed NAV reporter state machine."""
 
 from dataclasses import dataclass, field, replace
+from threading import Lock
 from typing import Protocol
 
 from eth_account import Account
@@ -17,6 +18,14 @@ from src.fund_nav.models import (
 
 EXECUTION_BUFFER_BLOCKS = 15
 SUBMISSION_LEAD_BLOCKS = 3
+_SUBMITTER_LOCKS_GUARD = Lock()
+_SUBMITTER_LOCKS: dict[tuple[int, str], Lock] = {}
+
+
+def _submitter_transaction_lock(chain_id: int, sender: str) -> Lock:
+    key = (chain_id, sender.lower())
+    with _SUBMITTER_LOCKS_GUARD:
+        return _SUBMITTER_LOCKS.setdefault(key, Lock())
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,9 +345,8 @@ class NavReporter:
         token = prepared.ownership_token
         valid_after = prepared.reports[0].valid_after_block
         build_at = max(prepared.snapshot.head_block, valid_after - 10)
-        if (
-            self.gateway.head_block() < build_at
-            and not self.gateway.wait_until_block(build_at, self.transaction_timeout)
+        if self.gateway.head_block() < build_at and not self.gateway.wait_until_block(
+            build_at, self.transaction_timeout
         ):
             return self._finish(
                 run_id,
@@ -351,29 +359,12 @@ class NavReporter:
                     signature_rows,
                 ),
             )
-        try:
-            transaction = self.gateway.build_transaction(
-                report_nonce=prepared.report_nonce,
-                reports=prepared.reports,
-                reporters=prepared.reporters,
-                signatures=prepared.signatures,
-                private_key=prepared.sender[1],
-            )
-        except Exception:
-            reason = self._execution_reason(
-                prepared.snapshot, prepared.reports[0]
-            )
-            return self._finish(
-                run_id,
-                token,
-                self._detailed_run(
-                    "blocked" if reason else "failed",
-                    reason or "SUBMISSION_FAILED",
-                    report_rows,
-                    prepared.reporters,
-                    signature_rows,
-                ),
-            )
+        # Funds can prepare and wait concurrently, but they share a submitter
+        # EOA. Keep pending-nonce selection, signing, and broadcast atomic per
+        # chain/sender so parallel funds cannot sign the same transaction nonce.
+        transaction_lock = _submitter_transaction_lock(
+            prepared.snapshot.chain_id, prepared.sender[0]
+        )
         submission_block = valid_after - SUBMISSION_LEAD_BLOCKS
         if not self.gateway.wait_until_block(
             submission_block,
@@ -390,34 +381,56 @@ class NavReporter:
                     signature_rows,
                 ),
             )
-        reason = self._broadcast_reason(prepared.snapshot, prepared.reports[0])
-        if reason:
-            return self._finish(
-                run_id,
-                token,
-                self._detailed_run(
-                    "blocked",
-                    reason,
-                    report_rows,
-                    prepared.reporters,
-                    signature_rows,
-                ),
+        with transaction_lock:
+            reason = self._broadcast_reason(prepared.snapshot, prepared.reports[0])
+            if reason:
+                return self._finish(
+                    run_id,
+                    token,
+                    self._detailed_run(
+                        "blocked",
+                        reason,
+                        report_rows,
+                        prepared.reporters,
+                        signature_rows,
+                    ),
+                )
+            try:
+                transaction = self.gateway.build_transaction(
+                    report_nonce=prepared.report_nonce,
+                    reports=prepared.reports,
+                    reporters=prepared.reporters,
+                    signatures=prepared.signatures,
+                    private_key=prepared.sender[1],
+                )
+            except Exception:
+                reason = self._execution_reason(prepared.snapshot, prepared.reports[0])
+                return self._finish(
+                    run_id,
+                    token,
+                    self._detailed_run(
+                        "blocked" if reason else "failed",
+                        reason or "SUBMISSION_FAILED",
+                        report_rows,
+                        prepared.reporters,
+                        signature_rows,
+                    ),
+                )
+            raw_transaction = Web3.to_hex(transaction.raw_transaction)
+            reconciling = ReportRun(
+                status="reconciling",
+                reason_code="TRANSACTION_RECONCILIATION_PENDING",
+                transaction_hash=transaction.transaction_hash,
+                signed_transaction=raw_transaction,
+                reports=report_rows,
+                reporters=prepared.reporters,
+                signatures=signature_rows,
             )
-        raw_transaction = Web3.to_hex(transaction.raw_transaction)
-        reconciling = ReportRun(
-            status="reconciling",
-            reason_code="TRANSACTION_RECONCILIATION_PENDING",
-            transaction_hash=transaction.transaction_hash,
-            signed_transaction=raw_transaction,
-            reports=report_rows,
-            reporters=prepared.reporters,
-            signatures=signature_rows,
-        )
-        self.store.finish(run_id, token, reconciling)
-        try:
-            transaction_hash = self.gateway.broadcast(transaction)
-        except AmbiguousSubmission:
-            return reconciling
+            self.store.finish(run_id, token, reconciling)
+            try:
+                transaction_hash = self.gateway.broadcast(transaction)
+            except AmbiguousSubmission:
+                return reconciling
         submitted = ReportRun(
             status="submitted",
             transaction_hash=transaction_hash,
@@ -511,9 +524,7 @@ class NavReporter:
                 signed_transaction=existing.signed_transaction,
             )
         if status == "unknown":
-            if self.gateway.transaction_nonce_consumed(
-                existing.signed_transaction
-            ):
+            if self.gateway.transaction_nonce_consumed(existing.signed_transaction):
                 return self._record_failed_transaction(
                     existing,
                     snapshot,
