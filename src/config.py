@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     supabase_anon_key: str
     supabase_service_role_key: str
     rpc_url: str = ""
+    tokenized_fund_rpc_url: str = ""
     wss_rpc_url: str = ""  # WSS RPC — enables eth_subscribe when set
     chainlink_eth_usd_address: str = (
         "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
@@ -210,6 +211,11 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def get_tokenized_fund_rpc_url() -> str:
+    """Return the isolated fund RPC when configured, otherwise the global RPC."""
+    return settings.tokenized_fund_rpc_url.strip() or settings.rpc_url.strip()
+
+
 def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
     """Return validated, deduplicated reporter keys."""
     from eth_account import Account
@@ -327,9 +333,7 @@ def get_fund_covered_call_sepolia_fair_value_policy():
     )
 
     policy = CoveredCallFairValuePolicy(
-        implied_volatility_bps=(
-            settings.fund_covered_call_sepolia_fair_value_iv_bps
-        ),
+        implied_volatility_bps=(settings.fund_covered_call_sepolia_fair_value_iv_bps),
         implied_volatility_source=(
             settings.fund_covered_call_sepolia_fair_value_iv_source
         ),

@@ -18,6 +18,7 @@ from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
+    get_tokenized_fund_rpc_url,
     get_fund_covered_call_sepolia_fair_value_policy,
     get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
@@ -58,12 +59,16 @@ async def lifespan(app: FastAPI):
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
-    if settings.tokenized_fund_indexer_enabled and not settings.rpc_url:
+    if settings.tokenized_fund_indexer_enabled and not get_tokenized_fund_rpc_url():
         raise RuntimeError(
-            "RPC_URL is required when TOKENIZED_FUND_INDEXER_ENABLED=true"
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
+            "TOKENIZED_FUND_INDEXER_ENABLED=true"
         )
-    if settings.fund_nav_reporter_enabled and not settings.rpc_url:
-        raise RuntimeError("RPC_URL is required when FUND_NAV_REPORTER_ENABLED=true")
+    if settings.fund_nav_reporter_enabled and not get_tokenized_fund_rpc_url():
+        raise RuntimeError(
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
+            "FUND_NAV_REPORTER_ENABLED=true"
+        )
     if (
         settings.fund_nav_reporter_enabled
         and not settings.fund_nav_reporter_private_keys
@@ -132,13 +137,8 @@ async def lifespan(app: FastAPI):
                     f"NAV submitter key must be separate from {label} observer keys"
                 )
             observer_sets[label] = observer_addresses
-        if (
-            observer_sets.get("CSP", set())
-            & observer_sets.get("covered-call", set())
-        ):
-            raise RuntimeError(
-                "CSP and covered-call observer keys must be separate"
-            )
+        if observer_sets.get("CSP", set()) & observer_sets.get("covered-call", set()):
+            raise RuntimeError("CSP and covered-call observer keys must be separate")
     elif (
         settings.fund_csp_sepolia_fair_value_observations_enabled
         or settings.fund_covered_call_sepolia_fair_value_observations_enabled
