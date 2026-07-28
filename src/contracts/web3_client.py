@@ -1,5 +1,6 @@
 import logging
 import threading
+from collections.abc import Callable
 
 from web3 import Web3
 from web3.contract import Contract
@@ -24,6 +25,14 @@ logger = logging.getLogger(__name__)
 _w3: Web3 | None = None
 _nonce_lock = threading.Lock()
 _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
+
+
+class BroadcastCallbackError(RuntimeError):
+    """A transaction was sent, but durable broadcast recording failed."""
+
+    def __init__(self, tx_hash: str):
+        super().__init__(f"broadcast callback failed for {tx_hash}")
+        self.tx_hash = tx_hash
 
 
 def get_w3() -> Web3:
@@ -159,6 +168,7 @@ def _sign_send_and_confirm(
     account,
     label: str,
     tx_timeout: int,
+    on_broadcast: Callable[[str], None] | None = None,
 ) -> str:
     """Sign, send with nonce-retry, and wait for receipt. Returns tx hash hex.
 
@@ -190,6 +200,7 @@ def _sign_send_and_confirm(
             try:
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 _local_nonce[account.address] = nonce + 1
+                tx_hash_hex = tx_hash.hex()
             except Exception as e:
                 if (
                     "replacement transaction underpriced" in str(e).lower()
@@ -206,10 +217,15 @@ def _sign_send_and_confirm(
                     f"attempt={attempt + 1}/{max_retries}, error={e}"
                 )
                 raise
+        if on_broadcast is not None:
+            try:
+                on_broadcast(tx_hash_hex)
+            except Exception as exc:
+                raise BroadcastCallbackError(tx_hash_hex) from exc
         if attempt > 0:
             logger.info(
                 f"{label} sent after {attempt + 1} attempts: nonce={nonce}, "
-                f"maxFee={max_fee}, tx_hash={tx_hash.hex()}"
+                f"maxFee={max_fee}, tx_hash={tx_hash_hex}"
             )
         break
     else:
@@ -218,19 +234,19 @@ def _sign_send_and_confirm(
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=tx_timeout)
     if receipt.status != 1:
         gas_used = getattr(receipt, "gasUsed", "?")
-        logger.error(f"{label} reverted: {tx_hash.hex()}, gas used: {gas_used}")
-        raise RuntimeError(f"{label} reverted: {tx_hash.hex()}")
+        logger.error(f"{label} reverted: {tx_hash_hex}, gas used: {gas_used}")
+        raise RuntimeError(f"{label} reverted: {tx_hash_hex}")
     # Defensive: logging failures must never rewrite tx success semantics.
     try:
         logger.info(
             "%s confirmed: tx=%s gas_used=%s",
             label,
-            tx_hash.hex(),
+            tx_hash_hex,
             getattr(receipt, "gasUsed", "?"),
         )
     except Exception:
-        logger.info("%s confirmed: tx=%s (gas_used log failed)", label, tx_hash.hex())
-    return tx_hash.hex()
+        logger.info("%s confirmed: tx=%s (gas_used log failed)", label, tx_hash_hex)
+    return tx_hash_hex
 
 
 def build_and_send_eth_transfer(
@@ -255,6 +271,8 @@ def build_and_send_tx(
     account,
     tx_timeout: int = 120,
     label: str = "Transaction",
+    on_broadcast: Callable[[str], None] | None = None,
+    retry_on_revert: bool = True,
 ) -> str:
     """Build, sign, send, and confirm a transaction. Returns tx hash hex.
 
@@ -286,9 +304,10 @@ def build_and_send_tx(
             account,
             label,
             tx_timeout,
+            on_broadcast,
         )
     except RuntimeError as e:
-        if "reverted" not in str(e):
+        if "reverted" not in str(e) or not retry_on_revert:
             raise
         logger.warning(
             f"Tx reverted with gas limit {gas_limit}, "
@@ -308,4 +327,5 @@ def build_and_send_tx(
         account,
         f"{label} (gas retry)",
         tx_timeout,
+        on_broadcast,
     )

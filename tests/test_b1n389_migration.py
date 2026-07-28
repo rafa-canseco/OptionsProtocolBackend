@@ -14,6 +14,7 @@ def test_lazy_series_migration_has_lifecycle_and_canonical_constraints() -> None
     assert "WHERE series_key IS NOT NULL" in MIGRATION
     assert "strike_price_raw NUMERIC(78, 0)" in MIGRATION
     assert "chain_id BIGINT" in MIGRATION
+    assert "deployment_submitted_at TIMESTAMPTZ" in MIGRATION
     assert "available_otokens_canonical_fields_check" in MIGRATION
     assert "available_otokens_canonical_collateral_check" in MIGRATION
     assert "available_otokens_canonical_strike_check" in MIGRATION
@@ -59,3 +60,13 @@ def test_materialization_functions_are_service_role_only() -> None:
     assert "CREATE OR REPLACE FUNCTION v1_reconcile_ready_otoken" in MIGRATION
     assert "GRANT EXECUTE ON FUNCTION v1_reconcile_ready_otoken" in MIGRATION
     assert "REVOKE ALL ON FUNCTION v1_reconcile_ready_otoken" in MIGRATION
+    assert (
+        "CREATE OR REPLACE FUNCTION v1_record_otoken_materialization_broadcast"
+        in MIGRATION
+    )
+    assert (
+        "GRANT EXECUTE ON FUNCTION v1_record_otoken_materialization_broadcast"
+        in MIGRATION
+    )
+    assert "deployment_tx_hash = NULL" in MIGRATION
+    assert "deployment_submitted_at = NULL" in MIGRATION

@@ -9,14 +9,17 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from web3 import Web3
+from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from src.chains.base.client import get_balance, get_eth_balance
 from src.config import settings, is_asset_tradable
 from src.contracts.web3_client import (
+    BroadcastCallbackError,
     build_and_send_tx,
     get_batch_settler,
     get_operator_account,
     get_otoken_factory,
+    get_w3,
     get_whitelist,
 )
 from src.crypto.eip712 import quote_digest, recover_quote_signer
@@ -364,6 +367,98 @@ class SeriesMaterializationService:
         )
         return factory_ready, whitelist_ready
 
+    def _resume_owned_broadcast(
+        self,
+        *,
+        request: EnsureSeriesRequest,
+        series_key: str,
+        ownership_token: str,
+        tx_hash: str,
+    ) -> EnsureResult:
+        """Reconcile a durable hash without ever signing a replacement."""
+        creating = EnsureResult(
+            status="creating",
+            otoken_address=request.expected_otoken_address,
+            execution_quote=request.quote,
+            retry_after_ms=settings.otoken_ensure_retry_after_ms,
+            deployment_tx_hash=tx_hash,
+        )
+        try:
+            factory_ready, whitelist_ready = self._readiness(
+                request.expected_otoken_address
+            )
+        except Exception:
+            return creating
+        if factory_ready and whitelist_ready:
+            if not self.repository.complete(
+                series_key, ownership_token, tx_hash
+            ) and not self.repository.reconcile_ready(series_key):
+                raise SeriesError(
+                    "SERIES_RECONCILIATION_FAILED",
+                    "The deployed series state could not be reconciled",
+                    status_code=503,
+                    retryable=True,
+                )
+            return EnsureResult(
+                status="ready",
+                otoken_address=request.expected_otoken_address,
+                execution_quote=request.quote,
+                deployment_tx_hash=tx_hash,
+            )
+
+        try:
+            receipt = get_w3().eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return creating
+        except Exception:
+            logger.warning(
+                "lazy series receipt unavailable: series=%s",
+                series_key[:12],
+            )
+            return creating
+
+        receipt_status = int(
+            receipt["status"] if isinstance(receipt, dict) else receipt.status
+        )
+        if receipt_status == 0:
+            self.repository.fail(
+                series_key,
+                ownership_token,
+                "CREATION_REVERTED",
+            )
+            raise SeriesError(
+                "SERIES_CREATION_FAILED",
+                "The option series creation transaction reverted",
+                status_code=503,
+                retryable=True,
+            )
+        if receipt_status != 1:
+            return creating
+
+        try:
+            factory_ready, whitelist_ready = self._readiness(
+                request.expected_otoken_address
+            )
+        except Exception:
+            return creating
+        if not factory_ready or not whitelist_ready:
+            return creating
+        if not self.repository.complete(
+            series_key, ownership_token, tx_hash
+        ) and not self.repository.reconcile_ready(series_key):
+            raise SeriesError(
+                "SERIES_RECONCILIATION_FAILED",
+                "The confirmed series state could not be reconciled",
+                status_code=503,
+                retryable=True,
+            )
+        return EnsureResult(
+            status="ready",
+            otoken_address=request.expected_otoken_address,
+            execution_quote=request.quote,
+            deployment_tx_hash=tx_hash,
+        )
+
     def ensure(self, request: EnsureSeriesRequest, user_id: str) -> EnsureResult:
         started = time.monotonic()
         amount_raw = int(request.amount_raw)
@@ -485,12 +580,28 @@ class SeriesMaterializationService:
                 status_code=429,
                 retryable=True,
             )
+        if claim.owned and claim.tx_hash:
+            assert claim.ownership_token is not None
+            return self._resume_owned_broadcast(
+                request=request,
+                series_key=canonical.series_key,
+                ownership_token=claim.ownership_token,
+                tx_hash=claim.tx_hash,
+            )
         if claim.attempts_exhausted:
             try:
                 factory_ready, whitelist_ready = self._readiness(
                     request.expected_otoken_address
                 )
             except Exception as exc:
+                if claim.tx_hash:
+                    return EnsureResult(
+                        status="creating",
+                        otoken_address=request.expected_otoken_address,
+                        execution_quote=request.quote,
+                        retry_after_ms=settings.otoken_ensure_retry_after_ms,
+                        deployment_tx_hash=claim.tx_hash,
+                    )
                 raise SeriesError(
                     "SERIES_READINESS_UNAVAILABLE",
                     "Series readiness could not be verified",
@@ -509,6 +620,14 @@ class SeriesMaterializationService:
                     status="ready",
                     otoken_address=request.expected_otoken_address,
                     execution_quote=request.quote,
+                    deployment_tx_hash=claim.tx_hash,
+                )
+            if claim.tx_hash:
+                return EnsureResult(
+                    status="creating",
+                    otoken_address=request.expected_otoken_address,
+                    execution_quote=request.quote,
+                    retry_after_ms=settings.otoken_ensure_retry_after_ms,
                     deployment_tx_hash=claim.tx_hash,
                 )
             raise SeriesError(
@@ -548,6 +667,17 @@ class SeriesMaterializationService:
         ownership_token = claim.ownership_token
         assert ownership_token is not None
         tx_hash = None
+
+        def record_broadcast(broadcast_hash: str) -> None:
+            nonlocal tx_hash
+            tx_hash = broadcast_hash
+            if not self.repository.record_broadcast(
+                canonical.series_key,
+                ownership_token,
+                broadcast_hash,
+            ):
+                raise RuntimeError("MATERIALIZATION_BROADCAST_NOT_RECORDED")
+
         try:
             factory_ready, whitelist_ready = self._readiness(
                 request.expected_otoken_address
@@ -558,6 +688,8 @@ class SeriesMaterializationService:
                     tx_fn,
                     get_operator_account(),
                     label=f"createOToken lazy {canonical.series_key[:12]}",
+                    on_broadcast=record_broadcast,
+                    retry_on_revert=False,
                 )
                 factory_ready, whitelist_ready = self._readiness(
                     request.expected_otoken_address
@@ -568,7 +700,64 @@ class SeriesMaterializationService:
                 canonical.series_key, ownership_token, tx_hash
             ):
                 raise RuntimeError("MATERIALIZATION_LEASE_LOST")
+        except TimeExhausted:
+            assert tx_hash is not None
+            self.repository.record_outcome(
+                actor_key=actor_key,
+                series_key=canonical.series_key,
+                quote_hash=quote_hash,
+                outcome="creating",
+                error_code=None,
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
+            return EnsureResult(
+                status="creating",
+                otoken_address=request.expected_otoken_address,
+                execution_quote=request.quote,
+                retry_after_ms=settings.otoken_ensure_retry_after_ms,
+                deployment_tx_hash=tx_hash,
+            )
+        except BroadcastCallbackError as exc:
+            tx_hash = exc.tx_hash
+            try:
+                self.repository.record_broadcast(
+                    canonical.series_key,
+                    ownership_token,
+                    tx_hash,
+                )
+            except Exception:
+                logger.warning(
+                    "lazy broadcast persistence retry failed: series=%s",
+                    canonical.series_key[:12],
+                )
+            return EnsureResult(
+                status="creating",
+                otoken_address=request.expected_otoken_address,
+                execution_quote=request.quote,
+                retry_after_ms=settings.otoken_ensure_retry_after_ms,
+                deployment_tx_hash=tx_hash,
+            )
         except Exception as exc:
+            if tx_hash is not None and "reverted" not in str(exc).lower():
+                self.repository.record_outcome(
+                    actor_key=actor_key,
+                    series_key=canonical.series_key,
+                    quote_hash=quote_hash,
+                    outcome="creating",
+                    error_code=None,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                )
+                logger.warning(
+                    "lazy series confirmation unknown: series=%s",
+                    canonical.series_key[:12],
+                )
+                return EnsureResult(
+                    status="creating",
+                    otoken_address=request.expected_otoken_address,
+                    execution_quote=request.quote,
+                    retry_after_ms=settings.otoken_ensure_retry_after_ms,
+                    deployment_tx_hash=tx_hash,
+                )
             error_code = str(exc)
             try:
                 factory_ready, whitelist_ready = self._readiness(

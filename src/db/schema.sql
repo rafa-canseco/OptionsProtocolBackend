@@ -307,6 +307,7 @@ create table if not exists available_otokens (
   deployment_owner_token uuid,
   deployment_lease_expires_at timestamptz,
   deployment_tx_hash text,
+  deployment_submitted_at timestamptz,
   creation_attempts integer not null default 0,
   last_error_code text,
   first_published_at timestamptz not null default now(),

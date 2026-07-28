@@ -10,7 +10,7 @@ SERIES_SELECT = (
     "id,chain,chain_id,series_key,factory_address,otoken_address,underlying,"
     "strike_asset,collateral_asset,strike_price,strike_price_raw,expiry,is_put,"
     "deployment_status,deployment_lease_expires_at,deployment_tx_hash,"
-    "creation_attempts,last_error_code,ready_at,first_filled_at"
+    "deployment_submitted_at,creation_attempts,last_error_code,ready_at,first_filled_at"
 )
 
 
@@ -103,6 +103,23 @@ class SeriesRepository:
                 "p_series_key": series_key,
                 "p_ownership_token": ownership_token,
                 "p_transaction_hash": tx_hash,
+            },
+        ).execute()
+        return _payload(result.data) is True
+
+    def record_broadcast(
+        self,
+        series_key: str,
+        ownership_token: str,
+        tx_hash: str,
+    ) -> bool:
+        result = self.client.rpc(
+            "v1_record_otoken_materialization_broadcast",
+            {
+                "p_series_key": series_key,
+                "p_ownership_token": ownership_token,
+                "p_transaction_hash": tx_hash,
+                "p_lease_seconds": settings.otoken_materialization_lease_seconds,
             },
         ).execute()
         return _payload(result.data) is True

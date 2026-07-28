@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from src.config import settings
 from src.models.series import EnsureSeriesRequest
@@ -19,6 +21,7 @@ MM = "0x3333333333333333333333333333333333333333"
 WALLET = "0x4444444444444444444444444444444444444444"
 WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+TX_HASH = "0x" + "ab" * 32
 
 
 def _request(
@@ -358,6 +361,100 @@ def test_non_owner_gets_polling_response_without_creating(monkeypatch) -> None:
     assert result.status == "creating"
     assert result.retry_after_ms == settings.otoken_ensure_retry_after_ms
     assert result.deployment_tx_hash == "0xpending"
+    send_tx.assert_not_called()
+
+
+def test_receipt_timeout_then_resumed_claim_never_rebroadcasts(
+    monkeypatch,
+) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.claim.side_effect = [
+        _claim(owned=True, status="creating"),
+        _claim(owned=True, status="creating", tx_hash=TX_HASH),
+    ]
+    repository.record_broadcast.return_value = True
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    monkeypatch.setattr(
+        service, "_validate_quote", lambda **_kwargs: (MM, b"\x12" * 32)
+    )
+    monkeypatch.setattr(service, "_readiness", lambda _address: (False, False))
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+    w3 = MagicMock()
+    w3.eth.get_transaction_receipt.side_effect = TransactionNotFound(
+        "transaction is pending"
+    )
+
+    def broadcast_then_timeout(*_args, **kwargs):
+        kwargs["on_broadcast"](TX_HASH)
+        raise TimeExhausted()
+
+    with (
+        patch("src.otokens.service.get_otoken_factory", return_value=factory),
+        patch("src.otokens.service.get_operator_account", return_value=MagicMock()),
+        patch(
+            "src.otokens.service.build_and_send_tx",
+            side_effect=broadcast_then_timeout,
+        ) as send_tx,
+        patch("src.otokens.service.get_w3", return_value=w3),
+    ):
+        timed_out = service.ensure(_request(), "did:privy:user")
+        resumed = service.ensure(_request(), "did:privy:user")
+
+    assert timed_out.status == "creating"
+    assert resumed.status == "creating"
+    assert timed_out.deployment_tx_hash == TX_HASH
+    assert resumed.deployment_tx_hash == TX_HASH
+    send_tx.assert_called_once()
+    repository.record_broadcast.assert_called_once_with(
+        _canonical().series_key,
+        "00000000-0000-0000-0000-000000000001",
+        TX_HASH,
+    )
+    repository.fail.assert_not_called()
+
+
+def test_resumed_reverted_receipt_fails_without_rebroadcast(monkeypatch) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.claim.return_value = _claim(
+        owned=True,
+        status="creating",
+        tx_hash=TX_HASH,
+    )
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    monkeypatch.setattr(
+        service, "_validate_quote", lambda **_kwargs: (MM, b"\x12" * 32)
+    )
+    monkeypatch.setattr(service, "_readiness", lambda _address: (False, False))
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+    w3 = MagicMock()
+    w3.eth.get_transaction_receipt.return_value = SimpleNamespace(status=0)
+
+    with (
+        patch("src.otokens.service.get_otoken_factory", return_value=factory),
+        patch("src.otokens.service.get_w3", return_value=w3),
+        patch("src.otokens.service.build_and_send_tx") as send_tx,
+        pytest.raises(SeriesError, match="reverted") as raised,
+    ):
+        service.ensure(_request(), "did:privy:user")
+
+    assert raised.value.code == "SERIES_CREATION_FAILED"
+    repository.fail.assert_called_once_with(
+        _canonical().series_key,
+        "00000000-0000-0000-0000-000000000001",
+        "CREATION_REVERTED",
+    )
     send_tx.assert_not_called()
 
 

@@ -10,6 +10,7 @@ ALTER TABLE available_otokens
     ADD COLUMN IF NOT EXISTS deployment_owner_token UUID,
     ADD COLUMN IF NOT EXISTS deployment_lease_expires_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS deployment_tx_hash TEXT,
+    ADD COLUMN IF NOT EXISTS deployment_submitted_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS creation_attempts INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS last_error_code TEXT,
     ADD COLUMN IF NOT EXISTS first_published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -272,6 +273,44 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION v1_record_otoken_materialization_broadcast(
+    p_series_key TEXT,
+    p_ownership_token UUID,
+    p_transaction_hash TEXT,
+    p_lease_seconds INTEGER
+) RETURNS BOOLEAN
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = public
+AS $$
+DECLARE
+    updated_count INTEGER;
+BEGIN
+    IF p_series_key IS NULL OR p_ownership_token IS NULL
+       OR p_transaction_hash IS NULL
+       OR p_transaction_hash !~ '^0x[0-9a-fA-F]{64}$'
+       OR p_lease_seconds NOT BETWEEN 30 AND 900 THEN
+        RAISE EXCEPTION 'Invalid oToken broadcast';
+    END IF;
+    UPDATE available_otokens SET
+        deployment_tx_hash = lower(p_transaction_hash),
+        deployment_submitted_at = coalesce(deployment_submitted_at, now()),
+        deployment_lease_expires_at =
+            now() + make_interval(secs => p_lease_seconds),
+        updated_at = now()
+    WHERE series_key = p_series_key
+      AND chain = 'base'
+      AND deployment_status = 'creating'
+      AND deployment_owner_token = p_ownership_token
+      AND (
+          deployment_tx_hash IS NULL
+          OR lower(deployment_tx_hash) = lower(p_transaction_hash)
+      );
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    RETURN updated_count = 1;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION v1_complete_otoken_materialization(
     p_series_key TEXT,
     p_ownership_token UUID,
@@ -343,6 +382,8 @@ DECLARE
 BEGIN
     UPDATE available_otokens SET
         deployment_status = 'failed',
+        deployment_tx_hash = NULL,
+        deployment_submitted_at = NULL,
         deployment_owner_token = NULL,
         deployment_lease_expires_at = NULL,
         last_error_code = left(p_error_code, 80),
@@ -391,6 +432,9 @@ REVOKE ALL ON FUNCTION v1_claim_otoken_materialization(
     TEXT, TEXT, TEXT, TEXT, NUMERIC, UUID, INTEGER, INTEGER, INTEGER, INTEGER,
     INTEGER
 ) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION v1_record_otoken_materialization_broadcast(
+    TEXT, UUID, TEXT, INTEGER
+) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION v1_complete_otoken_materialization(
     TEXT, UUID, TEXT
 ) FROM PUBLIC, anon, authenticated;
@@ -412,6 +456,9 @@ BEGIN
         GRANT EXECUTE ON FUNCTION v1_claim_otoken_materialization(
             TEXT, TEXT, TEXT, TEXT, NUMERIC, UUID, INTEGER, INTEGER, INTEGER,
             INTEGER, INTEGER
+        ) TO service_role;
+        GRANT EXECUTE ON FUNCTION v1_record_otoken_materialization_broadcast(
+            TEXT, UUID, TEXT, INTEGER
         ) TO service_role;
         GRANT EXECUTE ON FUNCTION v1_complete_otoken_materialization(
             TEXT, UUID, TEXT
