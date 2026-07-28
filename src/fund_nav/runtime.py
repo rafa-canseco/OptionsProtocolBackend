@@ -463,6 +463,24 @@ class Web3ReporterGateway:
             (component_id, *self._component_state(component_id, block)[2:4])
             for component_id in component_ids
         )
+        fund_flow_nonce = int(
+            self.vault.functions.fundFlowNonce().call(block_identifier=block)
+        )
+        idle_state_hash = bytes(
+            self.vault.functions.idleStateHash().call(block_identifier=block)
+        )
+        # A prior NAV submission can advance the idle component while its
+        # confirmed event has not reached the indexed snapshot yet. Detect that
+        # cheap mismatch before computing observations and fair values: the
+        # eventual simulation is guaranteed to reject the old component state.
+        # Do not copy pending values into the report; retry until the confirmed
+        # snapshot catches up so every accounting value remains block-coherent.
+        self._require_indexed_component_state(
+            component_ids=component_ids,
+            component_states=component_states,
+            fund_flow_nonce=fund_flow_nonce,
+            idle_state_hash=idle_state_hash,
+        )
         strategy_reports, quorum = self._strategy_reports(
             block, expected_hash, component_states
         )
@@ -514,12 +532,8 @@ class Web3ReporterGateway:
             last_report_nonce=int(
                 self.accounting.functions.lastReportNonce().call(block_identifier=block)
             ),
-            fund_flow_nonce=int(
-                self.vault.functions.fundFlowNonce().call(block_identifier=block)
-            ),
-            idle_state_hash=bytes(
-                self.vault.functions.idleStateHash().call(block_identifier=block)
-            ),
+            fund_flow_nonce=fund_flow_nonce,
+            idle_state_hash=idle_state_hash,
             raw_asset_balance=int(raw_balance),
             active_component_ids=component_ids,
             reconciled=bool(self.fund.state["reconciled"]),
@@ -537,7 +551,34 @@ class Web3ReporterGateway:
             csp_reports=tuple(strategy_reports),
         )
 
-    def _active_components(self, block: int) -> tuple[bytes, ...]:
+    def _require_indexed_component_state(
+        self,
+        *,
+        component_ids: tuple[bytes, ...],
+        component_states: tuple[tuple[bytes, int, bytes], ...],
+        fund_flow_nonce: int,
+        idle_state_hash: bytes,
+    ) -> None:
+        pending_flow_nonce = int(
+            self.vault.functions.fundFlowNonce().call(block_identifier="pending")
+        )
+        pending_idle_hash = bytes(
+            self.vault.functions.idleStateHash().call(block_identifier="pending")
+        )
+        pending_component_ids = self._active_components("pending")
+        pending_component_states = tuple(
+            (component_id, *self._component_state(component_id, "pending")[2:4])
+            for component_id in pending_component_ids
+        )
+        if (
+            pending_flow_nonce != fund_flow_nonce
+            or pending_idle_hash != idle_state_hash
+            or pending_component_ids != component_ids
+            or pending_component_states != component_states
+        ):
+            raise RuntimeError("UNINDEXED_COMPONENT_STATE")
+
+    def _active_components(self, block: int | str) -> tuple[bytes, ...]:
         count = self.accounting.functions.activeComponentCount().call(
             block_identifier=block
         )
@@ -569,7 +610,7 @@ class Web3ReporterGateway:
             if observed != implementation:
                 raise RuntimeError("UNTRUSTED_IMPLEMENTATION")
 
-    def _component_state(self, component_id: bytes, block: int):
+    def _component_state(self, component_id: bytes, block: int | str):
         return self.accounting.functions.componentState(component_id).call(
             block_identifier=block
         )
