@@ -34,6 +34,10 @@ MM = "0xf100000000000000000000000000000000000008"
 USER = "0xf100000000000000000000000000000000000009"
 
 
+def manifest_address(number: int) -> str:
+    return f"0x{number:040x}"
+
+
 class CoveredCallRepository:
     def __init__(self) -> None:
         self.registry = {
@@ -820,6 +824,38 @@ def parse_b1n360(manifest: dict):
     )
 
 
+def activated_b1n360_manifest() -> dict:
+    manifest = b1n360_manifest()
+    blocks = manifest["network"]["deploymentBlocks"]
+    blocks.update(
+        workersFinalized=145,
+        processorRotated=146,
+        strategyActivated=147,
+        navGatedVaultImplementation=148,
+        navGatedVaultUpgrade=149,
+        depositsOpened=150,
+    )
+    readiness = manifest["readiness"]
+    readiness.update(
+        depositsPaused=False,
+        strategyActive=True,
+        publicDepositsAuthorized=True,
+        allocatorBotAuthorized=True,
+        navGatedDepositResume=True,
+        activationNavNonce=1,
+        depositsOpenedNavNonce=2,
+    )
+    vault = manifest["contracts"]["fundVault"]
+    vault.update(
+        previousImplementation=vault["implementation"],
+        implementation=manifest_address(999),
+        implementationCodehash="0x" + "cd" * 32,
+        upgradeTransactionHash="0x" + "ef" * 32,
+    )
+    vault["validFromBlock"]["implementation"] = 149
+    return manifest
+
+
 def test_b1n360_manifest_maps_exact_v1_mutations_and_weth_roles() -> None:
     manifest = b1n360_manifest()
 
@@ -834,6 +870,69 @@ def test_b1n360_manifest_maps_exact_v1_mutations_and_weth_roles() -> None:
     assert rows["fund_vault"]["valid_from_block"] == 130
     assert rows["covered_call_adapter"]["valid_from_block"] == 132
     assert rows["covered_call_valuator"]["valid_from_block"] == 133
+
+
+def test_b1n360_activated_manifest_maps_versioned_fund_vault_upgrade() -> None:
+    deployment = parse_b1n360(activated_b1n360_manifest())
+
+    vault_rows = [
+        row for row in deployment.contracts if row["contract_role"] == "fund_vault"
+    ]
+
+    assert len(deployment.contracts) == 19
+    assert vault_rows == [
+        {
+            "contract_role": "fund_vault",
+            "contract_address": manifest_address(1),
+            "implementation_address": manifest_address(101),
+            "interface_version": 1,
+            "valid_from_block": 130,
+            "valid_to_block": 148,
+        },
+        {
+            "contract_role": "fund_vault",
+            "contract_address": manifest_address(1),
+            "implementation_address": manifest_address(999),
+            "interface_version": 1,
+            "valid_from_block": 149,
+            "valid_to_block": None,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            lambda value: value["readiness"].update(navGatedDepositResume=False),
+            "activated readiness is incomplete",
+        ),
+        (
+            lambda value: value["readiness"].update(depositsOpenedNavNonce=0),
+            "activated readiness is incomplete",
+        ),
+        (
+            lambda value: value["contracts"]["fundVault"]["validFromBlock"].update(
+                implementation=148
+            ),
+            "implementation activation must match",
+        ),
+        (
+            lambda value: value["network"]["deploymentBlocks"].update(
+                depositsOpened=148
+            ),
+            "activated deployment blocks are not monotonic",
+        ),
+    ],
+)
+def test_b1n360_activated_manifest_requires_nav_gated_upgrade_evidence(
+    mutation, reason
+) -> None:
+    manifest = activated_b1n360_manifest()
+    mutation(manifest)
+
+    with pytest.raises(ValueError, match=reason):
+        parse_b1n360(manifest)
 
 
 @pytest.mark.parametrize(
