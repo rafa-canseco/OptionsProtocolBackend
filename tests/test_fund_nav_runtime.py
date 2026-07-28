@@ -168,6 +168,116 @@ async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> No
     assert built == [100, 101]
 
 
+@pytest.mark.asyncio
+async def test_reporter_fleet_workers_do_not_barrier_between_cycles(
+    monkeypatch,
+) -> None:
+    slow_release = threading.Event()
+    fast_runs = 0
+    built = {"slow": 0, "fast": 0}
+    real_sleep = asyncio.sleep
+
+    class SlowReporter:
+        def run_once(self):
+            slow_release.wait(timeout=1)
+            return ReportRun(status="confirmed")
+
+    class FastReporter:
+        def run_once(self):
+            nonlocal fast_runs
+            fast_runs += 1
+            if fast_runs == 3:
+                slow_release.set()
+            return ReportRun(status="confirmed")
+
+    def factory(name, reporter):
+        def build():
+            built[name] += 1
+            return reporter()
+
+        return build
+
+    async def stop_after_three_fast_runs(_seconds):
+        if fast_runs >= 3:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    fleet = ReporterFleet(
+        [
+            factory("slow", SlowReporter),
+            factory("fast", FastReporter),
+        ]
+    )
+    monkeypatch.setattr(runtime.asyncio, "sleep", stop_after_three_fast_runs)
+
+    with pytest.raises(asyncio.CancelledError):
+        await fleet.run_forever(1, lambda _result: None)
+
+    assert fast_runs >= 3
+    assert built["fast"] >= 3
+    assert built["slow"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reporter_fleet_worker_failure_isolated_and_retried(monkeypatch) -> None:
+    attempts = {"failed": 0, "healthy": 0}
+    real_sleep = asyncio.sleep
+
+    class HealthyReporter:
+        def run_once(self):
+            attempts["healthy"] += 1
+            return ReportRun(status="confirmed")
+
+    def failed_factory():
+        attempts["failed"] += 1
+        raise RuntimeError("isolated factory failure")
+
+    async def stop_after_retries(_seconds):
+        if attempts["failed"] >= 2 and attempts["healthy"] >= 2:
+            raise asyncio.CancelledError
+        await real_sleep(0)
+
+    monkeypatch.setattr(runtime.asyncio, "sleep", stop_after_retries)
+    results = []
+    fleet = ReporterFleet([failed_factory, HealthyReporter])
+
+    with pytest.raises(asyncio.CancelledError):
+        await fleet.run_forever(1, results.append)
+
+    assert attempts["failed"] >= 2
+    assert attempts["healthy"] >= 2
+    assert any(result.reason_code == "REPORT_BUILD_FAILED" for result in results)
+    assert any(result.status == "confirmed" for result in results)
+
+
+@pytest.mark.asyncio
+async def test_reporter_fleet_cancellation_keeps_event_loop_responsive() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowReporter:
+        def run_once(self):
+            started.set()
+            release.wait(timeout=1)
+            return ReportRun(status="confirmed")
+
+    fleet = ReporterFleet([SlowReporter])
+    task = asyncio.create_task(fleet.run_forever(1, lambda _result: None))
+    while not started.is_set():
+        await asyncio.sleep(0)
+
+    task.cancel()
+
+    async def release_worker():
+        await asyncio.sleep(0.01)
+        release.set()
+
+    release_task = asyncio.create_task(release_worker())
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.2)
+    await release_task
+
+
 def test_reporter_fleet_runs_fund_waits_concurrently() -> None:
     barrier = threading.Barrier(2)
     loaded = []
