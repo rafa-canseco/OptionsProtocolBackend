@@ -22,6 +22,10 @@ SET ready_at = coalesce(ready_at, created_at),
     updated_at = coalesce(updated_at, created_at)
 WHERE deployment_status = 'ready';
 
+ALTER TABLE available_otokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE available_otokens FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE available_otokens FROM PUBLIC, anon, authenticated;
+
 ALTER TABLE available_otokens
     DROP CONSTRAINT IF EXISTS available_otokens_deployment_status_check;
 ALTER TABLE available_otokens
@@ -367,6 +371,7 @@ REVOKE ALL ON FUNCTION v1_record_otoken_intent_outcome(
 DO $access$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+        GRANT ALL ON available_otokens TO service_role;
         GRANT ALL ON otoken_materialization_intents TO service_role;
         GRANT EXECUTE ON FUNCTION v1_claim_otoken_materialization(
             TEXT, TEXT, TEXT, TEXT, NUMERIC, UUID, INTEGER, INTEGER, INTEGER,

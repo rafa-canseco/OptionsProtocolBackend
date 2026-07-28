@@ -16,6 +16,16 @@ def test_lazy_series_migration_has_lifecycle_and_canonical_constraints() -> None
     assert "chain_id BIGINT" in MIGRATION
 
 
+def test_available_otokens_is_service_role_only() -> None:
+    assert "available_otokens ENABLE ROW LEVEL SECURITY" in MIGRATION
+    assert "available_otokens FORCE ROW LEVEL SECURITY" in MIGRATION
+    assert (
+        "REVOKE ALL ON TABLE available_otokens FROM PUBLIC, anon, authenticated"
+        in MIGRATION
+    )
+    assert "GRANT ALL ON available_otokens TO service_role" in MIGRATION
+
+
 def test_materialization_claim_is_cross_process_and_bounded() -> None:
     assert "CREATE OR REPLACE FUNCTION v1_claim_otoken_materialization" in MIGRATION
     assert "FOR UPDATE" in MIGRATION
