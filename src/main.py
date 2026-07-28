@@ -16,6 +16,7 @@ from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
+from src.api.series import router as series_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
     get_tokenized_fund_rpc_url,
@@ -37,6 +38,24 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def validate_lazy_otoken_config(series_mode: str) -> None:
+    """Fail fast only for lazy mode; eager remains the rollback-safe default."""
+    if series_mode != "lazy":
+        return
+    required = {
+        "WHITELIST_ADDRESS": settings.whitelist_address,
+        "OTOKEN_INTENT_HMAC_SECRET": settings.otoken_intent_hmac_secret,
+        "PRIVY_APP_ID": settings.privy_app_id,
+        "PRIVY_APP_SECRET": settings.privy_app_secret,
+        "PRIVY_JWT_VERIFICATION_KEY": settings.privy_jwt_verification_key,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "Lazy oToken mode is missing required configuration: " + ", ".join(missing)
+        )
 
 
 @asynccontextmanager
@@ -137,13 +156,8 @@ async def lifespan(app: FastAPI):
                     f"NAV submitter key must be separate from {label} observer keys"
                 )
             observer_sets[label] = observer_addresses
-        if (
-            observer_sets.get("CSP", set())
-            & observer_sets.get("covered-call", set())
-        ):
-            raise RuntimeError(
-                "CSP and covered-call observer keys must be separate"
-            )
+        if observer_sets.get("CSP", set()) & observer_sets.get("covered-call", set()):
+            raise RuntimeError("CSP and covered-call observer keys must be separate")
     elif (
         settings.fund_csp_sepolia_fair_value_observations_enabled
         or settings.fund_covered_call_sepolia_fair_value_observations_enabled
@@ -160,6 +174,10 @@ async def lifespan(app: FastAPI):
         and settings.otoken_factory_address
     )
     if has_on_chain_config:
+        from src.bots.otoken_manager import get_otoken_series_mode
+
+        series_mode = get_otoken_series_mode()
+        validate_lazy_otoken_config(series_mode)
         from src.bots import (
             otoken_manager,
             event_indexer,
@@ -356,6 +374,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
+app.include_router(series_router)
 app.include_router(results_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)

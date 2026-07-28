@@ -258,18 +258,21 @@ async def get_capacity(
     return _aggregate_capacity(rows, asset)
 
 
-def _fetch_valid_otoken_addresses(asset: Asset) -> set[str]:
-    """Return set of otoken_addresses in available_otokens for the given asset."""
+def _fetch_valid_otoken_addresses(asset: Asset) -> dict[str, str]:
+    """Return available address → lifecycle status for the asset chain."""
     try:
         chain = get_chain_for_asset(asset).value
         client = get_client()
         result = (
             client.table("available_otokens")
-            .select("otoken_address")
+            .select("otoken_address,deployment_status")
             .eq("chain", chain)
             .execute()
         )
-        return {r["otoken_address"] for r in (result.data or [])}
+        return {
+            r["otoken_address"]: r.get("deployment_status", "ready")
+            for r in (result.data or [])
+        }
     except Exception:
         logger.error(
             "Could not fetch available_otokens for %s",
@@ -429,6 +432,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             max_amount_raw=max_amount_raw,
             maker_nonce=q["maker_nonce"],
             chain=chain,
+            deployment_status=q.get("deployment_status", "ready"),
         )
     except Exception:
         logger.exception(
@@ -564,9 +568,14 @@ async def get_prices(
         return []
 
     # Filter quotes to only those with oTokens in available_otokens
-    valid_addrs = _fetch_valid_otoken_addresses(asset)
+    valid_series = _fetch_valid_otoken_addresses(asset)
+    # Keep tests and temporary old callers compatible with the previous set return.
+    if isinstance(valid_series, set):
+        valid_series = {address: "ready" for address in valid_series}
     before = len(all_quotes)
-    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_series]
+    for quote in all_quotes:
+        quote["deployment_status"] = valid_series[quote["otoken_address"]]
     pruned = before - len(all_quotes)
     if pruned:
         logger.info(

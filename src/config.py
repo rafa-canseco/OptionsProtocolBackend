@@ -47,6 +47,29 @@ class Settings(BaseSettings):
 
     # Bot intervals
     otoken_publish_interval_seconds: int = 300  # 5 minutes
+    # oToken publication/materialization rollout.
+    # eager: current behavior; shadow: publish lifecycle metadata but still create;
+    # lazy: publish deterministic future addresses and create only on execution intent.
+    otoken_series_mode: str = "eager"
+    otoken_lazy_assets: str = "eth"
+    otoken_materialization_lease_seconds: int = 180
+    otoken_materialization_max_attempts: int = 3
+    otoken_ensure_deadline_buffer_seconds: int = 30
+    otoken_ensure_retry_after_ms: int = 750
+    otoken_min_trade_amount_raw: int = 1_000_000  # 0.01 oToken (8 decimals)
+    otoken_capacity_stale_seconds: int = 120
+    otoken_materialization_hourly_limit: int = 6
+    otoken_materialization_daily_limit: int = 20
+    otoken_materialization_series_hourly_limit: int = 20
+    otoken_intent_hmac_secret: str = ""
+
+    # Privy end-user authentication for gas-spending endpoints.
+    privy_app_id: str = ""
+    privy_app_secret: str = ""
+    privy_jwt_verification_key: str = ""
+    privy_api_url: str = "https://api.privy.io"
+    privy_user_cache_seconds: int = 60
+
     event_poll_interval_seconds: int = 30
     tokenized_fund_indexer_enabled: bool = False
     tokenized_fund_indexer_poll_interval_seconds: int = 30
@@ -333,9 +356,7 @@ def get_fund_covered_call_sepolia_fair_value_policy():
     )
 
     policy = CoveredCallFairValuePolicy(
-        implied_volatility_bps=(
-            settings.fund_covered_call_sepolia_fair_value_iv_bps
-        ),
+        implied_volatility_bps=(settings.fund_covered_call_sepolia_fair_value_iv_bps),
         implied_volatility_source=(
             settings.fund_covered_call_sepolia_fair_value_iv_source
         ),

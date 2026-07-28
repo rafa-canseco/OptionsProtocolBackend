@@ -96,6 +96,28 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # getQuoteState(address,bytes32) → (filledAmount,isCancelled)
+    {
+        "inputs": [
+            {"name": "mm", "type": "address"},
+            {"name": "quoteHash", "type": "bytes32"},
+        ],
+        "name": "getQuoteState",
+        "outputs": [
+            {"name": "filledAmount", "type": "uint256"},
+            {"name": "isCancelled", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # whitelistedMMs(address) → bool
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "whitelistedMMs",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # incrementMakerNonce() — invalidates all outstanding quotes for msg.sender
     {
         "inputs": [],
@@ -107,6 +129,27 @@ BATCH_SETTLER_ABI = [
 ]
 
 OTOKEN_FACTORY_ABI = [
+    {
+        "inputs": [],
+        "name": "operator",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "oToken", "type": "address"},
+            {"indexed": True, "name": "underlying", "type": "address"},
+            {"indexed": False, "name": "strikeAsset", "type": "address"},
+            {"indexed": False, "name": "collateralAsset", "type": "address"},
+            {"indexed": False, "name": "strikePrice", "type": "uint256"},
+            {"indexed": False, "name": "expiry", "type": "uint256"},
+            {"indexed": False, "name": "isPut", "type": "bool"},
+        ],
+        "name": "OTokenCreated",
+        "type": "event",
+    },
     {
         "inputs": [],
         "name": "getOTokensLength",

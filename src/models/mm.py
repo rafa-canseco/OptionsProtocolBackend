@@ -164,6 +164,10 @@ class OTokenInfo(BaseModel):
     strike_price: float
     expiry: int
     is_put: bool
+    deployment_status: str = Field(
+        default="ready",
+        description="Series lifecycle: virtual, creating, ready, or failed",
+    )
 
 
 class MarketDataResponse(BaseModel):

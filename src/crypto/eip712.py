@@ -5,8 +5,10 @@ Matches the BatchSettler contract's domain and Quote struct from B1N-79:
   Domain: { name: "b1nary", version: "1", chainId, verifyingContract: BatchSettler }
   Quote:  { oToken, bidPrice, deadline, quoteId, maxAmount, makerNonce }
 """
+
 from eth_account import Account
 from eth_account.messages import encode_typed_data
+from eth_utils import keccak
 from web3 import Web3
 
 from src.config import settings
@@ -114,6 +116,29 @@ def recover_quote_signer(
         message_types=QUOTE_TYPES,
         message_data=message,
     )
-    return Account.recover_message(signable, signature=bytes.fromhex(
-        signature.removeprefix("0x")
-    ))
+    return Account.recover_message(
+        signable, signature=bytes.fromhex(signature.removeprefix("0x"))
+    )
+
+
+def quote_digest(
+    otoken: str,
+    bid_price: int,
+    deadline: int,
+    quote_id: int,
+    max_amount: int,
+    maker_nonce: int,
+    domain: dict | None = None,
+) -> bytes:
+    """Return the exact digest used as BatchSettler.quoteState key."""
+    if domain is None:
+        domain = get_domain()
+    message = _build_quote_message(
+        otoken, bid_price, deadline, quote_id, max_amount, maker_nonce
+    )
+    signable = encode_typed_data(
+        domain_data=domain,
+        message_types=QUOTE_TYPES,
+        message_data=message,
+    )
+    return keccak(b"\x19" + signable.version + signable.header + signable.body)

@@ -65,7 +65,9 @@ _MM_FILL_SELECT = (
     "protocol_fee,premium,collateral,user_address,vault_id,strike_price,expiry,"
     "is_put,indexed_at"
 )
-_MM_POSITION_SELECT = "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+_MM_POSITION_SELECT = (
+    "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+)
 
 
 def _normalize_mm_address(addr: str) -> str:
@@ -597,7 +599,7 @@ async def get_market(
         client = get_client()
         result = (
             client.table("available_otokens")
-            .select("otoken_address,strike_price,expiry,is_put")
+            .select("otoken_address,strike_price,expiry,is_put,deployment_status")
             .eq("underlying", underlying_addr)
             .in_("expiry", active_expiries)
             .execute()
@@ -609,6 +611,7 @@ async def get_market(
                     strike_price=float(r["strike_price"]),
                     expiry=r["expiry"],
                     is_put=r["is_put"],
+                    deployment_status=r.get("deployment_status", "ready"),
                 )
             )
     except Exception:
