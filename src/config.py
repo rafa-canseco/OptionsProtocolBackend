@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     privy_app_id: str = ""
     privy_app_secret: str = ""
     privy_jwt_verification_key: str = ""
+    privy_jwks_url: str = ""
     privy_api_url: str = "https://api.privy.io"
     privy_user_cache_seconds: int = 60
 

@@ -37,6 +37,7 @@ def _configure_lazy_requirements(monkeypatch) -> None:
     monkeypatch.setattr(settings, "privy_app_id", "app")
     monkeypatch.setattr(settings, "privy_app_secret", "secret")
     monkeypatch.setattr(settings, "privy_jwt_verification_key", "key")
+    monkeypatch.setattr(settings, "privy_jwks_url", "")
     monkeypatch.setattr(settings, "otoken_ensure_deadline_buffer_seconds", 30)
     monkeypatch.setattr(
         settings,
@@ -147,6 +148,39 @@ def test_lazy_startup_accepts_default_materialization_buffer(
     _configure_lazy_requirements(monkeypatch)
 
     validate_lazy_otoken_config("lazy")
+
+
+def test_lazy_startup_accepts_https_jwks_without_pem(monkeypatch) -> None:
+    _configure_lazy_requirements(monkeypatch)
+    monkeypatch.setattr(settings, "privy_jwt_verification_key", "")
+    monkeypatch.setattr(
+        settings,
+        "privy_jwks_url",
+        "https://auth.example/.well-known/jwks.json",
+    )
+
+    validate_lazy_otoken_config("lazy")
+
+
+def test_lazy_startup_requires_pem_or_jwks(monkeypatch) -> None:
+    _configure_lazy_requirements(monkeypatch)
+    monkeypatch.setattr(settings, "privy_jwt_verification_key", "")
+    monkeypatch.setattr(settings, "privy_jwks_url", "")
+
+    with pytest.raises(
+        RuntimeError,
+        match="PRIVY_JWT_VERIFICATION_KEY or PRIVY_JWKS_URL",
+    ):
+        validate_lazy_otoken_config("lazy")
+
+
+def test_lazy_startup_rejects_non_https_jwks(monkeypatch) -> None:
+    _configure_lazy_requirements(monkeypatch)
+    monkeypatch.setattr(settings, "privy_jwt_verification_key", "")
+    monkeypatch.setattr(settings, "privy_jwks_url", "http://auth.example/jwks.json")
+
+    with pytest.raises(RuntimeError, match="valid HTTPS URL"):
+        validate_lazy_otoken_config("lazy")
 
 
 def test_lazy_startup_rejects_non_base_configured_chain(monkeypatch) -> None:
