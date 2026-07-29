@@ -2,7 +2,7 @@ from pathlib import Path
 
 MIGRATION = (
     Path(__file__).parents[1]
-    / "supabase/migrations/202607280003_b1n389_lazy_otoken_series.sql"
+    / "supabase/migrations/202607280006_b1n389_lazy_otoken_series.sql"
 ).read_text()
 
 
