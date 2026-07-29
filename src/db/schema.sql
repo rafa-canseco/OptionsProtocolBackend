@@ -291,15 +291,36 @@ create table if not exists mm_api_keys (
 create table if not exists available_otokens (
   id uuid primary key default gen_random_uuid(),
   otoken_address text not null unique,
+  underlying text,
   strike_price numeric not null,
   expiry bigint not null,
   is_put boolean not null,
   collateral_asset text not null,
+  chain text not null default 'base',
+  chain_id bigint,
+  series_key text,
+  factory_address text,
+  strike_asset text,
+  strike_price_raw numeric(78, 0),
+  deployment_status text not null default 'ready'
+    check (deployment_status in ('virtual', 'creating', 'ready', 'failed')),
+  deployment_owner_token uuid,
+  deployment_lease_expires_at timestamptz,
+  deployment_tx_hash text,
+  deployment_submitted_at timestamptz,
+  creation_attempts integer not null default 0,
+  last_error_code text,
+  first_published_at timestamptz not null default now(),
+  ready_at timestamptz,
+  first_filled_at timestamptz,
+  updated_at timestamptz not null default now(),
   created_at timestamptz not null default now()
 );
 
 create index if not exists idx_available_otokens_expiry
   on available_otokens(expiry);
+create unique index if not exists available_otokens_chain_series_key_idx
+  on available_otokens(chain, series_key) where series_key is not null;
 
 -- ============================================================
 -- MM capacity reports (one row per MM, upserted on each report)

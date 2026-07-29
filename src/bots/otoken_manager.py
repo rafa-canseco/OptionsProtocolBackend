@@ -1,8 +1,7 @@
 """oToken Manager Bot.
 
-Creates oTokens on-chain via OTokenFactory, whitelists them,
-and records them in the available_otokens table so that
-external MMs can discover them via GET /mm/market.
+Publishes deterministic oToken addresses for MMs and, outside lazy cohorts,
+creates/whitelists them eagerly for rollback compatibility.
 
 Does NOT sign quotes or write to mm_quotes. That is the MM's job.
 """
@@ -26,6 +25,8 @@ from src.pricing.black_scholes import OptionType
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
 from src.pricing.utils import strike_to_8_decimals
 from src.pricing.chainlink import get_asset_price
+from src.otokens.models import CanonicalSeries
+from src.otokens.repository import SeriesRepository
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +39,123 @@ OTokenKey = tuple[float, int, bool]
 # as unusable to MMs.
 FULL_RECONCILE_EVERY_CYCLES = 3
 _publish_cycle_count = 0
+VALID_SERIES_MODES = {"eager", "shadow", "lazy"}
+
+
+def get_otoken_series_mode() -> str:
+    mode = settings.otoken_series_mode.strip().lower()
+    if mode not in VALID_SERIES_MODES:
+        raise RuntimeError("OTOKEN_SERIES_MODE must be one of eager, shadow, lazy")
+    return mode
+
+
+def _lazy_assets() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in settings.otoken_lazy_assets.split(",")
+        if item.strip()
+    }
 
 
 def _spec_key(spec: OTokenSpec) -> OTokenKey:
     return (spec.strike, spec.expiry_ts, spec.option_type == OptionType.PUT)
+
+
+def _canonical_series(spec: OTokenSpec, asset: Asset) -> CanonicalSeries:
+    cfg = get_asset_config(asset)
+    is_put = spec.option_type == OptionType.PUT
+    underlying = Web3.to_checksum_address(cfg.underlying_address)
+    strike_asset = Web3.to_checksum_address(settings.usdc_address)
+    collateral = strike_asset if is_put else underlying
+    return CanonicalSeries(
+        chain_id=settings.chain_id,
+        factory_address=settings.otoken_factory_address,
+        underlying=underlying,
+        strike_asset=strike_asset,
+        collateral_asset=collateral,
+        strike_price_raw=strike_to_8_decimals(spec.strike),
+        expiry=spec.expiry_ts,
+        is_put=is_put,
+    )
+
+
+def _publish_virtual_otokens(
+    specs: list[OTokenSpec],
+    asset: Asset,
+) -> int:
+    """Insert unseen virtual specs with their exact future CREATE2 address."""
+    if not specs:
+        return 0
+    repository = SeriesRepository()
+    canonical_by_key = {
+        canonical.series_key: (canonical, spec)
+        for spec in specs
+        for canonical in (_canonical_series(spec, asset),)
+    }
+    cfg = get_asset_config(asset)
+    result = (
+        repository.client.table("available_otokens")
+        .select(
+            "id,series_key,otoken_address,strike_price,expiry,is_put,deployment_status"
+        )
+        .eq("chain", "base")
+        .eq("underlying", cfg.underlying_address.lower())
+        .in_("expiry", sorted({spec.expiry_ts for spec in specs}))
+        .execute()
+    )
+    existing_rows = result.data or []
+    existing = {
+        str(row["series_key"]) for row in existing_rows if row.get("series_key")
+    }
+    legacy_by_spec = {
+        (
+            float(row["strike_price"]),
+            int(row["expiry"]),
+            bool(row["is_put"]),
+        ): row
+        for row in existing_rows
+        if not row.get("series_key")
+    }
+
+    factory = get_otoken_factory()
+    rows = []
+    for series_key, (canonical, spec) in canonical_by_key.items():
+        if series_key in existing:
+            continue
+        predicted = factory.functions.getTargetOTokenAddress(
+            *canonical.factory_args
+        ).call()
+        if predicted.lower() == ZERO_ADDRESS:
+            raise RuntimeError("Factory returned zero CREATE2 target")
+        legacy = legacy_by_spec.get(_spec_key(spec))
+        if legacy and str(legacy["otoken_address"]).lower() == predicted.lower():
+            canonical_row = canonical.to_row(
+                otoken_address=predicted,
+                strike_price=spec.strike,
+                deployment_status=str(legacy.get("deployment_status") or "ready"),
+            )
+            metadata = {
+                key: value
+                for key, value in canonical_row.items()
+                if key not in {"otoken_address", "deployment_status"}
+            }
+            (
+                repository.client.table("available_otokens")
+                .update(metadata)
+                .eq("id", legacy["id"])
+                .is_("series_key", "null")
+                .execute()
+            )
+            continue
+        rows.append(
+            canonical.to_row(
+                otoken_address=predicted,
+                strike_price=spec.strike,
+                deployment_status="virtual",
+            )
+        )
+    repository.insert_virtual_rows(rows)
+    return len(rows)
 
 
 def _find_or_create_otoken(
@@ -247,7 +361,9 @@ def _load_existing_otokens_for_specs(
     client = get_client()
     result = (
         client.table("available_otokens")
-        .select("otoken_address,strike_price,expiry,is_put,underlying")
+        .select(
+            "otoken_address,strike_price,expiry,is_put,underlying,deployment_status"
+        )
         .gt("expiry", now_ts)
         .execute()
     )
@@ -257,6 +373,8 @@ def _load_existing_otokens_for_specs(
     existing: dict[OTokenKey, str] = {}
     for row in result.data:
         try:
+            if row.get("deployment_status", "ready") != "ready":
+                continue
             row_underlying = row.get("underlying")
             if row_underlying is not None and str(row_underlying).lower() != underlying:
                 continue
@@ -282,10 +400,10 @@ def _is_valid_expiry(ts: int) -> bool:
 
 
 def _prune_near_expiry_otokens() -> None:
-    """Delete rows from available_otokens within their dynamic cutoff.
+    """Delete unmaterialized rows within their dynamic cutoff.
 
-    Short-term expiries (TTL <= 48h) use short cutoff (4h).
-    Standard expiries use standard cutoff (48h).
+    Ready rows are retained for historical creation-to-fill telemetry and
+    existing position metadata. Public/MM queries already filter active expiries.
     """
     from src.pricing.utils import cutoff_hours_for_expiry
 
@@ -294,7 +412,7 @@ def _prune_near_expiry_otokens() -> None:
     client = get_client()
     result = (
         client.table("available_otokens")
-        .select("id, expiry")
+        .select("id, expiry, deployment_status")
         .eq("chain", "base")
         .lt("expiry", max_cutoff_ts)
         .execute()
@@ -304,6 +422,7 @@ def _prune_near_expiry_otokens() -> None:
         r["id"]
         for r in rows
         if r.get("expiry") is not None
+        and r.get("deployment_status") != "ready"
         and r["expiry"] <= now_ts + cutoff_hours_for_expiry(r["expiry"], now_ts) * 3600
     ]
     if prune_ids:
@@ -321,9 +440,6 @@ def _upsert_available_otokens(
     Raises on DB failure so the caller knows the cycle did not
     complete successfully.
     """
-    cfg = get_asset_config(asset)
-    underlying = cfg.underlying_address.lower()
-
     seen_addresses: set[str] = set()
     rows = []
     for otoken_addr, spec in paired:
@@ -341,21 +457,31 @@ def _upsert_available_otokens(
             continue
         seen_addresses.add(addr_lower)
 
+        cfg = get_asset_config(asset)
         is_put = spec.option_type == OptionType.PUT
-        usdc = settings.usdc_address.lower()
-        collateral = usdc if is_put else underlying
-
-        rows.append(
-            {
-                "otoken_address": addr_lower,
-                "underlying": underlying,
-                "strike_price": spec.strike,
-                "expiry": spec.expiry_ts,
-                "is_put": is_put,
-                "collateral_asset": collateral,
-                "chain": "base",
-            }
-        )
+        collateral = settings.usdc_address if is_put else cfg.underlying_address
+        row = {
+            "otoken_address": addr_lower,
+            "underlying": cfg.underlying_address.lower(),
+            "collateral_asset": collateral.lower(),
+            "strike_price": spec.strike,
+            "expiry": spec.expiry_ts,
+            "is_put": is_put,
+            "chain": "base",
+            "deployment_status": "ready",
+            "ready_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Preserve eager rollback compatibility in minimally configured tooling.
+        # Runtime environments always configure the factory and receive complete
+        # canonical lifecycle metadata.
+        if settings.otoken_factory_address:
+            canonical = _canonical_series(spec, asset)
+            row |= canonical.to_row(
+                otoken_address=addr_lower,
+                strike_price=spec.strike,
+                deployment_status="ready",
+            )
+        rows.append(row)
 
     if not rows:
         return
@@ -387,13 +513,15 @@ def _parse_custom_expiries() -> list[int] | None:
 
 
 async def publish_once():
-    """Single cycle: prune stale oTokens, generate specs for each asset, create on-chain."""
+    """Publish active specs and create only according to the rollout mode."""
     global _publish_cycle_count
     _publish_cycle_count += 1
 
     _prune_near_expiry_otokens()
 
     custom_expiries = _parse_custom_expiries()
+    mode = get_otoken_series_mode()
+    lazy_assets = _lazy_assets()
 
     for asset in get_base_assets():
         try:
@@ -405,6 +533,20 @@ async def publish_once():
         specs = generate_otoken_specs(
             spot=spot, asset=asset, expiry_timestamps=custom_expiries
         )
+
+        if mode == "lazy" and asset.value in lazy_assets:
+            inserted = await asyncio.to_thread(
+                _publish_virtual_otokens,
+                specs,
+                asset,
+            )
+            logger.info(
+                "oToken manager lazy cycle for %s: target=%d newly_virtual=%d",
+                asset.value,
+                len({_spec_key(spec) for spec in specs}),
+                inserted,
+            )
+            continue
 
         if _publish_cycle_count % FULL_RECONCILE_EVERY_CYCLES == 1:
             existing_by_key = {}

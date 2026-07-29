@@ -15,6 +15,7 @@ Tracks last_indexed_block for resumability.
 import asyncio
 import logging
 from collections import OrderedDict
+from datetime import datetime, timezone
 
 from web3 import AsyncWeb3, Web3, WebSocketProvider
 
@@ -266,6 +267,25 @@ def _store_events(events: list[dict]) -> int:
             len(events),
         )
         raise RuntimeError(f"Supabase upsert returned no data for {len(events)} events")
+    # Best-effort lifecycle telemetry. Order history remains canonical if this
+    # enrichment write is temporarily unavailable.
+    first_fill_at = datetime.now(timezone.utc).isoformat()
+    addresses = sorted({event["otoken_address"].lower() for event in events})
+    try:
+        (
+            client.table("available_otokens")
+            .update({"first_filled_at": first_fill_at})
+            .eq("chain", "base")
+            .in_("otoken_address", addresses)
+            .is_("first_filled_at", "null")
+            .execute()
+        )
+    except Exception:
+        logger.warning(
+            "Could not record first-fill telemetry for %d oTokens",
+            len(addresses),
+            exc_info=True,
+        )
     return len(result.data)
 
 

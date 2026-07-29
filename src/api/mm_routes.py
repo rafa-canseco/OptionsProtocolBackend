@@ -60,12 +60,16 @@ _MM_QUOTE_SELECT = (
     "id,otoken_address,bid_price,deadline,quote_id,max_amount,maker_nonce,"
     "signature,asset,strike_price,expiry,is_put,is_active,created_at"
 )
+_MM_OTOKEN_LIFECYCLE_SELECT = "otoken_address,deployment_status"
+_OTOKEN_DEPLOYMENT_STATUSES = frozenset({"virtual", "creating", "ready", "failed"})
 _MM_FILL_SELECT = (
     "tx_hash,chain,block_number,otoken_address,amount,gross_premium,net_premium,"
     "protocol_fee,premium,collateral,user_address,vault_id,strike_price,expiry,"
     "is_put,indexed_at"
 )
-_MM_POSITION_SELECT = "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+_MM_POSITION_SELECT = (
+    "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
+)
 
 
 def _normalize_mm_address(addr: str) -> str:
@@ -73,6 +77,46 @@ def _normalize_mm_address(addr: str) -> str:
     if addr.startswith("0x"):
         return addr.lower()
     return addr
+
+
+def _fetch_quote_lifecycle_statuses(client, quote_rows: list[dict]) -> dict[str, str]:
+    """Fetch lifecycle statuses for all quote series in one database query.
+
+    A missing registry row is treated as a legacy quote and remains ready. Once
+    a registry row exists, however, a missing or unknown status fails closed.
+    """
+    otoken_addresses = sorted(
+        {_normalize_mm_address(str(row["otoken_address"])) for row in quote_rows}
+    )
+    if not otoken_addresses:
+        return {}
+
+    result = (
+        client.table("available_otokens")
+        .select(_MM_OTOKEN_LIFECYCLE_SELECT)
+        .in_("otoken_address", otoken_addresses)
+        .execute()
+    )
+    if result.data is None:
+        raise RuntimeError("available_otokens lifecycle query returned no payload")
+
+    statuses: dict[str, str] = {}
+    for row in result.data:
+        address = row.get("otoken_address")
+        if not isinstance(address, str) or not address:
+            raise RuntimeError("available_otokens lifecycle row has no address")
+
+        normalized_address = _normalize_mm_address(address)
+        status = row.get("deployment_status")
+        if status not in _OTOKEN_DEPLOYMENT_STATUSES:
+            logger.error(
+                "Failing closed invalid lifecycle status for oToken %s",
+                normalized_address,
+            )
+            status = "failed"
+        statuses[normalized_address] = status
+
+    return statuses
 
 
 def _resolve_nonce(
@@ -308,10 +352,24 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
         logger.exception("Failed to fetch quotes for %s", mm_address)
         raise HTTPException(status_code=502, detail="Could not fetch quotes")
 
+    quote_rows = result.data or []
+    try:
+        lifecycle_statuses = _fetch_quote_lifecycle_statuses(client, quote_rows)
+    except Exception:
+        logger.exception("Failed to fetch quote lifecycle for %s", mm_address)
+        raise HTTPException(
+            status_code=502,
+            detail="Could not fetch quote lifecycle",
+        )
+
     return [
         QuoteResponse(
             id=row["id"],
             otoken_address=row["otoken_address"],
+            deployment_status=lifecycle_statuses.get(
+                _normalize_mm_address(row["otoken_address"]),
+                "ready",
+            ),
             bid_price=str(row["bid_price"]),
             deadline=row["deadline"],
             quote_id=str(row["quote_id"]),
@@ -325,7 +383,7 @@ async def get_quotes(mm_address: str = Depends(require_mm_api_key)):
             is_active=row["is_active"],
             created_at=str(row["created_at"]),
         )
-        for row in (result.data or [])
+        for row in quote_rows
     ]
 
 
@@ -597,7 +655,7 @@ async def get_market(
         client = get_client()
         result = (
             client.table("available_otokens")
-            .select("otoken_address,strike_price,expiry,is_put")
+            .select("otoken_address,strike_price,expiry,is_put,deployment_status")
             .eq("underlying", underlying_addr)
             .in_("expiry", active_expiries)
             .execute()
@@ -609,6 +667,7 @@ async def get_market(
                     strike_price=float(r["strike_price"]),
                     expiry=r["expiry"],
                     is_put=r["is_put"],
+                    deployment_status=r.get("deployment_status", "ready"),
                 )
             )
     except Exception:
