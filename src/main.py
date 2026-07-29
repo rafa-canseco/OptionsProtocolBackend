@@ -77,7 +77,6 @@ def validate_lazy_otoken_config(series_mode: str) -> None:
         "OTOKEN_INTENT_HMAC_SECRET": settings.otoken_intent_hmac_secret,
         "PRIVY_APP_ID": settings.privy_app_id,
         "PRIVY_APP_SECRET": settings.privy_app_secret,
-        "PRIVY_JWT_VERIFICATION_KEY": settings.privy_jwt_verification_key,
     }
     for asset in lazy_assets:
         env_name, setting_name = _LAZY_BASE_ASSET_ADDRESSES[asset]
@@ -91,6 +90,20 @@ def validate_lazy_otoken_config(series_mode: str) -> None:
         raise RuntimeError(
             "Lazy oToken mode is missing required configuration: " + ", ".join(missing)
         )
+    if not (
+        settings.privy_jwt_verification_key.strip() or settings.privy_jwks_url.strip()
+    ):
+        raise RuntimeError(
+            "Lazy oToken mode requires at least one of "
+            "PRIVY_JWT_VERIFICATION_KEY or PRIVY_JWKS_URL"
+        )
+    if settings.privy_jwks_url.strip():
+        from src.api.user_auth import validate_privy_jwks_url
+
+        try:
+            validate_privy_jwks_url(settings.privy_jwks_url)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
     if settings.chain_id not in SUPPORTED_LAZY_OTOKEN_CHAIN_IDS:
         raise RuntimeError(
             "Lazy oToken mode only supports Base mainnet (8453) or Base Sepolia (84532)"
