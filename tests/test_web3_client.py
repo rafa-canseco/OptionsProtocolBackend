@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from hexbytes import HexBytes
 
 from src.contracts import web3_client
 
@@ -15,7 +16,7 @@ def _mock_web3(receipt_gas_used=42):
     w3.eth.get_block.return_value = {"baseFeePerGas": 1_000_000_000}
     w3.eth.max_priority_fee = 1_500_000_000
     w3.eth.get_transaction_count.return_value = 0
-    w3.eth.send_raw_transaction.return_value = SimpleNamespace(hex=lambda: "0xdeadbeef")
+    w3.eth.send_raw_transaction.return_value = HexBytes("0xdeadbeef")
     receipt = MagicMock()
     receipt.status = 1
     receipt.gasUsed = receipt_gas_used
@@ -53,7 +54,7 @@ def test_sign_send_and_confirm_logs_even_when_gas_used_missing(caplog):
     w3.eth.get_block.return_value = {"baseFeePerGas": 1}
     w3.eth.max_priority_fee = 1
     w3.eth.get_transaction_count.return_value = 0
-    w3.eth.send_raw_transaction.return_value = SimpleNamespace(hex=lambda: "0xcafe")
+    w3.eth.send_raw_transaction.return_value = HexBytes("0xcafe")
     # Build a minimal object (not a MagicMock) so attribute lookup raises.
     receipt = SimpleNamespace(status=1)
     w3.eth.wait_for_transaction_receipt.return_value = receipt
