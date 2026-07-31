@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from src.config import settings
 from src.db.database import get_client
+from src.models.series import ExecutionQuoteSnapshot
 
 SERIES_SELECT = (
     "id,chain,chain_id,series_key,factory_address,otoken_address,underlying,"
@@ -44,6 +45,78 @@ class SeriesRepository:
             .execute()
         )
         return result.data[0] if result.data else None
+
+    def get_active_fund_adapter(self, adapter_address: str) -> dict | None:
+        """Return one trusted active V2 adapter binding, failing closed on ambiguity."""
+        bindings = (
+            self.client.table("v2_fund_contracts")
+            .select("chain_id,fund_address,contract_address,contract_role")
+            .eq("chain_id", settings.chain_id)
+            .eq("contract_address", adapter_address.lower())
+            .in_("contract_role", ["csp_adapter", "covered_call_adapter"])
+            .is_("valid_to_block", "null")
+            .execute()
+        )
+        trusted: list[dict] = []
+        for binding in bindings.data or []:
+            registry = (
+                self.client.table("v2_fund_registry")
+                .select(
+                    "chain_id,fund_address,fund_key,strategy_kind,"
+                    "deployment_status,enabled"
+                )
+                .eq("chain_id", binding["chain_id"])
+                .eq("fund_address", binding["fund_address"])
+                .eq("deployment_status", "DEPLOYED")
+                .eq("enabled", True)
+                .limit(1)
+                .execute()
+            )
+            if not registry.data:
+                continue
+            row = {**registry.data[0], **binding}
+            expected_role = {
+                "csp": "csp_adapter",
+                "covered_call": "covered_call_adapter",
+            }.get(row.get("strategy_kind"))
+            if expected_role is not None and row.get("contract_role") == expected_role:
+                trusted.append(row)
+        return trusted[0] if len(trusted) == 1 else None
+
+    def active_quote_matches(self, quote: ExecutionQuoteSnapshot) -> bool:
+        """Confirm the exact materialization quote is still served for this MM."""
+        values = quote.as_ints()
+        result = (
+            self.client.table("mm_quotes")
+            .select(
+                "mm_address,otoken_address,bid_price,deadline,quote_id,"
+                "max_amount,maker_nonce,signature,chain,is_active"
+            )
+            .eq("mm_address", quote.mm_address.lower())
+            .eq("quote_id", str(values["quote_id"]))
+            .eq("chain", "base")
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return False
+        row = result.data[0]
+        try:
+            return all(
+                (
+                    str(row["mm_address"]).lower() == quote.mm_address.lower(),
+                    str(row["otoken_address"]).lower() == quote.otoken_address.lower(),
+                    int(row["bid_price"]) == values["bid_price"],
+                    int(row["deadline"]) == values["deadline"],
+                    int(row["quote_id"]) == values["quote_id"],
+                    int(row["max_amount"]) == values["max_amount"],
+                    int(row["maker_nonce"]) == values["maker_nonce"],
+                    str(row["signature"]).lower() == quote.signature.lower(),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def insert_virtual_rows(self, rows: list[dict]) -> None:
         if not rows:

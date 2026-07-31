@@ -6,7 +6,7 @@ import pytest
 from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from src.config import settings
-from src.models.series import EnsureSeriesRequest
+from src.models.series import EnsureFundSeriesRequest, EnsureSeriesRequest
 from src.otokens.models import CanonicalSeries
 from src.otokens.repository import MaterializationClaim
 from src.otokens.service import (
@@ -19,6 +19,7 @@ FACTORY = "0x1111111111111111111111111111111111111111"
 OTOKEN = "0x2222222222222222222222222222222222222222"
 MM = "0x3333333333333333333333333333333333333333"
 WALLET = "0x4444444444444444444444444444444444444444"
+ADAPTER = "0x5555555555555555555555555555555555555555"
 WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 TX_HASH = "0x" + "ab" * 32
@@ -44,6 +45,16 @@ def _request(
             "signature": "0x" + "ab" * 65,
             "mm_address": MM,
         },
+    )
+
+
+def _fund_request(**overrides) -> EnsureFundSeriesRequest:
+    request = _request(**overrides)
+    return EnsureFundSeriesRequest(
+        adapter_address=ADAPTER,
+        expected_otoken_address=request.expected_otoken_address,
+        amount_raw=request.amount_raw,
+        quote=request.quote,
     )
 
 
@@ -130,6 +141,101 @@ def test_ready_series_is_idempotent_and_preserves_quote(monkeypatch) -> None:
     )
     repository.claim.assert_not_called()
     assert validate_quote.call_count == 1
+
+
+def test_fund_intent_uses_trusted_adapter_and_active_mm_quote(monkeypatch) -> None:
+    _configure_lazy(monkeypatch)
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.get_active_fund_adapter.return_value = {
+        "contract_role": "csp_adapter",
+        "strategy_kind": "csp",
+    }
+    repository.active_quote_matches.return_value = True
+    repository.claim.return_value = _claim(owned=False, status="creating")
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+    monkeypatch.setattr(
+        service, "_validate_quote", lambda **_kwargs: (MM, b"\x12" * 32)
+    )
+    user_collateral = MagicMock(
+        side_effect=AssertionError("fund intents must not use Privy wallet collateral")
+    )
+    monkeypatch.setattr(service, "_validate_user_collateral", user_collateral)
+    factory = MagicMock()
+    factory.functions.getTargetOTokenAddress.return_value.call.return_value = OTOKEN
+
+    with patch("src.otokens.service.get_otoken_factory", return_value=factory):
+        result = service.ensure_for_fund(_fund_request(), MM)
+
+    assert result.status == "creating"
+    repository.get_active_fund_adapter.assert_called_once_with(ADAPTER)
+    repository.active_quote_matches.assert_called_once()
+    assert repository.claim.call_args.kwargs["wallet_address"] == ADAPTER
+    user_collateral.assert_not_called()
+
+
+def test_fund_intent_rejects_quote_from_another_mm(monkeypatch) -> None:
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+
+    with pytest.raises(SeriesError) as raised:
+        service.ensure_for_fund(
+            _fund_request(),
+            "0x6666666666666666666666666666666666666666",
+        )
+
+    assert raised.value.code == "FUND_MM_NOT_AUTHORIZED"
+    assert raised.value.status_code == 403
+    repository.get_active_fund_adapter.assert_not_called()
+    repository.claim.assert_not_called()
+
+
+def test_fund_intent_rejects_adapter_for_wrong_option_side(monkeypatch) -> None:
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.get_active_fund_adapter.return_value = {
+        "contract_role": "covered_call_adapter",
+        "strategy_kind": "covered_call",
+    }
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+
+    with pytest.raises(SeriesError) as raised:
+        service.ensure_for_fund(_fund_request(), MM)
+
+    assert raised.value.code == "FUND_ADAPTER_NOT_AUTHORIZED"
+    repository.active_quote_matches.assert_not_called()
+    repository.claim.assert_not_called()
+
+
+def test_fund_intent_requires_exact_active_quote(monkeypatch) -> None:
+    repository = MagicMock()
+    repository.get_by_address.return_value = _virtual_row()
+    repository.get_active_fund_adapter.return_value = {
+        "contract_role": "csp_adapter",
+        "strategy_kind": "csp",
+    }
+    repository.active_quote_matches.return_value = False
+    service = SeriesMaterializationService(repository)
+    monkeypatch.setattr(
+        service, "_validate_series", lambda _row, _expected: ("eth", _canonical())
+    )
+
+    with pytest.raises(SeriesError) as raised:
+        service.ensure_for_fund(_fund_request(), MM)
+
+    assert raised.value.code == "FUND_QUOTE_NOT_ACTIVE"
+    assert raised.value.retryable is True
+    repository.claim.assert_not_called()
 
 
 def test_ready_series_allows_trade_below_materialization_minimum(

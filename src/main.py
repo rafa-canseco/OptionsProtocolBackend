@@ -17,6 +17,7 @@ from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
 from src.api.csp_vault import router as csp_vault_router
 from src.api.series import router as series_router
+from src.api.fund_series import router as fund_series_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
     get_tokenized_fund_rpc_url,
@@ -609,6 +610,7 @@ app.add_middleware(
 
 app.include_router(router)
 app.include_router(series_router)
+app.include_router(fund_series_router)
 app.include_router(results_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)

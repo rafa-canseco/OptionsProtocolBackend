@@ -23,7 +23,11 @@ from src.contracts.web3_client import (
     get_whitelist,
 )
 from src.crypto.eip712 import quote_digest, recover_quote_signer
-from src.models.series import EnsureSeriesRequest, ExecutionQuoteSnapshot
+from src.models.series import (
+    EnsureFundSeriesRequest,
+    EnsureSeriesRequest,
+    ExecutionQuoteSnapshot,
+)
 from src.otokens.models import canonical_series_from_row
 from src.otokens.repository import SeriesRepository
 from src.pricing.assets import Asset, get_base_assets, get_asset_config
@@ -147,6 +151,58 @@ class SeriesMaterializationService:
             raise SeriesError(
                 "CAPACITY_EXCEEDED",
                 "The requested size exceeds current market-maker capacity",
+                retryable=True,
+            )
+
+    def _validate_fund_intent(
+        self,
+        *,
+        request: EnsureSeriesRequest,
+        authenticated_mm: str,
+        asset: str,
+        canonical,
+    ) -> None:
+        """Authorize a service intent without weakening the Privy user path."""
+        if request.quote.mm_address.lower() != authenticated_mm.lower():
+            raise SeriesError(
+                "FUND_MM_NOT_AUTHORIZED",
+                "The quote does not belong to the authenticated market maker",
+                status_code=403,
+            )
+        if asset != Asset.ETH.value or canonical is None:
+            raise SeriesError(
+                "FUND_SERIES_NOT_SUPPORTED",
+                "The fund allocator only supports canonical ETH option series",
+            )
+        try:
+            binding = self.repository.get_active_fund_adapter(request.wallet_address)
+        except Exception as exc:
+            raise SeriesError(
+                "FUND_REGISTRY_UNAVAILABLE",
+                "The trusted fund registry is temporarily unavailable",
+                status_code=503,
+                retryable=True,
+            ) from exc
+        expected_role = "csp_adapter" if canonical.is_put else "covered_call_adapter"
+        if not binding or binding.get("contract_role") != expected_role:
+            raise SeriesError(
+                "FUND_ADAPTER_NOT_AUTHORIZED",
+                "The adapter is not authorized for this option side",
+                status_code=403,
+            )
+        try:
+            active_quote = self.repository.active_quote_matches(request.quote)
+        except Exception as exc:
+            raise SeriesError(
+                "FUND_QUOTE_REGISTRY_UNAVAILABLE",
+                "The active quote registry is temporarily unavailable",
+                status_code=503,
+                retryable=True,
+            ) from exc
+        if not active_quote:
+            raise SeriesError(
+                "FUND_QUOTE_NOT_ACTIVE",
+                "The materialization quote is no longer active",
                 retryable=True,
             )
 
@@ -459,7 +515,30 @@ class SeriesMaterializationService:
             deployment_tx_hash=tx_hash,
         )
 
-    def ensure(self, request: EnsureSeriesRequest, user_id: str) -> EnsureResult:
+    def ensure_for_fund(
+        self,
+        request: EnsureFundSeriesRequest,
+        authenticated_mm: str,
+    ) -> EnsureResult:
+        adapted = EnsureSeriesRequest(
+            wallet_address=request.adapter_address,
+            expected_otoken_address=request.expected_otoken_address,
+            amount_raw=request.amount_raw,
+            quote=request.quote,
+        )
+        return self.ensure(
+            adapted,
+            f"fund:{request.adapter_address.lower()}",
+            _fund_mm_address=authenticated_mm,
+        )
+
+    def ensure(
+        self,
+        request: EnsureSeriesRequest,
+        user_id: str,
+        *,
+        _fund_mm_address: str | None = None,
+    ) -> EnsureResult:
         started = time.monotonic()
         amount_raw = int(request.amount_raw)
         row = self.repository.get_by_address(request.expected_otoken_address)
@@ -475,6 +554,13 @@ class SeriesMaterializationService:
             raise SeriesError(
                 "TRADE_TOO_SMALL",
                 "The requested trade is below the minimum materialization size",
+            )
+        if _fund_mm_address is not None:
+            self._validate_fund_intent(
+                request=request,
+                authenticated_mm=_fund_mm_address,
+                asset=asset,
+                canonical=canonical,
             )
         _, digest = self._validate_quote(
             quote=request.quote,
@@ -557,12 +643,13 @@ class SeriesMaterializationService:
                 "The expected address does not match the factory CREATE2 target",
             )
 
-        self._validate_user_collateral(
-            canonical=canonical,
-            asset=asset,
-            wallet_address=request.wallet_address,
-            amount_raw=amount_raw,
-        )
+        if _fund_mm_address is None:
+            self._validate_user_collateral(
+                canonical=canonical,
+                asset=asset,
+                wallet_address=request.wallet_address,
+                amount_raw=amount_raw,
+            )
 
         actor_key = _actor_key(user_id)
         quote_hash = Web3.to_hex(digest)
