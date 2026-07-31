@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import src.api.csp_vault as fund_api
+from src.config import get_protocol_fee_bps, settings
 from src.main import app
 from src.vaults.csp_service import (
     PROXY_ROLES,
@@ -53,6 +54,10 @@ class FakeRepository:
             "last_report_nonce": 2,
             "nav_valid_after_block": 90,
             "nav_valid_until_block": 110,
+            "fee_recipient": USER,
+            "management_fee_wad": "20000000000000000",
+            "performance_fee_bps": 1_000,
+            "high_water_mark": "1000000",
         }
         self.user = {"shares": "100", "redemption": {}}
         self.rows: list[dict[str, Any]] = []
@@ -247,6 +252,30 @@ def test_registry_binding_mismatch_disables_writes() -> None:
 
     assert config.writes_enabled is False
     assert config.blocked_reason_code == "UNTRUSTED_BINDING"
+
+
+def test_config_exposes_active_fund_and_premium_fee_policy(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "protocol_fee_bps", 1_000)
+
+    config = FundService(FakeRepository()).config("base-sepolia:csp")
+
+    assert config.fees.management_fee_wad == "20000000000000000"
+    assert config.fees.management_fee_bps == 200
+    assert config.fees.performance_fee_bps == 1_000
+    assert config.fees.premium_fee_bps == 1_000
+    assert config.fees.high_water_mark_share_price_assets == "1000000"
+    assert config.fees.fee_recipient == USER
+    assert config.fees.performance_fee_basis == "high_water_mark"
+    assert config.fees.premium_fee_basis == "gross_premium"
+    assert config.fees.reported_premium_basis == "net_of_premium_fee"
+
+
+def test_protocol_fee_configuration_keeps_solana_separate(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "protocol_fee_bps", 1_000)
+    monkeypatch.setattr(settings, "solana_protocol_fee_bps", 400)
+
+    assert get_protocol_fee_bps("base") == 1_000
+    assert get_protocol_fee_bps("solana") == 400
 
 
 def test_empty_fund_is_displayable_without_division_by_zero() -> None:

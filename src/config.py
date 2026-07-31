@@ -105,6 +105,7 @@ class Settings(BaseSettings):
 
     # Protocol fee
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
+    solana_protocol_fee_bps: int = 400
     treasury_address: str = "0x0744e5Abb82A0337B2F6ac65aC83D1e9861C9740"
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
@@ -234,6 +235,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_protocol_fee_bps(chain: str) -> int:
+    """Return the settlement fee for the requested chain boundary."""
+    if chain.strip().lower() == "solana":
+        return settings.solana_protocol_fee_bps
+    return settings.protocol_fee_bps
 
 
 def get_tokenized_fund_rpc_url() -> str:

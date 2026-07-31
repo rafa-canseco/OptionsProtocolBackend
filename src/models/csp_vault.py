@@ -164,10 +164,23 @@ class TrustedContract(FundModel):
     interface_version: int
 
 
+class FundFeePolicy(FundModel):
+    management_fee_wad: str
+    management_fee_bps: int = Field(ge=0, le=10_000)
+    performance_fee_bps: int = Field(ge=0, le=10_000)
+    premium_fee_bps: int = Field(ge=0, le=10_000)
+    high_water_mark_share_price_assets: str
+    fee_recipient: str | None = None
+    performance_fee_basis: Literal["high_water_mark"] = "high_water_mark"
+    premium_fee_basis: Literal["gross_premium"] = "gross_premium"
+    reported_premium_basis: Literal["net_of_premium_fee"] = "net_of_premium_fee"
+
+
 class FundConfigResponse(FundModel):
     fund_key: str
     deployment_status: str
     contracts: list[TrustedContract]
+    fees: FundFeePolicy
     capabilities: FundActions
     writes_enabled: bool
     blocked_reason_code: str | None
