@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from src.config import settings
+from src.config import get_protocol_fee_bps, settings
 from src.db.database import get_client
 from src.models.csp_vault import (
     ActionAvailability,
@@ -16,6 +16,7 @@ from src.models.csp_vault import (
     FundActions,
     FundComposition,
     FundConfigResponse,
+    FundFeePolicy,
     FundListResponse,
     FundPositionResponse,
     FundRegistryItem,
@@ -569,11 +570,7 @@ class FundService:
             "source_quality": (
                 next(iter(source_qualities))
                 if len(source_qualities) == 1
-                else (
-                    "mixed_sources"
-                    if strategy_kind == "covered_call"
-                    else None
-                )
+                else ("mixed_sources" if strategy_kind == "covered_call" else None)
             ),
             "stress": StressNav(
                 net_assets=str(stress_net),
@@ -639,9 +636,22 @@ class FundService:
             fund_key=fund_key,
             deployment_status=row["deployment_status"],
             contracts=contracts,
+            fees=self._fee_policy(state),
             capabilities=actions,
             writes_enabled=reason is None,
             blocked_reason_code=reason,
+        )
+
+    @staticmethod
+    def _fee_policy(state: dict[str, Any]) -> FundFeePolicy:
+        management_fee_wad = int(state.get("management_fee_wad", 0))
+        return FundFeePolicy(
+            management_fee_wad=str(management_fee_wad),
+            management_fee_bps=management_fee_wad * 10_000 // 10**18,
+            performance_fee_bps=int(state.get("performance_fee_bps", 0)),
+            premium_fee_bps=get_protocol_fee_bps("base"),
+            high_water_mark_share_price_assets=str(state.get("high_water_mark", 0)),
+            fee_recipient=state.get("fee_recipient"),
         )
 
     def activity(
@@ -767,9 +777,7 @@ class FundService:
     def _write_context(self, registry, state, *, positions=None) -> dict[str, Any]:
         chain_id = int(registry["chain_id"])
         if positions is None:
-            positions = self.repository.positions(
-                chain_id, registry["fund_address"]
-            )
+            positions = self.repository.positions(chain_id, registry["fund_address"])
         contracts = self.repository.contracts(chain_id, registry["fund_address"])
         head = self.repository.confirmed_head(chain_id)
         active = self._active_contracts(contracts, state.get("as_of_block"))

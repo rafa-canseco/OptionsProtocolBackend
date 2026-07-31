@@ -28,7 +28,7 @@ from solders.signature import Signature as SolSignature  # type: ignore[import-u
 from src.api.deps import require_mm_api_key
 from src.chains.explorer import tx_explorer_url
 from src.chains.solana.client import get_solana_maker_nonce
-from src.config import settings
+from src.config import get_protocol_fee_bps, settings
 from src.contracts.web3_client import get_batch_settler, get_w3
 from src.crypto.ed25519 import build_solana_quote_message, verify_solana_quote
 from src.crypto.eip712 import recover_quote_signer
@@ -679,7 +679,7 @@ async def get_market(
         spot=spot,
         iv=iv_result.value,
         iv_source=iv_result.source,
-        protocol_fee_bps=settings.protocol_fee_bps,
+        protocol_fee_bps=get_protocol_fee_bps(chain.value),
         gas_price_gwei=round(gas_price_gwei, 4),
         available_otokens=otokens,
     )

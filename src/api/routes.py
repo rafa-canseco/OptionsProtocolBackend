@@ -10,7 +10,12 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from src.config import settings, is_asset_tradable, is_asset_visible
+from src.config import (
+    get_protocol_fee_bps,
+    is_asset_tradable,
+    is_asset_visible,
+    settings,
+)
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
@@ -392,7 +397,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
         # BatchSettler treats bid_price as USDC smallest units on every chain.
         premium_usd = bid_price_raw / (10**USDC_DECIMALS)
-        fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
+        fee_mult = (10_000 - get_protocol_fee_bps(chain)) / 10_000
         net_premium = premium_usd * fee_mult
 
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
