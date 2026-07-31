@@ -503,6 +503,10 @@ def test_publish_once_full_reconcile_on_schedule():
     with (
         patch("src.bots.otoken_manager._prune_near_expiry_otokens"),
         patch("src.bots.otoken_manager.get_asset_price", return_value=(2000.0, None)),
+        patch(
+            "src.bots.otoken_manager.get_iv",
+            return_value=MagicMock(value=0.42),
+        ),
         patch("src.bots.otoken_manager.generate_otoken_specs", return_value=[spec]),
         patch(
             "src.bots.otoken_manager._load_existing_otokens_for_specs", return_value={}

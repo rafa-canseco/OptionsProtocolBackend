@@ -22,6 +22,7 @@ from src.contracts.web3_client import (
 from src.db.database import get_client
 from src.pricing.assets import Asset, get_asset_config, get_base_assets
 from src.pricing.black_scholes import OptionType
+from src.pricing.deribit import get_iv
 from src.pricing.price_sheet import OTokenSpec, generate_otoken_specs
 from src.pricing.utils import strike_to_8_decimals
 from src.pricing.chainlink import get_asset_price
@@ -530,8 +531,20 @@ async def publish_once():
             logger.exception("Failed to fetch %s price, skipping asset", asset.value)
             continue
 
+        iv = None
+        if asset == Asset.ETH:
+            try:
+                iv = (await get_iv(asset)).value
+            except Exception:
+                logger.exception(
+                    "Failed to fetch ETH IV; skipping targeted covered-call series"
+                )
         specs = generate_otoken_specs(
-            spot=spot, asset=asset, expiry_timestamps=custom_expiries
+            spot=spot,
+            asset=asset,
+            expiry_timestamps=custom_expiries,
+            iv=iv,
+            risk_free_rate=settings.risk_free_rate,
         )
 
         if mode == "lazy" and asset.value in lazy_assets:
