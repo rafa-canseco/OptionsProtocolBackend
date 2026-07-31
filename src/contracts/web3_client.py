@@ -200,7 +200,9 @@ def _sign_send_and_confirm(
             try:
                 tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
                 _local_nonce[account.address] = nonce + 1
-                tx_hash_hex = tx_hash.hex()
+                # HexBytes.hex() follows bytes.hex() in newer Web3 releases and
+                # can omit the 0x prefix required by our durable DB contract.
+                tx_hash_hex = Web3.to_hex(tx_hash)
             except Exception as e:
                 if (
                     "replacement transaction underpriced" in str(e).lower()
