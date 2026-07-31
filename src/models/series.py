@@ -95,6 +95,35 @@ class EnsureSeriesRequest(BaseModel):
         return self
 
 
+class EnsureFundSeriesRequest(BaseModel):
+    """Internal fund intent for one policy-selected virtual series."""
+
+    adapter_address: str
+    expected_otoken_address: str
+    amount_raw: str
+    quote: ExecutionQuoteSnapshot
+
+    @field_validator("adapter_address", "expected_otoken_address")
+    @classmethod
+    def validate_address(cls, value: str) -> str:
+        if not EVM_ADDRESS_RE.fullmatch(value):
+            raise ValueError("must be a 0x-prefixed EVM address")
+        return value
+
+    @field_validator("amount_raw")
+    @classmethod
+    def validate_amount(cls, value: str) -> str:
+        if parse_uint256(value, "amount_raw") == 0:
+            raise ValueError("amount_raw must be greater than zero")
+        return value
+
+    @model_validator(mode="after")
+    def validate_quote_target(self) -> "EnsureFundSeriesRequest":
+        if self.expected_otoken_address.lower() != self.quote.otoken_address.lower():
+            raise ValueError("expected_otoken_address must match quote.otoken_address")
+        return self
+
+
 class EnsureSeriesResponse(BaseModel):
     status: Literal["ready", "creating"]
     otoken_address: str
