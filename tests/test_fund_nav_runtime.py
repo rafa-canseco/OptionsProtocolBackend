@@ -589,6 +589,26 @@ def test_gateway_requires_exact_hash_after_first_strategy_transition() -> None:
     )
 
 
+def test_meta_wheel_uses_manager_nonce_and_position_hash_domains_separately() -> None:
+    committed_hash = Web3.keccak(text="managed wheel position")
+    coordinator_summary = (3, 2, 1, 500, 100, 90, 2, 600, 2)
+
+    assert Web3ReporterGateway._strategy_state_matches(
+        adapter_state=coordinator_summary,
+        observed_hash=committed_hash,
+        component_nonce=7,
+        component_hash=committed_hash,
+        compare_adapter_nonce=False,
+    )
+    assert not Web3ReporterGateway._strategy_state_matches(
+        adapter_state=coordinator_summary,
+        observed_hash=Web3.keccak(text="balance-sensitive mismatch"),
+        component_nonce=7,
+        component_hash=committed_hash,
+        compare_adapter_nonce=False,
+    )
+
+
 class _BlockValueCall:
     def __init__(self, values):
         self.values = values

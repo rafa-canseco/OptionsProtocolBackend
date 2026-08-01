@@ -359,24 +359,47 @@ def _fetch_window(
         if (event := _decode_log(w3, registry, bindings, log)) is not None
     ]
     if registry.strategy_kind == "meta_wheel":
+        active_lanes: dict[str, ContractBinding] = {}
         lane_bindings: dict[str, list[ContractBinding]] = {}
         historical = _load_events(registry, client)
-        for event in (*historical, *events):
-            if (
-                event.event_name != "WheelLaneRegistered"
-                or event.contract_role != "wheel_coordinator"
-            ):
+        for event in historical:
+            if event.contract_role != "wheel_coordinator":
                 continue
-            lane = normalize_address(event.args["lane"])
-            lane_bindings[lane] = [
-                ContractBinding(
+            if event.event_name == "WheelLaneRegistered":
+                lane = normalize_address(event.args["lane"])
+                active_lanes[lane] = ContractBinding(
                     address=lane,
                     role="wheel_child_lane",
                     interface_version=event.interface_version,
                     valid_from_block=event.block_number,
                     valid_to_block=None,
                 )
-            ]
+            elif event.event_name == "WheelLaneRemoved":
+                lane = normalize_address(event.args["lane"])
+                active_lanes.pop(lane, None)
+        # Scan every lane active at the start of or registered during this
+        # window. A lane removed mid-window can still have an earlier premium
+        # log in the same window, but it must disappear before the next one.
+        lane_bindings.update(
+            (lane, [binding]) for lane, binding in active_lanes.items()
+        )
+        for event in events:
+            if event.contract_role != "wheel_coordinator":
+                continue
+            if event.event_name == "WheelLaneRegistered":
+                lane = normalize_address(event.args["lane"])
+                binding = ContractBinding(
+                    address=lane,
+                    role="wheel_child_lane",
+                    interface_version=event.interface_version,
+                    valid_from_block=event.block_number,
+                    valid_to_block=None,
+                )
+                active_lanes[lane] = binding
+                lane_bindings[lane] = [binding]
+            elif event.event_name == "WheelLaneRemoved":
+                lane = normalize_address(event.args["lane"])
+                active_lanes.pop(lane, None)
         if lane_bindings:
             child_logs = w3.eth.get_logs(
                 {

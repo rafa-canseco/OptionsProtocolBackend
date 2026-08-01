@@ -31,6 +31,7 @@ from src.models.csp_vault import (
     TokenMetadata,
     TrustedContract,
     WheelTrancheSummary,
+    WheelRedemptionSummary,
 )
 
 COMMON_PROXY_ROLES = {
@@ -487,18 +488,29 @@ class FundService:
             "call_settling": "handoff_covered_call",
             "closed": "none",
         }
+
+        def tranche_next_action(row: dict[str, Any]) -> str:
+            if row.get("settlement_kind") == "pending_delivery":
+                return "wait_for_physical_delivery"
+            return next_actions.get(row["state"], "wait")
+
         tranche_views = [
             WheelTrancheSummary(
                 tranche_id=str(row["tranche_id"]),
                 child_vault=row.get("child_vault"),
                 state=row["state"],
                 principal_assets=str(row.get("principal_assets", 0)),
+                pending_assets=str(row.get("pending_assets", 0)),
                 child_shares=str(row.get("child_shares", 0)),
                 child_position_id=(
                     str(row["child_position_id"])
                     if row.get("child_position_id") is not None
                     else None
                 ),
+                child_execution_state_hash=row.get(
+                    "child_execution_state_hash"
+                ),
+                settlement_kind=row.get("settlement_kind"),
                 assignment_lot_ids=[
                     str(lot_id) for lot_id in row.get("assignment_lot_ids") or []
                 ],
@@ -514,7 +526,7 @@ class FundService:
                     else None
                 ),
                 transition_nonce=int(row.get("state_nonce", 0)),
-                next_action=next_actions.get(row["state"], "wait"),
+                next_action=tranche_next_action(row),
             )
             for row in tranches
         ]
@@ -533,6 +545,14 @@ class FundService:
             returned_usdc_assets="0",
             reserved_redemption_assets=str(
                 wheel_state.get("redemption_reserved_usdc", 0)
+            ),
+            redemption=WheelRedemptionSummary(
+                reserved_assets=str(
+                    wheel_state.get("redemption_reserved_usdc", 0)
+                ),
+                reserved_principal_assets=str(
+                    wheel_state.get("reserved_principal_usdc", 0)
+                ),
             ),
             active_tranche_count=int(
                 wheel_state.get(

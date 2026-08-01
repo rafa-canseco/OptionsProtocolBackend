@@ -29,6 +29,10 @@ WHEEL_EVENT_ABIS = [
         [("lane", "address", True), ("kind", "uint8", True)],
     ),
     _event(
+        "WheelLaneRemoved",
+        [("lane", "address", True), ("kind", "uint8", True)],
+    ),
+    _event(
         "WheelLaneStatusSet",
         [("lane", "address", True), ("active", "bool", False)],
     ),
@@ -48,6 +52,7 @@ WHEEL_EVENT_ABIS = [
             ("parentTrancheId", "uint256", True),
             ("siblingTrancheId", "uint256", True),
             ("usdcAmount", "uint256", False),
+            ("principalUsdc", "uint256", False),
             ("stateHash", "bytes32", False),
         ],
     ),
@@ -122,6 +127,25 @@ WHEEL_EVENT_ABIS = [
         [
             ("reservedRedemptionUsdc", "uint256", False),
             ("pendingCspUsdc", "uint256", False),
+        ],
+    ),
+    _event(
+        "WheelRedemptionUsdcReserved",
+        [
+            ("trancheId", "uint256", True),
+            ("amount", "uint256", False),
+            ("principalReserved", "uint256", False),
+            ("remainingTrancheUsdc", "uint256", False),
+            ("remainingTranchePrincipal", "uint256", False),
+        ],
+    ),
+    _event(
+        "WheelRedemptionUsdcReleased",
+        [
+            ("trancheId", "uint256", True),
+            ("amount", "uint256", False),
+            ("principalRestored", "uint256", False),
+            ("stateHash", "bytes32", False),
         ],
     ),
     _event(

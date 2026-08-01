@@ -120,14 +120,22 @@ class WheelTrancheSummary(FundModel):
     child_vault: str | None = None
     state: str
     principal_assets: str
+    pending_assets: str = "0"
     child_shares: str
     child_position_id: str | None = None
+    child_execution_state_hash: str | None = None
+    settlement_kind: str | None = None
     assignment_lot_ids: list[str] = Field(default_factory=list)
     literal_assignment_floor_usd_8: str = "0"
     protected_assignment_floor_usd_8: str = "0"
     call_strike_usd_8: str | None = None
     transition_nonce: int
     next_action: str
+
+
+class WheelRedemptionSummary(FundModel):
+    reserved_assets: str
+    reserved_principal_assets: str
 
 
 class MetaWheelSnapshot(FundModel):
@@ -138,6 +146,7 @@ class MetaWheelSnapshot(FundModel):
     covered_call_value_assets: str
     returned_usdc_assets: str
     reserved_redemption_assets: str
+    redemption: WheelRedemptionSummary
     active_tranche_count: int
     protected_assignment_floor_usd_8: str
     current_phase: str

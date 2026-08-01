@@ -89,6 +89,7 @@ def events_through_assignment() -> list[FundEvent]:
                 "parentTrancheId": 1,
                 "siblingTrancheId": 2,
                 "usdcAmount": 90,
+                "principalUsdc": 0,
                 "stateHash": "0xsibling",
             },
         ),
@@ -221,6 +222,7 @@ def test_wheel_projection_tracks_exact_contract_state_machine() -> None:
     assert tranche["state"] == "pending_csp"
     assert tranche["assignment_lot_ids"] == [9]
     assert tranche["required_call_floor_8"] == str(2_010 * 10**8)
+    assert tranche["child_execution_state_hash"] is None
     assert lot["origin_csp_child_vault"] == CSP
     assert lot["status"] == "called_away"
     assert state["cumulative_gross_premium"] == "300"
@@ -261,3 +263,163 @@ def test_wheel_projection_is_never_activated_for_standalone_funds() -> None:
     )
     assert projection.wheel is None
     assert "wheel_state" not in projection.export()
+
+
+def test_split_and_redemption_events_preserve_principal_basis() -> None:
+    projection = MetaWheelProjection(84532, FUND)
+    projection.apply(
+        event(
+            0,
+            "WheelTrancheQueued",
+            {
+                "trancheId": 1,
+                "allocationId": "0xallocation",
+                "usdcAmount": 1_000,
+                "pendingCspUsdc": 1_000,
+                "stateHash": "0xqueue",
+            },
+        )
+    )
+    projection.apply(
+        event(
+            1,
+            "WheelSiblingTrancheQueued",
+            {
+                "parentTrancheId": 1,
+                "siblingTrancheId": 2,
+                "usdcAmount": 400,
+                "principalUsdc": 400,
+                "stateHash": "0xsplit",
+            },
+        )
+    )
+    projection.apply(
+        event(
+            2,
+            "WheelRedemptionUsdcReserved",
+            {
+                "trancheId": 1,
+                "amount": 200,
+                "principalReserved": 200,
+                "remainingTrancheUsdc": 400,
+                "remainingTranchePrincipal": 400,
+            },
+        )
+    )
+    projection.apply(
+        event(
+            3,
+            "WheelRedemptionReserveChanged",
+            {"reservedRedemptionUsdc": 200, "pendingCspUsdc": 800},
+        )
+    )
+    projection.apply(
+        event(
+            4,
+            "WheelRedemptionUsdcReleased",
+            {
+                "trancheId": 3,
+                "amount": 50,
+                "principalRestored": 50,
+                "stateHash": "0xrelease",
+            },
+        )
+    )
+    projection.apply(
+        event(
+            5,
+            "WheelRedemptionReserveChanged",
+            {"reservedRedemptionUsdc": 150, "pendingCspUsdc": 850},
+        )
+    )
+
+    exported = projection.export()
+    state = exported["wheel_state"][0]
+    parent, sibling, released = exported["wheel_tranches"]
+    assert (parent["pending_assets"], parent["principal_assets"]) == ("400", "400")
+    assert (sibling["pending_assets"], sibling["principal_assets"]) == ("400", "400")
+    assert (released["pending_assets"], released["principal_assets"]) == ("50", "50")
+    assert state["redemption_reserved_usdc"] == "150"
+    assert state["reserved_principal_usdc"] == "150"
+
+
+def test_remove_lane_replays_swap_and_pop_registration_order() -> None:
+    projection = MetaWheelProjection(84532, FUND)
+    projection.apply(event(0, "WheelLaneRegistered", {"lane": CSP, "kind": 1}))
+    projection.apply(event(1, "WheelLaneRegistered", {"lane": CALL, "kind": 2}))
+    projection.apply(event(2, "WheelLaneRemoved", {"lane": CSP, "kind": 1}))
+
+    lanes = projection.export()["wheel_lanes"]
+    assert len(lanes) == 1
+    assert lanes[0]["child_vault"] == CALL
+    assert lanes[0]["registration_index"] == "0"
+
+
+def test_child_premium_can_precede_parent_open_event_in_same_transaction() -> None:
+    projection = MetaWheelProjection(84532, FUND)
+    for item in (
+        event(0, "WheelLaneRegistered", {"lane": CSP, "kind": 1}),
+        event(
+            1,
+            "WheelTrancheQueued",
+            {
+                "trancheId": 1,
+                "allocationId": "0xallocation",
+                "usdcAmount": 1_000,
+                "pendingCspUsdc": 1_000,
+                "stateHash": "0xqueue",
+            },
+        ),
+        event(
+            2,
+            "WheelPremiumAccrued",
+            {
+                "trancheId": 1,
+                "lane": CSP,
+                "childPositionId": 7,
+                "grossPremiumAssets": 100,
+                "protocolFeeAssets": 10,
+                "netPremiumAssets": 90,
+            },
+        ),
+        event(
+            3,
+            "WheelTrancheOpened",
+            {
+                "trancheId": 1,
+                "lane": CSP,
+                "leg": 2,
+                "childPositionId": 7,
+                "childShares": 1_000,
+                "expiry": 500,
+                "childPositionHash": "0xexecution",
+            },
+        ),
+    ):
+        projection.apply(item)
+
+    assert projection.state["cumulative_net_premium"] == 90
+    assert projection.tranches[1]["child_execution_state_hash"] == "0xexecution"
+
+
+def test_pending_physical_delivery_is_not_treated_as_final_settlement() -> None:
+    projection = MetaWheelProjection(84532, FUND)
+    for item in events_through_assignment()[:5]:
+        projection.apply(item)
+    projection.apply(
+        event(
+            20,
+            "WheelTrancheSettlementAdvanced",
+            {
+                "trancheId": 1,
+                "lane": CSP,
+                "leg": 3,
+                "settlementKind": 0,
+                "childPositionHash": "0xawaiting-delivery",
+            },
+        )
+    )
+
+    assert projection.tranches[1]["state"] == "csp_settling"
+    assert projection.tranches[1]["settlement_kind"] == "pending_delivery"
+    assert projection.next_action() == "wait_for_physical_delivery"

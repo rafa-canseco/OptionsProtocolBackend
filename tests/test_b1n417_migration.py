@@ -21,4 +21,8 @@ def test_meta_wheel_migration_is_isolated_and_reorg_safe() -> None:
     assert "v2_fund_strategy_positions" not in sql
     assert "wheel_coordinator" in sql
     assert "meta_wheel_valuator" in sql
+    assert "reserved_principal_usdc NUMERIC(78, 0)" in sql
+    assert "child_execution_state_hash TEXT" in sql
+    assert "'pending_delivery', 'csp_otm', 'csp_assigned'" in sql
+    assert "child_position_hash TEXT" not in sql
     assert "lane_id" not in sql

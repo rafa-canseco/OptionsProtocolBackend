@@ -56,6 +56,7 @@ class WheelRepository:
         self.meta_state = {
             "pending_csp_usdc": "500000000",
             "redemption_reserved_usdc": "100000000",
+            "reserved_principal_usdc": "95000000",
             "policy_version": 1,
             "policy_hash": "0xpolicy",
             "cumulative_gross_premium": "10000000",
@@ -96,6 +97,8 @@ class WheelRepository:
                 "required_call_floor_8": "0",
                 "call_strike_8": None,
                 "state_nonce": 2,
+                "pending_assets": "0",
+                "child_execution_state_hash": "0xcsp-execution",
             },
             {
                 "tranche_id": "2",
@@ -109,6 +112,8 @@ class WheelRepository:
                 "required_call_floor_8": "201000000000",
                 "call_strike_8": "205000000000",
                 "state_nonce": 6,
+                "pending_assets": "0",
+                "child_execution_state_hash": "0xcall-execution",
             },
         ]
         proxies = COMMON_PROXY_ROLES | {"wheel_coordinator"}
@@ -183,8 +188,11 @@ def test_meta_wheel_is_third_product_with_compact_usdc_summary() -> None:
     assert summary.wheel.cumulative_gross_premium_assets == "10000000"
     assert summary.wheel.cumulative_protocol_fee_assets == "1000000"
     assert summary.wheel.cumulative_net_premium_assets == "9000000"
+    assert summary.wheel.redemption.reserved_assets == "100000000"
+    assert summary.wheel.redemption.reserved_principal_assets == "95000000"
     assert len(summary.wheel.tranches) == 2
     assert summary.wheel.tranches[0].child_vault.endswith("10")
+    assert summary.wheel.tranches[0].child_execution_state_hash == "0xcsp-execution"
     assert summary.wheel.tranches[1].next_action == "wait_for_call_expiry"
     assert summary.strategy.strategy_kind == "meta_wheel"
     assert summary.strategy.total_premium_collected_assets == "9000000"

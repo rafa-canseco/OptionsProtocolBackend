@@ -168,8 +168,9 @@ def test_meta_wheel_snapshot_decodes_coordinator_summary_without_adapter_state()
                 "uint256",
                 "uint256",
                 "uint256",
+                "uint256",
             ],
-            [8, 3, 1, 500, 100, 2, 600, 2],
+            [8, 3, 1, 500, 100, 90, 2, 600, 2],
         ),
     )
 

@@ -322,11 +322,12 @@ def _decode_results(
                 "uint256",
                 "uint256",
                 "uint256",
+                "uint256",
             ],
             results[4][1],
         )
-        output["adapter_usdc"] = adapter_state[6]
-        output["adapter_weth"] = adapter_state[7]
+        output["adapter_usdc"] = adapter_state[7]
+        output["adapter_weth"] = adapter_state[8]
     elif strategy_kind == "covered_call":
         adapter_state = decode(
             [

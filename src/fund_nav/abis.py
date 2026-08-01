@@ -115,7 +115,23 @@ VAULT_ABI = [
     _function("idleStateHash", [], [_field("", "bytes32")]),
 ]
 FLOW_ABI = [_function("hasActiveProcessing", [], [_field("", "bool")])]
-STRATEGY_ABI = [_function("positionsHash", [], [_field("", "bytes32")])]
+STRATEGY_ABI = [
+    _function("positionsHash", [], [_field("", "bytes32")]),
+    *[
+        _function(
+            name,
+            [_field("adapter", "address"), _field("data", "bytes")],
+            [],
+            "nonpayable",
+        )
+        for name in (
+            "executeAdapterAllocationOperation",
+            "executeAdapterProcessingOperation",
+            "executeAdapterGuardianOperation",
+            "executeAdapterConfigurationOperation",
+        )
+    ],
+]
 ERC20_ABI = [
     _function("balanceOf", [_field("account", "address")], [_field("", "uint256")]),
     _function("decimals", [], [_field("", "uint8")]),
@@ -219,6 +235,7 @@ WHEEL_SUMMARY_FIELDS = [
     _field("assignmentLotCount", "uint256"),
     _field("pendingCspUsdc", "uint256"),
     _field("reservedRedemptionUsdc", "uint256"),
+    _field("reservedPrincipalUsdc", "uint256"),
     _field("transitionWeth", "uint256"),
     _field("accountedUsdc", "uint256"),
     _field("accountedWeth", "uint256"),
@@ -228,6 +245,11 @@ WHEEL_COORDINATOR_ABI = [
     _function("accountingAsset", [], [_field("", "address")]),
     _function("weth", [], [_field("", "address")]),
     _function("summary", [], [_field("state", "tuple", WHEEL_SUMMARY_FIELDS)]),
+    _function("positionStateHash", [], [_field("", "bytes32")]),
+]
+
+WHEEL_CHILD_LANE_ABI = [
+    _function("executionStateHash", [], [_field("", "bytes32")]),
     _function("positionStateHash", [], [_field("", "bytes32")]),
 ]
 

@@ -697,6 +697,7 @@ class Web3ReporterGateway:
             observed_hash=observed_hash,
             component_nonce=nonce,
             component_hash=state_hash,
+            compare_adapter_nonce=self.strategy_kind != "meta_wheel",
         ):
             raise RuntimeError("WRONG_POSITION_STATE_HASH")
         valuator = self.w3.eth.contract(
@@ -774,22 +775,26 @@ class Web3ReporterGateway:
         observed_hash,
         component_nonce,
         component_hash,
+        compare_adapter_nonce=True,
     ) -> bool:
-        if int(adapter_state[0]) != int(component_nonce):
+        if compare_adapter_nonce and int(adapter_state[0]) != int(component_nonce):
             return False
         if bytes(observed_hash) == bytes(component_hash):
             return True
 
-        # A freshly onboarded strategy has not emitted a position transition yet,
+        # StrategyManager owns the parent component nonce. The Meta Wheel also
+        # has an internal execution transition nonce, and classified operations
+        # such as pause/configuration need not advance it. Never compare those
+        # two nonce domains; positionStateHash remains the NAV commitment.
+        #
+        # A freshly onboarded strategy has not emitted a position transition,
         # so FundAccounting intentionally keeps the component at its canonical
-        # nonce/hash zero state. The adapter's live positionStateHash is still a
-        # non-zero keccak over that empty state. Accept only this fully empty
-        # bootstrap case; any inventory or position state must first be synced by
-        # StrategyManager and match byte-for-byte.
+        # zero state. Accept only the fully empty bootstrap case.
+        empty_values = adapter_state[2:] if compare_adapter_nonce else adapter_state[1:]
         return (
             int(component_nonce) == 0
             and bytes(component_hash) == bytes(32)
-            and all(int(value) == 0 for value in adapter_state[2:])
+            and all(int(value) == 0 for value in empty_values)
         )
 
     def _valuation_observations(self, valuator, adapter: str, block: int):

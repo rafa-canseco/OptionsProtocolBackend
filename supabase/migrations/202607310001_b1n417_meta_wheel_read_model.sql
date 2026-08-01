@@ -60,6 +60,7 @@ CREATE TABLE v2_meta_wheel_state (
     fund_address TEXT NOT NULL CHECK (fund_address = lower(fund_address)),
     pending_csp_usdc NUMERIC(78, 0) NOT NULL DEFAULT 0,
     redemption_reserved_usdc NUMERIC(78, 0) NOT NULL DEFAULT 0,
+    reserved_principal_usdc NUMERIC(78, 0) NOT NULL DEFAULT 0,
     transition_weth NUMERIC(78, 0) NOT NULL DEFAULT 0,
     policy_version BIGINT NOT NULL DEFAULT 0,
     policy_hash TEXT,
@@ -117,7 +118,11 @@ CREATE TABLE v2_meta_wheel_tranches (
     state_hash TEXT,
     expiry BIGINT,
     child_position_id NUMERIC(78, 0),
-    child_position_hash TEXT,
+    child_execution_state_hash TEXT,
+    settlement_kind TEXT CHECK (settlement_kind IN (
+        'pending_delivery', 'csp_otm', 'csp_assigned', 'call_otm',
+        'call_away', 'weth_fallback'
+    )),
     child_shares NUMERIC(78, 0) NOT NULL DEFAULT 0,
     assignment_lot_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
     literal_call_floor_8 NUMERIC(78, 0) NOT NULL DEFAULT 0,
@@ -307,7 +312,7 @@ BEGIN
 
     INSERT INTO v2_meta_wheel_state (
         chain_id, fund_address, pending_csp_usdc, redemption_reserved_usdc,
-        transition_weth, policy_version, policy_hash,
+        reserved_principal_usdc, transition_weth, policy_version, policy_hash,
         execution_cost_buffer_8, paused,
         cumulative_gross_premium, cumulative_protocol_fee,
         cumulative_net_premium, upgrade_count,
@@ -319,7 +324,8 @@ BEGIN
         COALESCE(p_projection->'wheel_state', '[]'::jsonb)
     ) AS x(
         chain_id BIGINT, fund_address TEXT, pending_csp_usdc NUMERIC,
-        redemption_reserved_usdc NUMERIC, transition_weth NUMERIC,
+        redemption_reserved_usdc NUMERIC, reserved_principal_usdc NUMERIC,
+        transition_weth NUMERIC,
         policy_version BIGINT,
         policy_hash TEXT, execution_cost_buffer_8 NUMERIC,
         paused BOOLEAN,
@@ -348,7 +354,8 @@ BEGIN
         child_vault TEXT, state TEXT,
         principal_assets NUMERIC, pending_assets NUMERIC,
         state_nonce BIGINT, state_hash TEXT, expiry BIGINT,
-        child_position_id NUMERIC, child_position_hash TEXT,
+        child_position_id NUMERIC, child_execution_state_hash TEXT,
+        settlement_kind TEXT,
         child_shares NUMERIC, assignment_lot_ids JSONB,
         literal_call_floor_8 NUMERIC,
         required_call_floor_8 NUMERIC, call_strike_8 NUMERIC,
