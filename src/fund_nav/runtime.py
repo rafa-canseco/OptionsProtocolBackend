@@ -877,7 +877,7 @@ class Web3ReporterGateway:
             seen_lanes.add(lane_address)
             if not active:
                 continue
-            strategy_kind = {0: "csp", 1: "covered_call"}.get(int(raw_kind))
+            strategy_kind = {1: "csp", 2: "covered_call"}.get(int(raw_kind))
             if strategy_kind is None:
                 raise RuntimeError("UNSUPPORTED_WHEEL_LANE_KIND")
             lane = self.w3.eth.contract(

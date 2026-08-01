@@ -116,7 +116,11 @@ class FundRepository(Protocol):
         self, chain_id: int, fund: str, snapshot_block: int
     ) -> dict[str, Any]: ...
     def wheel_nav_chain_binding(
-        self, chain_id: int, snapshot_block: int, transaction_hash: str
+        self,
+        chain_id: int,
+        snapshot_block: int,
+        transaction_hash: str,
+        confirmed_head_block: int,
     ) -> dict[str, Any]: ...
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
     def confirmed_head(self, chain_id: int) -> dict[str, Any] | None: ...
@@ -292,7 +296,11 @@ class SupabaseFundRepository:
         }
 
     def wheel_nav_chain_binding(
-        self, chain_id: int, snapshot_block: int, transaction_hash: str
+        self,
+        chain_id: int,
+        snapshot_block: int,
+        transaction_hash: str,
+        confirmed_head_block: int,
     ) -> dict[str, Any]:
         rpc_url = get_tokenized_fund_rpc_url()
         if not rpc_url:
@@ -303,6 +311,7 @@ class SupabaseFundRepository:
             w3 = Web3(Web3.HTTPProvider(rpc_url))
             observed_chain_id = int(w3.eth.chain_id)
             block = w3.eth.get_block(snapshot_block)
+            head = w3.eth.get_block(confirmed_head_block)
             receipt = w3.eth.get_transaction_receipt(transaction_hash)
             receipt_block = w3.eth.get_block(int(receipt["blockNumber"]))
         except Exception as exc:
@@ -313,6 +322,8 @@ class SupabaseFundRepository:
             "chain_id": observed_chain_id,
             "snapshot_block": int(block["number"]),
             "snapshot_block_hash": Web3.to_hex(block["hash"]).lower(),
+            "confirmed_head_block": int(head["number"]),
+            "confirmed_head_block_hash": Web3.to_hex(head["hash"]).lower(),
             "transaction_hash": Web3.to_hex(receipt["transactionHash"]).lower(),
             "receipt_status": int(receipt["status"]),
             "receipt_block": int(receipt["blockNumber"]),
@@ -608,17 +619,17 @@ class FundService:
             head.get("block_number") if head else None,
             "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL",
         )
+        head_hash = self._hex32(
+            head.get("block_hash") if head else None,
+            "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL",
+        )
         if (
             not head
             or head_block < snapshot_block
             or head_age > settings.confirmed_head_freshness_seconds
         ):
             raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
-        if (
-            head_block == snapshot_block
-            and self._hex32(head.get("block_hash"), "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
-            != snapshot_hash
-        ):
+        if head_block == snapshot_block and head_hash != snapshot_hash:
             raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
 
         if (
@@ -639,7 +650,11 @@ class FundService:
             run["transaction_hash"], "WHEEL_NAV_REPORT_BINDING_INVALID"
         )
         chain_binding = self.repository.wheel_nav_chain_binding(
-            chain_id, snapshot_block, transaction_hash
+            chain_id, snapshot_block, transaction_hash, head_block
+        )
+        receipt_block = self._uint(
+            chain_binding.get("receipt_block"),
+            "WHEEL_NAV_CHAIN_BINDING_INVALID",
         )
         if (
             self._uint(
@@ -657,6 +672,16 @@ class FundService:
                 "WHEEL_NAV_CHAIN_BINDING_INVALID",
             )
             != snapshot_hash
+            or self._uint(
+                chain_binding.get("confirmed_head_block"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != head_block
+            or self._hex32(
+                chain_binding.get("confirmed_head_block_hash"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != head_hash
             or self._hex32(
                 chain_binding.get("transaction_hash"),
                 "WHEEL_NAV_CHAIN_BINDING_INVALID",
@@ -667,11 +692,7 @@ class FundService:
                 "WHEEL_NAV_CHAIN_BINDING_INVALID",
             )
             != 1
-            or self._uint(
-                chain_binding.get("receipt_block"),
-                "WHEEL_NAV_CHAIN_BINDING_INVALID",
-            )
-            < snapshot_block
+            or not snapshot_block <= receipt_block <= head_block
             or self._hex32(
                 chain_binding.get("receipt_block_hash"),
                 "WHEEL_NAV_CHAIN_BINDING_INVALID",

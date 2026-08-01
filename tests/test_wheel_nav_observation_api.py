@@ -145,14 +145,16 @@ class ObservationRepository:
                 }
             ],
             "confirmed_head": {
-                "block_number": SNAPSHOT_BLOCK,
-                "block_hash": SNAPSHOT_HASH,
+                "block_number": 105,
+                "block_hash": "0x" + "77" * 32,
                 "observed_at": "2099-08-01T00:00:00Z",
             },
             "chain_binding": {
                 "chain_id": CHAIN_ID,
                 "snapshot_block": SNAPSHOT_BLOCK,
                 "snapshot_block_hash": SNAPSHOT_HASH,
+                "confirmed_head_block": 105,
+                "confirmed_head_block_hash": "0x" + "77" * 32,
                 "transaction_hash": TX_HASH,
                 "receipt_status": 1,
                 "receipt_block": 102,
@@ -175,13 +177,18 @@ class ObservationRepository:
         return deepcopy(self.rows)
 
     def wheel_nav_chain_binding(
-        self, chain_id: int, snapshot_block: int, transaction_hash: str
+        self,
+        chain_id: int,
+        snapshot_block: int,
+        transaction_hash: str,
+        confirmed_head_block: int,
     ) -> dict:
         assert (chain_id, snapshot_block, transaction_hash) == (
             CHAIN_ID,
             SNAPSHOT_BLOCK,
             TX_HASH,
         )
+        assert confirmed_head_block == self.rows["confirmed_head"]["block_number"]
         return deepcopy(self.rows["chain_binding"])
 
 
@@ -274,7 +281,7 @@ def test_wheel_nav_observation_requires_mm_authentication() -> None:
         ),
         (
             lambda rows: rows["confirmed_head"].update(block_hash="0x" + "99" * 32),
-            "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL",
+            "WHEEL_NAV_CHAIN_BINDING_INVALID",
         ),
         (
             lambda rows: rows["run"]["reports"].append(
@@ -287,6 +294,10 @@ def test_wheel_nav_observation_requires_mm_authentication() -> None:
                 rows["confirmed_head"].update(block_number=110),
                 rows["chain_binding"].update(snapshot_block_hash="0x" + "99" * 32),
             ),
+            "WHEEL_NAV_CHAIN_BINDING_INVALID",
+        ),
+        (
+            lambda rows: rows["chain_binding"].update(receipt_block=106),
             "WHEEL_NAV_CHAIN_BINDING_INVALID",
         ),
     ],
@@ -374,3 +385,52 @@ def test_repository_rejects_ambiguous_snapshot_before_composition(monkeypatch) -
         )
 
     assert error.value.code == "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL"
+
+
+def test_repository_rpc_binds_snapshot_receipt_and_confirmed_head(monkeypatch) -> None:
+    block_hashes = {
+        SNAPSHOT_BLOCK: Web3.to_bytes(hexstr=SNAPSHOT_HASH),
+        102: Web3.to_bytes(hexstr="0x" + "66" * 32),
+        105: Web3.to_bytes(hexstr="0x" + "77" * 32),
+    }
+    requested_blocks = []
+
+    class RpcEth:
+        chain_id = CHAIN_ID
+
+        def get_block(self, block_number):
+            requested_blocks.append(block_number)
+            return {
+                "number": block_number,
+                "hash": block_hashes[block_number],
+            }
+
+        def get_transaction_receipt(self, transaction_hash):
+            assert transaction_hash == TX_HASH
+            return {
+                "transactionHash": Web3.to_bytes(hexstr=TX_HASH),
+                "status": 1,
+                "blockNumber": 102,
+                "blockHash": block_hashes[102],
+            }
+
+    class RpcWeb3:
+        HTTPProvider = staticmethod(lambda url: url)
+        to_hex = staticmethod(Web3.to_hex)
+
+        def __init__(self, _provider):
+            self.eth = RpcEth()
+
+    monkeypatch.setattr(fund_service, "get_tokenized_fund_rpc_url", lambda: "rpc")
+    monkeypatch.setattr(fund_service, "Web3", RpcWeb3)
+
+    binding = SupabaseFundRepository().wheel_nav_chain_binding(
+        CHAIN_ID,
+        SNAPSHOT_BLOCK,
+        TX_HASH,
+        105,
+    )
+
+    assert requested_blocks == [SNAPSHOT_BLOCK, 105, 102]
+    assert binding["confirmed_head_block"] == 105
+    assert binding["confirmed_head_block_hash"] == "0x" + "77" * 32

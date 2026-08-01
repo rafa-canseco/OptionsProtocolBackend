@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from web3 import Web3
 
-from src.fund_nav.abis import ADAPTER_ABI
+from src.fund_nav.abis import ADAPTER_ABI, COVERED_CALL_ADAPTER_ABI
 from src.fund_nav.runtime import (
     TrustedFund,
     ValuationContext,
@@ -26,10 +26,12 @@ META_VALUATOR = "0xf000000000000000000000000000000000000030"
 CSP_VALUATOR = "0xf000000000000000000000000000000000000031"
 CALL_VALUATOR = "0xf000000000000000000000000000000000000032"
 CHILD_ADAPTER = "0xf000000000000000000000000000000000000040"
+CALL_CHILD_ADAPTER = "0xf000000000000000000000000000000000000041"
 USDC = "0xf000000000000000000000000000000000000050"
 WETH = "0xf000000000000000000000000000000000000051"
 SPOT_FEED = "0xf000000000000000000000000000000000000052"
 LANE_HASH = "0x" + "77" * 32
+CALL_LANE_HASH = "0x" + "79" * 32
 CHILD_DATA_HASH = "0x" + "88" * 32
 
 
@@ -57,8 +59,11 @@ class _Functions:
 
 
 class _Eth:
-    def __init__(self, *, duplicate_lane: bool = False):
+    def __init__(
+        self, *, duplicate_lane: bool = False, include_call_lane: bool = False
+    ):
         self.duplicate_lane = duplicate_lane
+        self.include_call_lane = include_call_lane
 
     def get_block(self, block):
         assert block == SNAPSHOT_BLOCK
@@ -68,12 +73,18 @@ class _Eth:
         address = address.lower()
         function_names = {item.get("name") for item in abi}
         if address == COORDINATOR:
-            lane_count = 2 if self.duplicate_lane else 1
+            lane_count = 2 if self.duplicate_lane or self.include_call_lane else 1
+
+            def registered_lane(index):
+                if index == 1 and self.include_call_lane:
+                    return CALL_LANE, 2, True
+                return CSP_LANE, 1, True
+
             return SimpleNamespace(
                 functions=_Functions(
                     {
                         "registeredLaneCount": lane_count,
-                        "registeredLaneAt": lambda _index: (CSP_LANE, 0, True),
+                        "registeredLaneAt": registered_lane,
                     }
                 )
             )
@@ -99,6 +110,21 @@ class _Eth:
                             100_000,
                             500_000,
                             10_000,
+                            Web3.to_bytes(hexstr=CHILD_DATA_HASH),
+                        ),
+                        "maxObservationWindow": 120,
+                    }
+                )
+            )
+        if address == CALL_VALUATOR:
+            return SimpleNamespace(
+                functions=_Functions(
+                    {
+                        "valuePosition": (
+                            10**18,
+                            10**17,
+                            5 * 10**17,
+                            10**16,
                             Web3.to_bytes(hexstr=CHILD_DATA_HASH),
                         ),
                         "maxObservationWindow": 120,
@@ -133,6 +159,21 @@ class _Eth:
                     }
                 )
             )
+        if address == CALL_LANE and "accountingState" in function_names:
+            return SimpleNamespace(
+                functions=_Functions({"accountingState": (50, 0, 100, 100)})
+            )
+        if address == CALL_LANE:
+            return SimpleNamespace(
+                functions=_Functions(
+                    {
+                        "childShares": 200,
+                        "adapter": CALL_CHILD_ADAPTER,
+                        "activePositionId": 2,
+                        "positionStateHash": Web3.to_bytes(hexstr=CALL_LANE_HASH),
+                    }
+                )
+            )
         raise AssertionError(f"unexpected contract {address}")
 
 
@@ -151,10 +192,15 @@ class _ProducerRepository:
         self.snapshot = row
 
 
-def _gateway(*, duplicate_lane: bool = False):
+def _gateway(*, duplicate_lane: bool = False, include_call_lane: bool = False):
     repository = _ProducerRepository()
     gateway = object.__new__(Web3ReporterGateway)
-    gateway.w3 = SimpleNamespace(eth=_Eth(duplicate_lane=duplicate_lane))
+    gateway.w3 = SimpleNamespace(
+        eth=_Eth(
+            duplicate_lane=duplicate_lane,
+            include_call_lane=include_call_lane,
+        )
+    )
     gateway.fund = TrustedFund(
         registry={
             "chain_id": CHAIN_ID,
@@ -174,6 +220,9 @@ def _gateway(*, duplicate_lane: bool = False):
     }
     gateway.wheel_valuation_contexts = {
         "csp": ValuationContext("csp", ADAPTER_ABI, 11, (), None),
+        "covered_call": ValuationContext(
+            "covered_call", COVERED_CALL_ADAPTER_ABI, 13, (), None
+        ),
     }
     gateway._observation_adapter_abis = {}
     gateway.strategy_kind = "meta_wheel"
@@ -239,6 +288,20 @@ def test_producer_rejects_duplicate_custody_before_persistence() -> None:
         )
 
     assert producer.valuations == {}
+
+
+def test_producer_maps_both_canonical_lane_kind_enum_values() -> None:
+    gateway, producer = _gateway(include_call_lane=True)
+
+    reports = gateway._wheel_lane_valuations(
+        SNAPSHOT_BLOCK, Web3.to_bytes(hexstr=SNAPSHOT_HASH)
+    )
+
+    assert [(report.child_vault, report.strategy_kind) for report in reports] == [
+        (CSP_LANE, "csp"),
+        (CALL_LANE, "covered_call"),
+    ]
+    assert producer.valuations[CALL_LANE]["position_state_hash"] == CALL_LANE_HASH
 
 
 def test_producer_propagates_missing_child_observation_quorum() -> None:
