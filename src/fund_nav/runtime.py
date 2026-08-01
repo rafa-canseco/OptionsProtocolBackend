@@ -39,6 +39,7 @@ from src.fund_nav.abis import (
     STRATEGY_ABI,
     VALUATOR_ABI,
     VAULT_ABI,
+    WHEEL_COORDINATOR_ABI,
 )
 from src.fund_nav.fair_value import (
     CALL_POLICY_IV_BPS,
@@ -69,6 +70,7 @@ from src.fund_nav.reporter import (
     SignedTransaction,
     StoredRun,
 )
+from src.meta_wheel.nav import ChildNavReport, encode_lane_valuations
 from src.vaults.csp_service import (
     COMMON_PROXY_ROLES,
     PROXY_ROLES,
@@ -157,6 +159,42 @@ class SupabaseNavRepository:
             .execute()
         )
         return result.data or []
+
+    def wheel_lane_valuations(
+        self, chain_id: int, fund: str, snapshot_block: int
+    ) -> list[dict[str, Any]]:
+        lanes = (
+            self._fund_table("v2_meta_wheel_lanes", chain_id, fund)
+            .eq("active", True)
+            .order("registration_index")
+            .execute()
+            .data
+            or []
+        )
+        tranches = (
+            self._fund_table("v2_meta_wheel_tranches", chain_id, fund)
+            .execute()
+            .data
+            or []
+        )
+        active_children = {
+            row["child_vault"]
+            for row in tranches
+            if row.get("child_vault") and int(row.get("child_shares", 0)) > 0
+        }
+        result = (
+            self._fund_table("v2_meta_wheel_lane_valuations", chain_id, fund)
+            .eq("snapshot_block", snapshot_block)
+            .execute()
+        )
+        by_child = {row["child_vault"]: row for row in result.data or []}
+        if set(by_child) != active_children:
+            raise RuntimeError("INCOHERENT_CHILD_NAV")
+        return [
+            by_child[row["child_vault"]]
+            for row in lanes
+            if row["child_vault"] in active_children
+        ]
 
     def insert_verified(self, row: dict[str, Any]) -> None:
         self.client.table("v2_csp_option_observations").insert(row).execute()
@@ -373,9 +411,10 @@ class TrustedRegistryLoader:
             return "MISSING_TRUSTED_DEPLOYMENT"
         if any(int(row["interface_version"]) != 1 for row in contracts.values()):
             return "UNSUPPORTED_INTERFACE"
-        adapter_role = (
-            "covered_call_adapter" if strategy_kind == "covered_call" else "csp_adapter"
-        )
+        adapter_role = {
+            "covered_call": "covered_call_adapter",
+            "meta_wheel": "wheel_coordinator",
+        }.get(strategy_kind, "csp_adapter")
         required_proxies = COMMON_PROXY_ROLES | {adapter_role}
         if any(
             not contracts[role].get("implementation_address")
@@ -424,21 +463,18 @@ class Web3ReporterGateway:
         self.sepolia_observer_private_keys = sepolia_observer_private_keys
         self.fair_value_policy = fair_value_policy
         self.strategy_kind = fund.registry.get("strategy_kind", "csp")
-        self.adapter_role = (
-            "covered_call_adapter"
-            if self.strategy_kind == "covered_call"
-            else "csp_adapter"
-        )
-        self.valuator_role = (
-            "covered_call_valuator"
-            if self.strategy_kind == "covered_call"
-            else "csp_valuator"
-        )
-        self.adapter_abi = (
-            COVERED_CALL_ADAPTER_ABI
-            if self.strategy_kind == "covered_call"
-            else ADAPTER_ABI
-        )
+        self.adapter_role = {
+            "covered_call": "covered_call_adapter",
+            "meta_wheel": "wheel_coordinator",
+        }.get(self.strategy_kind, "csp_adapter")
+        self.valuator_role = {
+            "covered_call": "covered_call_valuator",
+            "meta_wheel": "meta_wheel_valuator",
+        }.get(self.strategy_kind, "csp_valuator")
+        self.adapter_abi = {
+            "covered_call": COVERED_CALL_ADAPTER_ABI,
+            "meta_wheel": WHEEL_COORDINATOR_ABI,
+        }.get(self.strategy_kind, ADAPTER_ABI)
         self.lifecycle_index = 13 if self.strategy_kind == "covered_call" else 11
         self.addresses = {
             role: Web3.to_checksum_address(row["contract_address"])
@@ -648,8 +684,10 @@ class Web3ReporterGateway:
     def _value_strategy(self, *, component_id, nonce, state_hash, block, block_hash):
         adapter = self.addresses[self.adapter_role]
         adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
-        adapter_state = adapter_contract.functions.adapterState().call(
-            block_identifier=block
+        adapter_state = (
+            adapter_contract.functions.summary().call(block_identifier=block)
+            if self.strategy_kind == "meta_wheel"
+            else adapter_contract.functions.adapterState().call(block_identifier=block)
         )
         observed_hash = adapter_contract.functions.positionStateHash().call(
             block_identifier=block
@@ -664,8 +702,12 @@ class Web3ReporterGateway:
         valuator = self.w3.eth.contract(
             address=self.addresses[self.valuator_role], abi=VALUATOR_ABI
         )
-        observations = self._valuation_observations(valuator, adapter, block)
-        data = encode_valuation_data(observations)
+        if self.strategy_kind == "meta_wheel":
+            reports = self._wheel_lane_valuations(block, block_hash)
+            data = encode_lane_valuations(reports)
+        else:
+            observations = self._valuation_observations(valuator, adapter, block)
+            data = encode_valuation_data(observations)
         value = valuator.functions.value(adapter, block, data).call(
             block_identifier=block
         )
@@ -690,6 +732,40 @@ class Web3ReporterGateway:
             base_exit_cost=int(value[3]),
             data_hash=bytes(value[4]),
         )
+
+    def _wheel_lane_valuations(self, block: int, block_hash: bytes):
+        expected_hash = Web3.to_hex(block_hash).lower()
+        rows = self.repository.wheel_lane_valuations(
+            self.fund.chain_id, self.fund.address, block
+        )
+        reports = tuple(
+            ChildNavReport(
+                child_vault=row["child_vault"],
+                strategy_kind=row["strategy_kind"],
+                custody_domain=row["custody_domain"],
+                snapshot_block=int(row["snapshot_block"]),
+                snapshot_block_hash=row["snapshot_block_hash"],
+                valid_after_block=int(row["valid_after_block"]),
+                valid_until_block=int(row["valid_until_block"]),
+                child_shares=int(row["child_shares"]),
+                position_state_hash=row["position_state_hash"],
+                expected_position_state_hash=row["position_state_hash"],
+                gross_assets_usdc=int(row["gross_assets_usdc"]),
+                liabilities_usdc=int(row["liabilities_usdc"]),
+                liquid_usdc=int(row["liquid_usdc"]),
+                base_exit_cost_usdc=int(row["base_exit_cost_usdc"]),
+                data_hash=row["data_hash"],
+                valuation_data=row["valuation_data"],
+            )
+            for row in rows
+        )
+        if any(
+            report.snapshot_block_hash.lower() != expected_hash
+            or not report.valid_after_block <= block <= report.valid_until_block
+            for report in reports
+        ):
+            raise RuntimeError("INCOHERENT_CHILD_NAV")
+        return reports
 
     @staticmethod
     def _strategy_state_matches(

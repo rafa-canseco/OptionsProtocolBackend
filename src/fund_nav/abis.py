@@ -213,6 +213,24 @@ COVERED_CALL_ADAPTER_ABI = [
     _function("positionStateHash", [], [_field("", "bytes32")]),
 ]
 
+WHEEL_SUMMARY_FIELDS = [
+    _field("stateNonce", "uint64"),
+    _field("trancheCount", "uint256"),
+    _field("assignmentLotCount", "uint256"),
+    _field("pendingCspUsdc", "uint256"),
+    _field("reservedRedemptionUsdc", "uint256"),
+    _field("transitionWeth", "uint256"),
+    _field("accountedUsdc", "uint256"),
+    _field("accountedWeth", "uint256"),
+]
+WHEEL_COORDINATOR_ABI = [
+    _function("interfaceVersion", [], [_field("", "uint64")]),
+    _function("accountingAsset", [], [_field("", "address")]),
+    _function("weth", [], [_field("", "address")]),
+    _function("summary", [], [_field("state", "tuple", WHEEL_SUMMARY_FIELDS)]),
+    _function("positionStateHash", [], [_field("", "bytes32")]),
+]
+
 POSITION_VALUE_FIELDS = [
     _field("grossAssets", "uint256"),
     _field("liabilities", "uint256"),

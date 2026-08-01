@@ -202,12 +202,15 @@ def _base_calls(
     asset: str,
     strategy_kind: str,
 ) -> list[tuple[str, bool, bytes]]:
+    adapter_state_signature = (
+        "summary()" if strategy_kind == "meta_wheel" else "adapterState()"
+    )
     calls = [
         _call(addresses["fund_vault"], "shareSupply()"),
         _call(addresses["fund_vault"], "reservedClaimAssets()"),
         _call(addresses["fund_flow_manager"], "totalReservedAssets()"),
         _call(asset, "balanceOf(address)", ["address"], [addresses["claim_escrow"]]),
-        _call(addresses["strategy_adapter"], "adapterState()"),
+        _call(addresses["strategy_adapter"], adapter_state_signature),
         _call(addresses["fund_vault"], "activeNavWindow()"),
         _call(addresses["strategy_manager"], "positionsHash()"),
         _call(addresses["fund_accounting"], "feeConfig()"),
@@ -308,7 +311,23 @@ def _decode_results(
         "flow_reserved_assets": decode(["uint256"], results[2][1])[0],
         "claim_escrow_balance": decode(["uint256"], results[3][1])[0],
     }
-    if strategy_kind == "covered_call":
+    if strategy_kind == "meta_wheel":
+        adapter_state = decode(
+            [
+                "uint64",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+            ],
+            results[4][1],
+        )
+        output["adapter_usdc"] = adapter_state[6]
+        output["adapter_weth"] = adapter_state[7]
+    elif strategy_kind == "covered_call":
         adapter_state = decode(
             [
                 "uint64",

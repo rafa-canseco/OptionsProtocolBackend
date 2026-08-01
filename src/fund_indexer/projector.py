@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.fund_indexer.models import FundEvent, ZERO_ADDRESS, integer, normalize_address
+from src.meta_wheel.events import WHEEL_EVENT_NAMES
+from src.meta_wheel.projector import MetaWheelProjection
 
 
 CSP_LIFECYCLES = {
@@ -31,12 +33,13 @@ class FundProjection:
     adapters: set[str] = field(default_factory=set)
     adapter_nonces: dict[str, int] = field(default_factory=dict)
     open_redemption_batch_id: int = 1
+    wheel: MetaWheelProjection | None = None
 
     def export(self) -> dict[str, list[dict[str, Any]]]:
         chain_id = self.fund["chain_id"]
         fund_address = self.fund["fund_address"]
         common = {"chain_id": chain_id, "fund_address": fund_address}
-        return {
+        exported = {
             "fund_state": [{**common, **self.fund}],
             "share_balances": [
                 {**common, "wallet_address": wallet, "shares": str(shares)}
@@ -86,6 +89,9 @@ class FundProjection:
             ],
             "activities": self.activities,
         }
+        if self.wheel is not None:
+            exported.update(self.wheel.export())
+        return exported
 
 
 def project_events(
@@ -128,7 +134,12 @@ def project_events(
             "quote_asset": (
                 normalize_address(quote_asset) if quote_asset is not None else None
             ),
-        }
+        },
+        wheel=(
+            MetaWheelProjection(first.chain_id, first.fund_address)
+            if strategy_kind == "meta_wheel"
+            else None
+        ),
     )
     seen: set[tuple[int, str, int]] = set()
     nav_invalidated = False
@@ -177,6 +188,50 @@ def _refresh_nav_staleness(
 
 def _apply(projection: FundProjection, event: FundEvent) -> None:
     if event.event_name == "Transfer" and event.contract_role != "fund_share":
+        return
+    if (
+        projection.wheel is not None
+        and (
+            event.contract_role == "wheel_coordinator"
+            or (
+                event.event_name == "WheelPremiumAccrued"
+                and event.contract_role == "wheel_child_lane"
+            )
+        )
+        and projection.wheel.apply(event)
+    ):
+        _activity(
+            projection,
+            event,
+            {
+                "WheelLaneRegistered": "wheel_lane_registered",
+                "WheelLaneStatusSet": "wheel_lane_status_updated",
+                "WheelTrancheQueued": "wheel_tranche_queued",
+                "WheelSiblingTrancheQueued": "wheel_sibling_tranche_queued",
+                "WheelTrancheOpened": "wheel_tranche_opened",
+                "WheelTrancheSettlementAdvanced": "wheel_settlement_advanced",
+                "WheelChildHandoff": "wheel_handoff_completed",
+                "WheelAssignmentLotCreated": "wheel_assignment_created",
+                "WheelCoveredCallFloorEnforced": "wheel_call_floor_enforced",
+                "WheelLotStatusChanged": "wheel_assignment_status_updated",
+                "WheelRedemptionReserveChanged": "wheel_redemption_reserve_updated",
+                "WheelAccountingAssetsReturned": "wheel_assets_returned",
+                "WheelAllocationPauseSet": "wheel_pause_updated",
+                "WheelPolicyHashSet": "wheel_policy_updated",
+                "WheelFloorBufferSet": "wheel_floor_buffer_updated",
+                "WheelPremiumAccrued": "wheel_premium_accrued",
+            }[event.event_name],
+        )
+        return
+    if event.event_name in WHEEL_EVENT_NAMES:
+        return
+    if (
+        projection.wheel is not None
+        and event.event_name == "Upgraded"
+        and event.contract_role == "wheel_coordinator"
+    ):
+        projection.wheel.record_upgrade(event)
+        _activity(projection, event, "wheel_upgraded")
         return
     handlers = {
         "Transfer": _transfer,

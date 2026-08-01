@@ -23,12 +23,14 @@ from src.models.csp_vault import (
     FundStatus,
     FundStrategySnapshot,
     FundSummaryResponse,
+    MetaWheelSnapshot,
     NavWindow,
     RedemptionView,
     StrategyOperationSummary,
     StressNav,
     TokenMetadata,
     TrustedContract,
+    WheelTrancheSummary,
 )
 
 COMMON_PROXY_ROLES = {
@@ -40,7 +42,11 @@ COMMON_PROXY_ROLES = {
     "controller",
     "batch_settler",
 }
-STRATEGY_PROXY_ROLES = {"csp_adapter", "covered_call_adapter"}
+STRATEGY_PROXY_ROLES = {
+    "csp_adapter",
+    "covered_call_adapter",
+    "wheel_coordinator",
+}
 PROXY_ROLES = COMMON_PROXY_ROLES | STRATEGY_PROXY_ROLES
 COMMON_TRUSTED_ROLES = COMMON_PROXY_ROLES | {
     "claim_escrow",
@@ -60,6 +66,11 @@ REQUIRED_TRUSTED_ROLES = COMMON_TRUSTED_ROLES | {
 
 
 def required_trusted_roles(strategy_kind: str) -> set[str]:
+    if strategy_kind == "meta_wheel":
+        return COMMON_TRUSTED_ROLES | {
+            "wheel_coordinator",
+            "meta_wheel_valuator",
+        }
     if strategy_kind == "covered_call":
         return COMMON_TRUSTED_ROLES | {
             "covered_call_adapter",
@@ -81,6 +92,11 @@ class FundRepository(Protocol):
         self, chain_id: int, fund: str, report_nonce: int
     ) -> dict[str, Any] | None: ...
     def position(self, chain_id: int, fund: str, wallet: str) -> dict[str, Any]: ...
+    def wheel_state(self, chain_id: int, fund: str) -> dict[str, Any] | None: ...
+    def wheel_tranches(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
+    def wheel_nav(
+        self, chain_id: int, fund: str, report_nonce: int
+    ) -> dict[str, Any] | None: ...
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
     def confirmed_head(self, chain_id: int) -> dict[str, Any] | None: ...
     def activity(
@@ -180,6 +196,32 @@ class SupabaseFundRepository:
             "redemption": redemption_row,
         }
 
+    def wheel_state(self, chain_id: int, fund: str) -> dict[str, Any] | None:
+        result = self._fund_query("v2_meta_wheel_state", chain_id, fund).limit(1).execute()
+        return result.data[0] if result.data else None
+
+    def wheel_tranches(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
+        return (
+            self._fund_query("v2_meta_wheel_tranches", chain_id, fund)
+            .order("tranche_id")
+            .execute()
+            .data
+            or []
+        )
+
+    def wheel_nav(
+        self, chain_id: int, fund: str, report_nonce: int
+    ) -> dict[str, Any] | None:
+        if report_nonce <= 0:
+            return None
+        result = (
+            self._fund_query("v2_meta_wheel_nav_snapshots", chain_id, fund)
+            .eq("report_nonce", report_nonce)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
         query = self._fund_query("v2_fund_contracts", chain_id, fund)
         return query.execute().data or []
@@ -234,6 +276,7 @@ class FundService:
 
     def summary(self, fund_key: str) -> FundSummaryResponse:
         row = self._find(fund_key)
+        strategy_kind = row.get("strategy_kind", "csp")
         state = self.repository.state(int(row["chain_id"]), row["fund_address"]) or {}
         inventory = self.repository.inventory(int(row["chain_id"]), row["fund_address"])
         positions = self.repository.positions(int(row["chain_id"]), row["fund_address"])
@@ -242,12 +285,37 @@ class FundService:
             for position in positions
             if position.get("lifecycle") in {"open", "awaiting_physical_delivery"}
         ]
-        valuation = self.repository.nav_valuation(
-            int(row["chain_id"]),
-            row["fund_address"],
-            int(state.get("last_report_nonce", 0)),
+        valuation = (
+            None
+            if strategy_kind == "meta_wheel"
+            else self.repository.nav_valuation(
+                int(row["chain_id"]),
+                row["fund_address"],
+                int(state.get("last_report_nonce", 0)),
+            )
         )
-        context = self._write_context(row, state, positions=positions)
+        wheel_state = None
+        wheel_tranches: list[dict[str, Any]] = []
+        wheel_nav = None
+        if strategy_kind == "meta_wheel":
+            wheel_state = self.repository.wheel_state(
+                int(row["chain_id"]), row["fund_address"]
+            ) or {}
+            wheel_tranches = self.repository.wheel_tranches(
+                int(row["chain_id"]), row["fund_address"]
+            )
+            wheel_nav = self.repository.wheel_nav(
+                int(row["chain_id"]),
+                row["fund_address"],
+                int(state.get("last_report_nonce", 0)),
+            )
+        context = self._write_context(
+            row,
+            state,
+            positions=positions,
+            wheel_state=wheel_state,
+            wheel_nav=wheel_nav,
+        )
         stale = context["stale"]
         actions = self._actions(row, state, common=context["reason"])
         net_assets = int(state.get("net_assets", 0))
@@ -266,7 +334,6 @@ class FundService:
         adapter_free = int(
             amounts.get((row["accounting_asset"], "strategy_accounted"), 0)
         )
-        strategy_kind = row.get("strategy_kind", "csp")
         assigned_weth = (
             int(amounts.get((row["weth"], "assigned"), 0))
             if strategy_kind == "csp"
@@ -287,18 +354,59 @@ class FundService:
             for position in active_positions
             if position.get("lifecycle") == "open"
         )
-        valuation_view = self._valuation_view(
-            valuation=valuation,
-            idle_assets=int(state.get("accounted_idle_assets", 0)),
-            adapter_free_assets=adapter_free,
-            locked_collateral_assets=locked_collateral,
-            assigned_weth=assigned_weth,
-            transient_usdc=transient_usdc,
-            strategy_kind=strategy_kind,
-            normalization_slippage_bps=int(state.get("normalization_slippage_bps", 0)),
-            denominator=denominator,
-            share_decimals=int(row["share_decimals"]),
-        )
+        wheel_view = None
+        if strategy_kind == "meta_wheel":
+            wheel_view = self._wheel_snapshot(wheel_state or {}, wheel_nav, wheel_tranches)
+            adapter_free = int(wheel_view.pending_csp_assets)
+            assigned_weth = int(wheel_view.transition_weth)
+            locked_collateral = 0
+            child_reports = (wheel_nav or {}).get("child_reports") or []
+            child_liabilities = sum(
+                int(report.get("liabilities_usdc", 0)) for report in child_reports
+            )
+            child_exit_cost = sum(
+                int(report.get("base_exit_cost_usdc", 0)) for report in child_reports
+            )
+            total_exit_cost = int(
+                (wheel_nav or {}).get("parent_exit_cost_usdc", 0)
+            ) + child_exit_cost
+            valuation_view = {
+                "gross_assets": int((wheel_nav or {}).get("gross_assets", 0)),
+                "fair_liability_assets": child_liabilities,
+                "assigned_weth_value_assets": int(
+                    wheel_view.transition_weth_value_assets
+                ),
+                "settlement_receivable_assets": 0,
+                "settlement_cost_assets": total_exit_cost,
+                "transient_usdc_value_assets": int(
+                    wheel_view.returned_usdc_assets
+                ),
+                "normalization_cost_assets": 0,
+                "option_exit_cost_assets": total_exit_cost,
+                "stress_price_assets": self._wheel_stress_price(
+                    wheel_nav, denominator, int(row["share_decimals"])
+                ),
+                "methodology": "coherent_child_net_nav",
+                "model_version": 1,
+                "observed_at": (wheel_nav or {}).get("observed_at"),
+                "source_quality": "fresh_child_navs_and_spot",
+                "stress": None,
+            }
+        else:
+            valuation_view = self._valuation_view(
+                valuation=valuation,
+                idle_assets=int(state.get("accounted_idle_assets", 0)),
+                adapter_free_assets=adapter_free,
+                locked_collateral_assets=locked_collateral,
+                assigned_weth=assigned_weth,
+                transient_usdc=transient_usdc,
+                strategy_kind=strategy_kind,
+                normalization_slippage_bps=int(
+                    state.get("normalization_slippage_bps", 0)
+                ),
+                denominator=denominator,
+                share_decimals=int(row["share_decimals"]),
+            )
         return FundSummaryResponse(
             fund=self._registry(row),
             net_assets=str(net_assets),
@@ -344,11 +452,15 @@ class FundService:
                 source_quality=valuation_view["source_quality"],
                 stress=valuation_view["stress"],
             ),
-            strategy=self._strategy_snapshot(
-                positions,
-                valuation,
-                strategy_kind=strategy_kind,
-                transient_usdc=transient_usdc,
+            strategy=(
+                self._wheel_strategy(wheel_view)
+                if wheel_view is not None
+                else self._strategy_snapshot(
+                    positions,
+                    valuation,
+                    strategy_kind=strategy_kind,
+                    transient_usdc=transient_usdc,
+                )
             ),
             status=self._status(state),
             actions=actions,
@@ -356,7 +468,138 @@ class FundService:
             as_of_block_hash=state.get("as_of_block_hash"),
             indexed_at=state.get("indexed_at"),
             stale=stale,
+            wheel=wheel_view,
         )
+
+    @staticmethod
+    def _wheel_snapshot(
+        wheel_state: dict[str, Any],
+        wheel_nav: dict[str, Any] | None,
+        tranches: list[dict[str, Any]],
+    ) -> MetaWheelSnapshot:
+        nav = wheel_nav or {}
+        next_actions = {
+            "pending_csp": "open_csp",
+            "csp_open": "wait_for_csp_expiry",
+            "csp_settling": "handoff_csp",
+            "weth_transition": "open_covered_call_above_floor",
+            "call_open": "wait_for_call_expiry",
+            "call_settling": "handoff_covered_call",
+            "closed": "none",
+        }
+        tranche_views = [
+            WheelTrancheSummary(
+                tranche_id=str(row["tranche_id"]),
+                child_vault=row.get("child_vault"),
+                state=row["state"],
+                principal_assets=str(row.get("principal_assets", 0)),
+                child_shares=str(row.get("child_shares", 0)),
+                child_position_id=(
+                    str(row["child_position_id"])
+                    if row.get("child_position_id") is not None
+                    else None
+                ),
+                assignment_lot_ids=[
+                    str(lot_id) for lot_id in row.get("assignment_lot_ids") or []
+                ],
+                literal_assignment_floor_usd_8=str(
+                    row.get("literal_call_floor_8", 0)
+                ),
+                protected_assignment_floor_usd_8=str(
+                    row.get("required_call_floor_8", 0)
+                ),
+                call_strike_usd_8=(
+                    str(row["call_strike_8"])
+                    if row.get("call_strike_8") is not None
+                    else None
+                ),
+                transition_nonce=int(row.get("state_nonce", 0)),
+                next_action=next_actions.get(row["state"], "wait"),
+            )
+            for row in tranches
+        ]
+        return MetaWheelSnapshot(
+            pending_csp_assets=str(wheel_state.get("pending_csp_usdc", 0)),
+            csp_value_assets=str(nav.get("child_csp_value_assets", 0)),
+            transition_weth=str(nav.get("transition_weth", 0)),
+            transition_weth_value_assets=str(
+                nav.get("transition_weth_value_assets", 0)
+            ),
+            covered_call_value_assets=str(
+                nav.get("child_covered_call_value_assets", 0)
+            ),
+            # The coordinator folds returned USDC into pendingCspUsdc.  Keep
+            # this compact field explicit but zero to prevent double counting.
+            returned_usdc_assets="0",
+            reserved_redemption_assets=str(
+                wheel_state.get("redemption_reserved_usdc", 0)
+            ),
+            active_tranche_count=int(
+                wheel_state.get(
+                    "active_tranche_count",
+                    sum(row.state != "closed" for row in tranche_views),
+                )
+            ),
+            protected_assignment_floor_usd_8=str(
+                wheel_state.get("protected_assignment_floor_8", 0)
+            ),
+            current_phase=wheel_state.get("current_phase", "idle"),
+            next_action=wheel_state.get("next_action", "wait"),
+            cumulative_gross_premium_assets=str(
+                wheel_state.get("cumulative_gross_premium", 0)
+            ),
+            cumulative_protocol_fee_assets=str(
+                wheel_state.get("cumulative_protocol_fee", 0)
+            ),
+            cumulative_net_premium_assets=str(
+                wheel_state.get("cumulative_net_premium", 0)
+            ),
+            policy_version=int(wheel_state.get("policy_version", 0)),
+            policy_hash=wheel_state.get("policy_hash"),
+            nav_coherent=bool(nav.get("coherent", False)),
+            nav_snapshot_block=(
+                int(nav["snapshot_block"])
+                if nav.get("snapshot_block") is not None
+                else None
+            ),
+            nav_snapshot_block_hash=nav.get("snapshot_block_hash"),
+            paused=bool(wheel_state.get("paused", False)),
+            tranches=tranche_views,
+        )
+
+    @staticmethod
+    def _wheel_strategy(wheel: MetaWheelSnapshot) -> FundStrategySnapshot:
+        return FundStrategySnapshot(
+            strategy_kind="meta_wheel",
+            total_premium_collected_assets=wheel.cumulative_net_premium_assets,
+            next_open_condition=wheel.next_action,
+        )
+
+    @staticmethod
+    def _wheel_stress_price(wheel_nav, denominator: int, share_decimals: int):
+        if not wheel_nav or wheel_nav.get("stress_net_assets") is None or not denominator:
+            return None
+        return str(
+            (int(wheel_nav["stress_net_assets"]) + 1)
+            * 10**share_decimals
+            // denominator
+        )
+
+    @staticmethod
+    def _wheel_reason(state, wheel_state, wheel_nav) -> str | None:
+        if not wheel_state:
+            return "MISSING_WHEEL_PROJECTION"
+        if not wheel_nav:
+            return "INCOHERENT_CHILD_NAV"
+        if not wheel_nav.get("coherent", False):
+            return "INCOHERENT_CHILD_NAV"
+        if int(wheel_nav.get("report_nonce", -1)) != int(
+            state.get("last_report_nonce", 0)
+        ):
+            return "INCOHERENT_CHILD_NAV"
+        if int(wheel_nav.get("net_assets", -1)) != int(state.get("net_assets", 0)):
+            return "INCOHERENT_CHILD_NAV"
+        return None
 
     @staticmethod
     def _strategy_snapshot(
@@ -774,7 +1017,15 @@ class FundService:
             return "FLOW_PROCESSING"
         return None
 
-    def _write_context(self, registry, state, *, positions=None) -> dict[str, Any]:
+    def _write_context(
+        self,
+        registry,
+        state,
+        *,
+        positions=None,
+        wheel_state=None,
+        wheel_nav=None,
+    ) -> dict[str, Any]:
         chain_id = int(registry["chain_id"])
         if positions is None:
             positions = self.repository.positions(chain_id, registry["fund_address"])
@@ -792,15 +1043,30 @@ class FundService:
             )
             else None
         )
+        wheel_reason = None
+        if registry.get("strategy_kind") == "meta_wheel":
+            if wheel_state is None:
+                wheel_state = self.repository.wheel_state(
+                    chain_id, registry["fund_address"]
+                ) or {}
+            if wheel_nav is None:
+                wheel_nav = self.repository.wheel_nav(
+                    chain_id,
+                    registry["fund_address"],
+                    int(state.get("last_report_nonce", 0)),
+                )
+            wheel_reason = self._wheel_reason(state, wheel_state, wheel_nav)
         stale = bool(
             trust_reason
             or stale_reason
             or settlement_reason
+            or wheel_reason
             or state.get("nav_stale", True)
         )
         reason = (
             trust_reason
             or settlement_reason
+            or wheel_reason
             or self._state_reason(registry, state, stale)
         )
         if reason == "STALE_SNAPSHOT" and stale_reason:
@@ -842,13 +1108,11 @@ class FundService:
             return "UNTRUSTED_BINDING"
         if any(int(row["interface_version"]) not in {1} for row in by_role.values()):
             return "UNSUPPORTED_INTERFACE"
-        required_proxies = COMMON_PROXY_ROLES | {
-            (
-                "covered_call_adapter"
-                if registry.get("strategy_kind") == "covered_call"
-                else "csp_adapter"
-            )
-        }
+        strategy_proxy = {
+            "covered_call": "covered_call_adapter",
+            "meta_wheel": "wheel_coordinator",
+        }.get(registry.get("strategy_kind"), "csp_adapter")
+        required_proxies = COMMON_PROXY_ROLES | {strategy_proxy}
         if any(
             not by_role[role].get("implementation_address") for role in required_proxies
         ):
