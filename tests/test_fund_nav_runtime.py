@@ -38,6 +38,7 @@ from src.fund_nav.runtime import (
     TrustedRegistryLoader,
     Web3ReporterGateway,
     encode_valuation_data,
+    meta_wheel_producer_gate_reason,
     meta_wheel_reporting_gate_reason,
 )
 from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
@@ -212,6 +213,52 @@ def test_standalone_reporting_does_not_depend_on_meta_wheel_operator_gate(
         )
         is None
     )
+
+
+def test_meta_wheel_producer_requires_exact_configured_fund_key(monkeypatch) -> None:
+    registry = {
+        "strategy_kind": "meta_wheel",
+        "fund_key": "base-sepolia:meta-wheel",
+        "chain_id": 84532,
+    }
+    monkeypatch.setattr(settings, "meta_wheel_fund_key", "")
+    assert meta_wheel_producer_gate_reason(registry) == "META_WHEEL_FUND_KEY_MISSING"
+
+    monkeypatch.setattr(settings, "meta_wheel_fund_key", "another-fund")
+    assert meta_wheel_producer_gate_reason(registry) == "META_WHEEL_FUND_KEY_MISMATCH"
+
+
+def test_meta_wheel_producer_requires_both_child_observation_pipelines(
+    monkeypatch,
+) -> None:
+    registry = {
+        "strategy_kind": "meta_wheel",
+        "fund_key": "base-sepolia:meta-wheel",
+        "chain_id": 84532,
+    }
+    monkeypatch.setattr(settings, "meta_wheel_fund_key", registry["fund_key"])
+    monkeypatch.setattr(
+        settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        False,
+    )
+
+    assert (
+        meta_wheel_producer_gate_reason(registry)
+        == "META_WHEEL_CHILD_OBSERVATIONS_DISABLED"
+    )
+
+
+@pytest.mark.parametrize("strategy_kind", ["csp", "covered_call"])
+def test_standalone_reporting_does_not_depend_on_meta_wheel_producer_gate(
+    strategy_kind,
+) -> None:
+    assert meta_wheel_producer_gate_reason({"strategy_kind": strategy_kind}) is None
 
 
 def test_meta_wheel_operator_mismatch_blocks_before_rpc_construction(
@@ -713,6 +760,70 @@ class _BlockValueCall:
 
     def call(self, block_identifier):
         return self.values[block_identifier]
+
+
+class _StaticBlockCall:
+    def __init__(self, value):
+        self.value = value
+
+    def call(self, *, block_identifier):
+        assert block_identifier == 100
+        return self.value
+
+
+def _wheel_lane_gateway(*, row_hash: str, chain_hash: bytes):
+    row = {
+        "child_vault": ADAPTER,
+        "strategy_kind": "csp",
+        "custody_domain": ADAPTER,
+        "snapshot_block": 100,
+        "snapshot_block_hash": "0x" + "12" * 32,
+        "valid_after_block": 95,
+        "valid_until_block": 105,
+        "child_shares": "100",
+        "position_state_hash": row_hash,
+        "gross_assets_usdc": "1000",
+        "liabilities_usdc": "100",
+        "liquid_usdc": "500",
+        "base_exit_cost_usdc": "10",
+        "data_hash": "0x" + "34" * 32,
+        "valuation_data": "0x1234",
+    }
+    lane = SimpleNamespace(
+        functions=SimpleNamespace(
+            childShares=lambda: _StaticBlockCall(100),
+            positionStateHash=lambda: _StaticBlockCall(chain_hash),
+        )
+    )
+    gateway = object.__new__(Web3ReporterGateway)
+    gateway.fund = SimpleNamespace(chain_id=84532, address=FUND)
+    gateway.repository = SimpleNamespace(wheel_lane_valuations=lambda *_args: [row])
+    gateway._produce_wheel_lane_valuations = lambda *_args: None
+    gateway.w3 = SimpleNamespace(eth=SimpleNamespace(contract=lambda **_kwargs: lane))
+    return gateway
+
+
+def test_meta_wheel_blocks_lane_valuation_hash_not_bound_to_safe_block() -> None:
+    gateway = _wheel_lane_gateway(
+        row_hash="0x" + "56" * 32,
+        chain_hash=bytes.fromhex("78" * 32),
+    )
+
+    with pytest.raises(RuntimeError, match="INCOHERENT_CHILD_NAV"):
+        gateway._wheel_lane_valuations(100, bytes.fromhex("12" * 32))
+
+
+def test_meta_wheel_persists_independent_safe_block_lane_hash_binding() -> None:
+    chain_hash = bytes.fromhex("78" * 32)
+    gateway = _wheel_lane_gateway(
+        row_hash=Web3.to_hex(chain_hash),
+        chain_hash=chain_hash,
+    )
+
+    reports = gateway._wheel_lane_valuations(100, bytes.fromhex("12" * 32))
+
+    assert reports[0].position_state_hash == Web3.to_hex(chain_hash)
+    assert reports[0].expected_position_state_hash == Web3.to_hex(chain_hash)
 
 
 class _SnapshotVaultFunctions:

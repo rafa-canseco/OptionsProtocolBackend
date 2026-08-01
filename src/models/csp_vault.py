@@ -163,6 +163,36 @@ class MetaWheelSnapshot(FundModel):
     tranches: list[WheelTrancheSummary] = Field(default_factory=list)
 
 
+class WheelLaneNavObservation(FundModel):
+    lane: str
+    child_shares: str
+    position_state_hash: str
+    snapshot_block: int
+    snapshot_block_hash: str
+    valid_after_block: int
+    valid_until_block: int
+
+
+class WheelNavObservationResponse(FundModel):
+    fund_key: str
+    chain_id: int
+    fund_address: str
+    coordinator: str
+    report_nonce: int
+    component_id: str
+    coordinator_position_state_hash: str
+    snapshot_block: int
+    snapshot_block_hash: str
+    valid_after_block: int
+    valid_until_block: int
+    lanes: list[WheelLaneNavObservation] = Field(
+        description=(
+            "Exactly the active-valued child lanes with positive shares at the "
+            "snapshot; registered idle lanes are intentionally omitted."
+        )
+    )
+
+
 class FundSummaryResponse(FundModel):
     fund: FundRegistryItem
     net_assets: str

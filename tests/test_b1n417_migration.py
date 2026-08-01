@@ -2,6 +2,9 @@ from pathlib import Path
 
 
 MIGRATION = Path("supabase/migrations/202607310001_b1n417_meta_wheel_read_model.sql")
+PRODUCER_MIGRATION = Path(
+    "supabase/migrations/202608010001_b1n417_wheel_nav_producer.sql"
+)
 
 
 def test_meta_wheel_migration_is_isolated_and_reorg_safe() -> None:
@@ -37,3 +40,15 @@ def test_meta_wheel_registry_binds_only_its_canonical_accounting_role() -> None:
     assert "AND accounting_role_account IS NULL" in sql
     assert "Meta Wheel handoff requires its canonical accounting role" in sql
     assert "Standalone handoff cannot bind a Meta Wheel accounting role" in sql
+
+
+def test_meta_wheel_producer_upserts_are_idempotent_and_immutable() -> None:
+    sql = PRODUCER_MIGRATION.read_text()
+
+    assert "v2_store_meta_wheel_lane_valuation" in sql
+    assert "v2_store_meta_wheel_nav_snapshot" in sql
+    assert "pg_advisory_xact_lock" in sql
+    assert "already bound differently" in sql
+    assert "v2_upsert_meta_wheel_nav_snapshot(p_snapshot)" in sql
+    assert sql.count("REVOKE ALL ON FUNCTION") == 2
+    assert sql.count("TO service_role") == 2

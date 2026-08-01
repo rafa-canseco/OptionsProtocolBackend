@@ -5,6 +5,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -39,7 +40,11 @@ from src.fund_nav.abis import (
     STRATEGY_ABI,
     VALUATOR_ABI,
     VAULT_ABI,
+    META_WHEEL_VALUATOR_ABI,
+    WHEEL_CALL_LANE_ACCOUNTING_ABI,
     WHEEL_COORDINATOR_ABI,
+    WHEEL_CSP_LANE_ACCOUNTING_ABI,
+    WHEEL_CHILD_LANE_ABI,
 )
 from src.fund_nav.fair_value import (
     CALL_POLICY_IV_BPS,
@@ -70,7 +75,13 @@ from src.fund_nav.reporter import (
     SignedTransaction,
     StoredRun,
 )
-from src.meta_wheel.nav import ChildNavReport, encode_lane_valuations
+from src.meta_wheel.nav import (
+    ChildNavReport,
+    WheelNavInput,
+    compose_wheel_nav,
+    encode_lane_valuations,
+)
+from src.meta_wheel.store import nav_snapshot_row
 from src.vaults.csp_service import (
     COMMON_PROXY_ROLES,
     PROXY_ROLES,
@@ -117,6 +128,15 @@ class TrustedFund:
     @property
     def address(self) -> str:
         return self.registry["fund_address"]
+
+
+@dataclass(frozen=True, slots=True)
+class ValuationContext:
+    strategy_kind: str
+    adapter_abi: list[dict[str, Any]]
+    lifecycle_index: int
+    observer_private_keys: tuple[str, ...]
+    fair_value_policy: FairValuePolicy | CoveredCallFairValuePolicy | None
 
 
 class SupabaseNavRepository:
@@ -185,14 +205,32 @@ class SupabaseNavRepository:
             .eq("snapshot_block", snapshot_block)
             .execute()
         )
-        by_child = {row["child_vault"]: row for row in result.data or []}
+        valuation_rows = result.data or []
+        by_child = {row["child_vault"]: row for row in valuation_rows}
+        if len(by_child) != len(valuation_rows):
+            raise RuntimeError("INCOHERENT_CHILD_NAV")
         if set(by_child) != active_children:
             raise RuntimeError("INCOHERENT_CHILD_NAV")
-        return [
+        ordered = [
             by_child[row["child_vault"]]
             for row in lanes
             if row["child_vault"] in active_children
         ]
+        if len(ordered) != len(active_children):
+            raise RuntimeError("INCOHERENT_CHILD_NAV")
+        return ordered
+
+    def store_wheel_lane_valuation(self, row: dict[str, Any]) -> None:
+        self.client.rpc(
+            "v2_store_meta_wheel_lane_valuation",
+            {"p_valuation": row},
+        ).execute()
+
+    def store_wheel_nav_snapshot(self, row: dict[str, Any]) -> None:
+        self.client.rpc(
+            "v2_store_meta_wheel_nav_snapshot",
+            {"p_snapshot": row},
+        ).execute()
 
     def insert_verified(self, row: dict[str, Any]) -> None:
         self.client.table("v2_csp_option_observations").insert(row).execute()
@@ -454,6 +492,7 @@ class Web3ReporterGateway:
         *,
         sepolia_observer_private_keys: tuple[str, ...] = (),
         fair_value_policy: FairValuePolicy | CoveredCallFairValuePolicy | None = None,
+        wheel_valuation_contexts: dict[str, ValuationContext] | None = None,
     ) -> None:
         self.w3 = w3
         self.fund = fund
@@ -474,6 +513,9 @@ class Web3ReporterGateway:
             "meta_wheel": WHEEL_COORDINATOR_ABI,
         }.get(self.strategy_kind, ADAPTER_ABI)
         self.lifecycle_index = 13 if self.strategy_kind == "covered_call" else 11
+        self.wheel_valuation_contexts = wheel_valuation_contexts or {}
+        self._observation_adapter_abis: dict[str, list[dict[str, Any]]] = {}
+        self._pending_wheel_nav_snapshot: dict[str, Any] | None = None
         self.addresses = {
             role: Web3.to_checksum_address(row["contract_address"])
             for role, row in fund.contracts.items()
@@ -710,6 +752,15 @@ class Web3ReporterGateway:
         value = valuator.functions.value(adapter, block, data).call(
             block_identifier=block
         )
+        if self.strategy_kind == "meta_wheel":
+            self._prepare_wheel_nav_snapshot(
+                block=block,
+                block_hash=block_hash,
+                reports=reports,
+                coordinator_state=adapter_state,
+                parent_value=value,
+                valuator=valuator,
+            )
         return ComponentReport(
             fund=self.fund.address,
             component_id=component_id,
@@ -733,31 +784,54 @@ class Web3ReporterGateway:
         )
 
     def _wheel_lane_valuations(self, block: int, block_hash: bytes):
+        self._produce_wheel_lane_valuations(block, block_hash)
         expected_hash = Web3.to_hex(block_hash).lower()
         rows = self.repository.wheel_lane_valuations(
             self.fund.chain_id, self.fund.address, block
         )
-        reports = tuple(
-            ChildNavReport(
-                child_vault=row["child_vault"],
-                strategy_kind=row["strategy_kind"],
-                custody_domain=row["custody_domain"],
-                snapshot_block=int(row["snapshot_block"]),
-                snapshot_block_hash=row["snapshot_block_hash"],
-                valid_after_block=int(row["valid_after_block"]),
-                valid_until_block=int(row["valid_until_block"]),
-                child_shares=int(row["child_shares"]),
-                position_state_hash=row["position_state_hash"],
-                expected_position_state_hash=row["position_state_hash"],
-                gross_assets_usdc=int(row["gross_assets_usdc"]),
-                liabilities_usdc=int(row["liabilities_usdc"]),
-                liquid_usdc=int(row["liquid_usdc"]),
-                base_exit_cost_usdc=int(row["base_exit_cost_usdc"]),
-                data_hash=row["data_hash"],
-                valuation_data=row["valuation_data"],
+        reports = []
+        seen_lanes: set[str] = set()
+        for row in rows:
+            child_vault = row["child_vault"].lower()
+            if child_vault in seen_lanes:
+                raise RuntimeError("INCOHERENT_CHILD_NAV")
+            seen_lanes.add(child_vault)
+            lane = self.w3.eth.contract(
+                address=Web3.to_checksum_address(child_vault),
+                abi=WHEEL_CHILD_LANE_ABI,
             )
-            for row in rows
-        )
+            onchain_shares = int(
+                lane.functions.childShares().call(block_identifier=block)
+            )
+            onchain_position_hash = Web3.to_hex(
+                bytes(lane.functions.positionStateHash().call(block_identifier=block))
+            ).lower()
+            if (
+                int(row["child_shares"]) != onchain_shares
+                or row["position_state_hash"].lower() != onchain_position_hash
+            ):
+                raise RuntimeError("INCOHERENT_CHILD_NAV")
+            reports.append(
+                ChildNavReport(
+                    child_vault=row["child_vault"],
+                    strategy_kind=row["strategy_kind"],
+                    custody_domain=row["custody_domain"],
+                    snapshot_block=int(row["snapshot_block"]),
+                    snapshot_block_hash=row["snapshot_block_hash"],
+                    valid_after_block=int(row["valid_after_block"]),
+                    valid_until_block=int(row["valid_until_block"]),
+                    child_shares=int(row["child_shares"]),
+                    position_state_hash=row["position_state_hash"],
+                    expected_position_state_hash=onchain_position_hash,
+                    gross_assets_usdc=int(row["gross_assets_usdc"]),
+                    liabilities_usdc=int(row["liabilities_usdc"]),
+                    liquid_usdc=int(row["liquid_usdc"]),
+                    base_exit_cost_usdc=int(row["base_exit_cost_usdc"]),
+                    data_hash=row["data_hash"],
+                    valuation_data=row["valuation_data"],
+                )
+            )
+        reports = tuple(reports)
         if any(
             report.snapshot_block_hash.lower() != expected_hash
             or not report.valid_after_block <= block <= report.valid_until_block
@@ -765,6 +839,319 @@ class Web3ReporterGateway:
         ):
             raise RuntimeError("INCOHERENT_CHILD_NAV")
         return reports
+
+    def _produce_wheel_lane_valuations(self, block: int, block_hash: bytes) -> None:
+        coordinator_address = self.addresses["wheel_coordinator"]
+        coordinator = self.w3.eth.contract(
+            address=coordinator_address,
+            abi=WHEEL_COORDINATOR_ABI,
+        )
+        meta_valuator = self.w3.eth.contract(
+            address=self.addresses["meta_wheel_valuator"],
+            abi=META_WHEEL_VALUATOR_ABI,
+        )
+        child_valuators = {
+            "csp": meta_valuator.functions.cspValuator().call(block_identifier=block),
+            "covered_call": meta_valuator.functions.coveredCallValuator().call(
+                block_identifier=block
+            ),
+        }
+        spot = self._meta_wheel_spot(meta_valuator, block)
+        block_hash_hex = Web3.to_hex(block_hash).lower()
+        block_timestamp = int(self.w3.eth.get_block(block)["timestamp"])
+        observed_at = datetime.fromtimestamp(
+            block_timestamp, tz=timezone.utc
+        ).isoformat()
+        seen_lanes: set[str] = set()
+        valuation_rows: list[dict[str, Any]] = []
+        lane_count = int(
+            coordinator.functions.registeredLaneCount().call(block_identifier=block)
+        )
+        for index in range(lane_count):
+            lane_address, raw_kind, active = coordinator.functions.registeredLaneAt(
+                index
+            ).call(block_identifier=block)
+            lane_address = lane_address.lower()
+            if lane_address in seen_lanes:
+                raise RuntimeError("DUPLICATE_WHEEL_CUSTODY_DOMAIN")
+            seen_lanes.add(lane_address)
+            if not active:
+                continue
+            strategy_kind = {0: "csp", 1: "covered_call"}.get(int(raw_kind))
+            if strategy_kind is None:
+                raise RuntimeError("UNSUPPORTED_WHEEL_LANE_KIND")
+            lane = self.w3.eth.contract(
+                address=Web3.to_checksum_address(lane_address),
+                abi=WHEEL_CHILD_LANE_ABI,
+            )
+            child_shares = int(
+                lane.functions.childShares().call(block_identifier=block)
+            )
+            if child_shares == 0:
+                continue
+            context = self.wheel_valuation_contexts.get(strategy_kind)
+            if context is None:
+                raise RuntimeError("META_WHEEL_VALUATION_CONTEXT_MISSING")
+            child_adapter = lane.functions.adapter().call(block_identifier=block)
+            position_id = int(
+                lane.functions.activePositionId().call(block_identifier=block)
+            )
+            if position_id == 0:
+                raise RuntimeError("META_WHEEL_ACTIVE_POSITION_MISSING")
+            position_hash = Web3.to_hex(
+                bytes(lane.functions.positionStateHash().call(block_identifier=block))
+            ).lower()
+            child_valuator = self.w3.eth.contract(
+                address=child_valuators[strategy_kind],
+                abi=VALUATOR_ABI,
+            )
+            observations = self._valuation_observations(
+                child_valuator,
+                child_adapter,
+                block,
+                context=context,
+            )
+            valuation_data = encode_valuation_data(observations)
+            child_value = child_valuator.functions.valuePosition(
+                child_adapter,
+                position_id,
+                block,
+                valuation_data,
+            ).call(block_identifier=block)
+            accounting_abi = (
+                WHEEL_CSP_LANE_ACCOUNTING_ABI
+                if strategy_kind == "csp"
+                else WHEEL_CALL_LANE_ACCOUNTING_ABI
+            )
+            lane_accounting = (
+                self.w3.eth.contract(
+                    address=Web3.to_checksum_address(lane_address),
+                    abi=accounting_abi,
+                )
+                .functions.accountingState()
+                .call(block_identifier=block)
+            )
+            idle_usdc = int(lane_accounting[0])
+            idle_weth = int(lane_accounting[1])
+            self._require_lane_custody(
+                lane_address,
+                idle_usdc=idle_usdc,
+                idle_weth=idle_weth,
+                block=block,
+            )
+            idle_weth_value = self._weth_to_usdc(idle_weth, spot["price_8"])
+            transition_bps = int(
+                meta_valuator.functions.transitionExitCostBps().call(
+                    block_identifier=block
+                )
+            )
+            idle_exit_cost = self._ceil_bps(idle_weth_value, transition_bps)
+            if strategy_kind == "csp":
+                gross_assets = int(child_value[0]) + idle_usdc + idle_weth_value
+                liabilities = int(child_value[1])
+                liquid = int(child_value[2]) + idle_usdc
+                base_exit_cost = int(child_value[3]) + idle_exit_cost
+            else:
+                gross_assets = (
+                    self._weth_to_usdc(int(child_value[0]) + idle_weth, spot["price_8"])
+                    + idle_usdc
+                )
+                liabilities = self._weth_to_usdc(int(child_value[1]), spot["price_8"])
+                liquid = (
+                    self._weth_to_usdc(int(child_value[2]), spot["price_8"]) + idle_usdc
+                )
+                base_exit_cost = (
+                    self._weth_to_usdc(int(child_value[3]), spot["price_8"])
+                    + idle_exit_cost
+                )
+            max_window = int(
+                child_valuator.functions.maxObservationWindow().call(
+                    block_identifier=block
+                )
+            )
+            valid_until = min(
+                (item.valid_until_block for item in observations),
+                default=block + max_window,
+            )
+            valuation_rows.append(
+                {
+                    "chain_id": self.fund.chain_id,
+                    "fund_address": self.fund.address.lower(),
+                    "child_vault": lane_address,
+                    "strategy_kind": strategy_kind,
+                    "custody_domain": lane_address,
+                    "snapshot_block": block,
+                    "snapshot_block_hash": block_hash_hex,
+                    "valid_after_block": block,
+                    "valid_until_block": valid_until,
+                    "child_shares": str(child_shares),
+                    "gross_assets_usdc": str(gross_assets),
+                    "liabilities_usdc": str(liabilities),
+                    "liquid_usdc": str(liquid),
+                    "base_exit_cost_usdc": str(base_exit_cost),
+                    "position_state_hash": position_hash,
+                    "data_hash": Web3.to_hex(bytes(child_value[4])).lower(),
+                    "valuation_data": Web3.to_hex(valuation_data),
+                    "observed_at": observed_at,
+                }
+            )
+        for row in valuation_rows:
+            self.repository.store_wheel_lane_valuation(row)
+
+    def _prepare_wheel_nav_snapshot(
+        self,
+        *,
+        block: int,
+        block_hash: bytes,
+        reports: tuple[ChildNavReport, ...],
+        coordinator_state,
+        parent_value,
+        valuator,
+    ) -> None:
+        spot = self._meta_wheel_spot(valuator, block)
+        coordinator = self.addresses["wheel_coordinator"]
+        actual_usdc = self._token_balance(
+            self.fund.registry["accounting_asset"],
+            coordinator,
+            block,
+        )
+        actual_weth = self._token_balance(
+            self.fund.registry["weth"],
+            coordinator,
+            block,
+        )
+        transition_value = self._weth_to_usdc(
+            int(coordinator_state[6]), spot["price_8"]
+        )
+        parent_exit_cost = self._ceil_bps(
+            transition_value,
+            int(
+                valuator.functions.transitionExitCostBps().call(block_identifier=block)
+            ),
+        )
+        inputs = WheelNavInput(
+            snapshot_block=block,
+            snapshot_block_hash=Web3.to_hex(block_hash).lower(),
+            expected_active_child_vaults=tuple(
+                report.child_vault for report in reports
+            ),
+            child_reports=reports,
+            parent_idle_usdc=int(
+                self.vault.functions.accountedIdleAssets().call(block_identifier=block)
+            ),
+            pending_csp_usdc=int(coordinator_state[3]),
+            redemption_reserved_usdc=int(coordinator_state[4]),
+            transition_weth=int(coordinator_state[6]),
+            actual_coordinator_usdc=actual_usdc,
+            actual_coordinator_weth=actual_weth,
+            weth_spot_price_8=spot["price_8"],
+            parent_exit_cost_usdc=parent_exit_cost,
+        )
+        result = compose_wheel_nav(inputs)
+        expected_strategy_gross = (
+            int(coordinator_state[7])
+            + transition_value
+            + sum(report.gross_assets_usdc for report in reports)
+        )
+        expected_strategy_liabilities = sum(
+            report.liabilities_usdc for report in reports
+        )
+        expected_strategy_exit_cost = parent_exit_cost + sum(
+            report.base_exit_cost_usdc for report in reports
+        )
+        if (
+            int(parent_value[0]) != expected_strategy_gross
+            or int(parent_value[1]) != expected_strategy_liabilities
+            or int(parent_value[3]) != expected_strategy_exit_cost
+        ):
+            raise RuntimeError("META_WHEEL_PARENT_VALUATION_MISMATCH")
+        report_nonce = (
+            int(
+                self.accounting.functions.lastReportNonce().call(block_identifier=block)
+            )
+            + 1
+        )
+        observed_at = datetime.fromtimestamp(
+            int(self.w3.eth.get_block(block)["timestamp"]),
+            tz=timezone.utc,
+        ).isoformat()
+        self._pending_wheel_nav_snapshot = nav_snapshot_row(
+            chain_id=self.fund.chain_id,
+            fund_address=self.fund.address,
+            report_nonce=report_nonce,
+            inputs=inputs,
+            result=result,
+            observed_at=observed_at,
+        )
+
+    def persist_confirmed_wheel_nav_snapshot(self) -> None:
+        if self.strategy_kind != "meta_wheel":
+            return
+        if self._pending_wheel_nav_snapshot is None:
+            raise RuntimeError("META_WHEEL_NAV_SNAPSHOT_MISSING")
+        self.repository.store_wheel_nav_snapshot(self._pending_wheel_nav_snapshot)
+
+    def _meta_wheel_spot(self, valuator, block: int) -> dict[str, int]:
+        feed_address = valuator.functions.spotFeed().call(block_identifier=block)
+        expected_decimals = int(
+            valuator.functions.spotFeedDecimals().call(block_identifier=block)
+        )
+        max_staleness = int(
+            valuator.functions.maxSpotStaleness().call(block_identifier=block)
+        )
+        feed = self.w3.eth.contract(address=feed_address, abi=CHAINLINK_SPOT_ABI)
+        if (
+            int(feed.functions.decimals().call(block_identifier=block))
+            != expected_decimals
+        ):
+            raise RuntimeError("META_WHEEL_SPOT_DECIMALS_MISMATCH")
+        round_id, answer, _, updated_at, answered_in_round = (
+            feed.functions.latestRoundData().call(block_identifier=block)
+        )
+        timestamp = int(self.w3.eth.get_block(block)["timestamp"])
+        if (
+            int(answer) <= 0
+            or int(updated_at) <= 0
+            or int(updated_at) > timestamp
+            or timestamp - int(updated_at) > max_staleness
+            or int(answered_in_round) < int(round_id)
+        ):
+            raise RuntimeError("META_WHEEL_SPOT_INVALID_OR_STALE")
+        price = int(answer)
+        price_8 = (
+            price * 10 ** (8 - expected_decimals)
+            if expected_decimals <= 8
+            else price // 10 ** (expected_decimals - 8)
+        )
+        if price_8 <= 0:
+            raise RuntimeError("META_WHEEL_SPOT_INVALID_OR_STALE")
+        return {"price_8": price_8, "updated_at": int(updated_at)}
+
+    def _require_lane_custody(
+        self, lane: str, *, idle_usdc: int, idle_weth: int, block: int
+    ) -> None:
+        usdc = self.fund.registry["accounting_asset"]
+        weth = self.fund.registry["weth"]
+        if (
+            self._token_balance(usdc, lane, block) < idle_usdc
+            or self._token_balance(weth, lane, block) < idle_weth
+        ):
+            raise RuntimeError("META_WHEEL_LANE_CUSTODY_DEFICIT")
+
+    def _token_balance(self, token: str, account: str, block: int) -> int:
+        return int(
+            self.w3.eth.contract(address=token, abi=ERC20_ABI)
+            .functions.balanceOf(account)
+            .call(block_identifier=block)
+        )
+
+    @staticmethod
+    def _weth_to_usdc(weth: int, price_8: int) -> int:
+        return weth * price_8 * 10**6 // 10**26
+
+    @staticmethod
+    def _ceil_bps(value: int, bps: int) -> int:
+        return (value * bps + 9_999) // 10_000
 
     @staticmethod
     def _strategy_state_matches(
@@ -795,11 +1182,33 @@ class Web3ReporterGateway:
             and all(int(value) == 0 for value in empty_values)
         )
 
-    def _valuation_observations(self, valuator, adapter: str, block: int):
+    def _valuation_observations(
+        self,
+        valuator,
+        adapter: str,
+        block: int,
+        context: ValuationContext | None = None,
+    ):
+        context = context or ValuationContext(
+            strategy_kind=self.strategy_kind,
+            adapter_abi=self.adapter_abi,
+            lifecycle_index=getattr(
+                self,
+                "lifecycle_index",
+                13 if self.strategy_kind == "covered_call" else 11,
+            ),
+            observer_private_keys=self.sepolia_observer_private_keys,
+            fair_value_policy=self.fair_value_policy,
+        )
+        if not hasattr(self, "_observation_adapter_abis"):
+            self._observation_adapter_abis = {}
+        self._observation_adapter_abis[adapter.lower()] = context.adapter_abi
         rows = self.repository.observations(
             self.fund.chain_id, self.fund.address, adapter.lower(), block
         )
-        adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
+        adapter_contract = self.w3.eth.contract(
+            address=adapter, abi=context.adapter_abi
+        )
         count = int(
             adapter_contract.functions.adapterState().call(block_identifier=block)[2]
         )
@@ -817,10 +1226,10 @@ class Web3ReporterGateway:
                 .functions.expiry()
                 .call(block_identifier=block)
             )
-            if int(position[self.lifecycle_index]) == 1 and timestamp < expiry:
+            if int(position[context.lifecycle_index]) == 1 and timestamp < expiry:
                 open_positions.append((position_id, position))
 
-        if self.sepolia_observer_private_keys and open_positions:
+        if context.observer_private_keys and open_positions:
             self._publish_sepolia_fair_value_observations(
                 valuator=valuator,
                 adapter=adapter,
@@ -828,6 +1237,7 @@ class Web3ReporterGateway:
                 quorum=quorum,
                 positions=open_positions,
                 existing_rows=rows,
+                context=context,
             )
             rows = self.repository.observations(
                 self.fund.chain_id, self.fund.address, adapter.lower(), block
@@ -859,23 +1269,35 @@ class Web3ReporterGateway:
         quorum: int,
         positions,
         existing_rows,
+        context: ValuationContext | None = None,
     ) -> None:
+        context = context or ValuationContext(
+            strategy_kind=self.strategy_kind,
+            adapter_abi=self.adapter_abi,
+            lifecycle_index=getattr(
+                self,
+                "lifecycle_index",
+                13 if self.strategy_kind == "covered_call" else 11,
+            ),
+            observer_private_keys=self.sepolia_observer_private_keys,
+            fair_value_policy=self.fair_value_policy,
+        )
+        strategy_kind = context.strategy_kind
+        fair_value_policy = context.fair_value_policy
         if self.chain_id() != BASE_SEPOLIA_CHAIN_ID:
             raise RuntimeError("FAIR_VALUE_OBSERVATIONS_WRONG_CHAIN")
-        if self.fair_value_policy is None:
+        if fair_value_policy is None:
             raise RuntimeError("FAIR_VALUE_POLICY_REQUIRED")
-        if self.strategy_kind == "covered_call" and (
-            not isinstance(self.fair_value_policy, CoveredCallFairValuePolicy)
-            or self.fair_value_policy.implied_volatility_bps != CALL_POLICY_IV_BPS
-            or self.fair_value_policy.implied_volatility_source != CALL_POLICY_IV_SOURCE
-            or self.fair_value_policy.risk_free_rate_bps
-            != CALL_POLICY_RISK_FREE_RATE_BPS
-            or self.fair_value_policy.settlement_cost_bps
-            != CALL_POLICY_SETTLEMENT_COST_BPS
+        if strategy_kind == "covered_call" and (
+            not isinstance(fair_value_policy, CoveredCallFairValuePolicy)
+            or fair_value_policy.implied_volatility_bps != CALL_POLICY_IV_BPS
+            or fair_value_policy.implied_volatility_source != CALL_POLICY_IV_SOURCE
+            or fair_value_policy.risk_free_rate_bps != CALL_POLICY_RISK_FREE_RATE_BPS
+            or fair_value_policy.settlement_cost_bps != CALL_POLICY_SETTLEMENT_COST_BPS
         ):
             raise RuntimeError("COVERED_CALL_FAIR_VALUE_POLICY_MISMATCH")
-        model_version = self.fair_value_policy.model_version
-        if len(self.sepolia_observer_private_keys) != quorum:
+        model_version = fair_value_policy.model_version
+        if len(context.observer_private_keys) != quorum:
             raise RuntimeError("FAIR_VALUE_OBSERVATION_QUORUM_MISMATCH")
         if int(valuator.functions.interfaceVersion().call(block_identifier=block)) != 1:
             raise RuntimeError("FAIR_VALUE_VALUATOR_INTERFACE_MISMATCH")
@@ -908,7 +1330,7 @@ class Web3ReporterGateway:
 
         signers = tuple(
             (Account.from_key(private_key).address.lower(), private_key)
-            for private_key in self.sepolia_observer_private_keys
+            for private_key in context.observer_private_keys
         )
         signer_addresses = {address for address, _ in signers}
         if len(signer_addresses) != quorum:
@@ -916,7 +1338,7 @@ class Web3ReporterGateway:
 
         max_window = self.max_observation_window(valuator.address, block)
         if (
-            self.strategy_kind == "covered_call"
+            strategy_kind == "covered_call"
             and max_window != COVERED_CALL_MAX_OBSERVATION_WINDOW_BLOCKS
         ):
             raise RuntimeError("COVERED_CALL_OBSERVATION_WINDOW_POLICY_MISMATCH")
@@ -928,20 +1350,23 @@ class Web3ReporterGateway:
             valuator=valuator,
             block=block,
             snapshot_timestamp=snapshot_timestamp,
+            strategy_kind=strategy_kind,
         )
         block_hash = Web3.to_hex(self.block_hash(block))
         ingestor = ObservationIngestor(
             self,
-            IdempotentObservationStore(self.repository, self.strategy_kind),
+            IdempotentObservationStore(self.repository, strategy_kind),
         )
-        adapter_contract = self.w3.eth.contract(address=adapter, abi=self.adapter_abi)
+        adapter_contract = self.w3.eth.contract(
+            address=adapter, abi=context.adapter_abi
+        )
         accounting_asset = adapter_contract.functions.accountingAsset().call(
             block_identifier=block
         )
         underlying = adapter_contract.functions.weth().call(block_identifier=block)
         strike_asset = (
             adapter_contract.functions.usdc().call(block_identifier=block)
-            if self.strategy_kind == "covered_call"
+            if strategy_kind == "covered_call"
             else accounting_asset
         )
         accounting_decimals = int(
@@ -957,7 +1382,7 @@ class Web3ReporterGateway:
             otoken = self.w3.eth.contract(address=position[0], abi=OTOKEN_ABI)
             if (
                 bool(otoken.functions.isPut().call(block_identifier=block))
-                != (self.strategy_kind == "csp")
+                != (strategy_kind == "csp")
                 or otoken.functions.underlying().call(block_identifier=block).lower()
                 != underlying.lower()
                 or otoken.functions.strikeAsset().call(block_identifier=block).lower()
@@ -969,15 +1394,15 @@ class Web3ReporterGateway:
             ):
                 raise RuntimeError(
                     "FAIR_VALUE_REQUIRES_EUROPEAN_CALL"
-                    if self.strategy_kind == "covered_call"
+                    if strategy_kind == "covered_call"
                     else "FAIR_VALUE_REQUIRES_EUROPEAN_PUT"
                 )
             strike = int(otoken.functions.strikePrice().call(block_identifier=block))
             expiry = int(otoken.functions.expiry().call(block_identifier=block))
             collateral = int(position[4])
-            if self.strategy_kind == "covered_call":
+            if strategy_kind == "covered_call":
                 if (
-                    not isinstance(self.fair_value_policy, CoveredCallFairValuePolicy)
+                    not isinstance(fair_value_policy, CoveredCallFairValuePolicy)
                     or accounting_decimals != 18
                 ):
                     raise RuntimeError("COVERED_CALL_FAIR_VALUE_POLICY_MISMATCH")
@@ -990,14 +1415,14 @@ class Web3ReporterGateway:
                         snapshot_timestamp=snapshot_timestamp,
                         collateral_weth=collateral,
                     ),
-                    self.fair_value_policy,
+                    fair_value_policy,
                 )
                 observed_liability = mark.fair_liability_weth
                 stress_liability = mark.stress_liability_weth
                 base_exit_cost = mark.settlement_cost_weth
                 option_price_8 = mark.option_price_usd_8
             else:
-                if not isinstance(self.fair_value_policy, FairValuePolicy):
+                if not isinstance(fair_value_policy, FairValuePolicy):
                     raise RuntimeError("CSP_FAIR_VALUE_POLICY_MISMATCH")
                 mark = mark_european_put(
                     EuropeanPutInputs(
@@ -1009,7 +1434,7 @@ class Web3ReporterGateway:
                         collateral_assets=collateral,
                         accounting_asset_decimals=accounting_decimals,
                     ),
-                    self.fair_value_policy,
+                    fair_value_policy,
                 )
                 observed_liability = mark.fair_liability_assets
                 stress_liability = mark.stress_liability_assets
@@ -1019,30 +1444,28 @@ class Web3ReporterGateway:
                 {
                     "chain_id": self.fund.chain_id,
                     "fund_address": self.fund.address.lower(),
-                    "strategy_kind": self.strategy_kind,
+                    "strategy_kind": strategy_kind,
                     "valuator_address": valuator.address.lower(),
                     "adapter_address": adapter.lower(),
                     "position_id": str(position_id),
                     "snapshot_block": block,
                     "snapshot_block_hash": block_hash,
                     "otoken_address": position[0].lower(),
-                    "model_name": self.fair_value_policy.model_name,
-                    "model_version": self.fair_value_policy.model_version,
+                    "model_name": fair_value_policy.model_name,
+                    "model_version": fair_value_policy.model_version,
                     "policy_reference": (
                         CALL_POLICY_REFERENCE
-                        if self.strategy_kind == "covered_call"
+                        if strategy_kind == "covered_call"
                         else None
                     ),
                     "policy_sha256": (
-                        CALL_POLICY_SHA256
-                        if self.strategy_kind == "covered_call"
-                        else None
+                        CALL_POLICY_SHA256 if strategy_kind == "covered_call" else None
                     ),
                     "methodology": METHODOLOGY,
                     "source_quality": SOURCE_QUALITY,
-                    "iv_bps": self.fair_value_policy.implied_volatility_bps,
-                    "iv_source": (self.fair_value_policy.implied_volatility_source),
-                    "risk_free_rate_bps": (self.fair_value_policy.risk_free_rate_bps),
+                    "iv_bps": fair_value_policy.implied_volatility_bps,
+                    "iv_source": fair_value_policy.implied_volatility_source,
+                    "risk_free_rate_bps": fair_value_policy.risk_free_rate_bps,
                     "spot_round_id": str(spot["round_id"]),
                     "spot_price_8": str(spot["price_8"]),
                     "spot_updated_at": spot["updated_at"],
@@ -1075,11 +1498,11 @@ class Web3ReporterGateway:
             for observer, private_key in signers:
                 if observer in existing_signers:
                     continue
-                issue = "B1N-361" if self.strategy_kind == "covered_call" else "B1N-366"
+                issue = "B1N-361" if strategy_kind == "covered_call" else "B1N-366"
                 sequence = int.from_bytes(
                     Web3.keccak(
                         text=(
-                            f"{issue}:{self.fair_value_policy.model_name}:"
+                            f"{issue}:{fair_value_policy.model_name}:"
                             f"{observer}:{position_id}:{block}:{valid_until}"
                         )
                     ),
@@ -1113,8 +1536,14 @@ class Web3ReporterGateway:
                     raise
 
     def _approved_spot_snapshot(
-        self, *, valuator, block: int, snapshot_timestamp: int
+        self,
+        *,
+        valuator,
+        block: int,
+        snapshot_timestamp: int,
+        strategy_kind: str | None = None,
     ) -> dict[str, int]:
+        strategy_kind = strategy_kind or self.strategy_kind
         feed_address = valuator.functions.spotFeed().call(block_identifier=block)
         expected_decimals = int(
             valuator.functions.spotFeedDecimals().call(block_identifier=block)
@@ -1122,7 +1551,7 @@ class Web3ReporterGateway:
         max_staleness = int(
             valuator.functions.maxSpotStaleness().call(block_identifier=block)
         )
-        if self.strategy_kind == "covered_call" and (
+        if strategy_kind == "covered_call" and (
             Web3.to_checksum_address(feed_address) != COVERED_CALL_SPOT_FEED
             or expected_decimals != COVERED_CALL_SPOT_FEED_DECIMALS
             or max_staleness != COVERED_CALL_MAX_SPOT_STALENESS_SECONDS
@@ -1416,9 +1845,12 @@ class Web3ReporterGateway:
         )
 
     def market_maker(self, adapter: str, position_id: int, block: int) -> str:
+        adapter_abi = getattr(self, "_observation_adapter_abis", {}).get(
+            adapter.lower(), getattr(self, "adapter_abi", ADAPTER_ABI)
+        )
         contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(adapter),
-            abi=getattr(self, "adapter_abi", ADAPTER_ABI),
+            abi=adapter_abi,
         )
         return contract.functions.position(position_id).call(block_identifier=block)[1]
 
@@ -1471,7 +1903,16 @@ class RuntimeReporter:
 
     def run_once(self) -> ReportRun:
         try:
-            return self.reporter.run_once()
+            result = self.reporter.run_once()
+            if result.status == "confirmed":
+                persist = getattr(
+                    self.reporter.gateway,
+                    "persist_confirmed_wheel_nav_snapshot",
+                    None,
+                )
+                if persist is not None:
+                    persist()
+            return result
         except Exception as exc:
             reason = str(exc) if isinstance(exc, RuntimeError) else ""
             if not reason or " " in reason or not reason.isupper():
@@ -1506,6 +1947,33 @@ def meta_wheel_reporting_gate_reason(
         return "META_WHEEL_OPERATOR_KEY_INVALID"
     if operator_address != expected_address:
         return "META_WHEEL_OPERATOR_ACCOUNTING_ROLE_MISMATCH"
+    return None
+
+
+def meta_wheel_producer_gate_reason(registry: dict[str, Any]) -> str | None:
+    if registry.get("strategy_kind", "csp") != "meta_wheel":
+        return None
+    configured_key = settings.meta_wheel_fund_key.strip()
+    if not configured_key:
+        return "META_WHEEL_FUND_KEY_MISSING"
+    if configured_key != registry.get("fund_key"):
+        return "META_WHEEL_FUND_KEY_MISMATCH"
+    if int(registry.get("chain_id", 0)) == BASE_SEPOLIA_CHAIN_ID and not (
+        settings.fund_csp_sepolia_fair_value_observations_enabled
+        and settings.fund_covered_call_sepolia_fair_value_observations_enabled
+    ):
+        return "META_WHEEL_CHILD_OBSERVATIONS_DISABLED"
+    if int(registry.get("chain_id", 0)) == BASE_SEPOLIA_CHAIN_ID:
+        try:
+            if (
+                not get_fund_csp_sepolia_observer_private_keys()
+                or not get_fund_covered_call_sepolia_observer_private_keys()
+            ):
+                return "META_WHEEL_CHILD_OBSERVERS_MISSING"
+            get_fund_csp_sepolia_fair_value_policy()
+            get_fund_covered_call_sepolia_fair_value_policy()
+        except (TypeError, ValueError):
+            return "META_WHEEL_CHILD_VALUATION_CONFIG_INVALID"
     return None
 
 
@@ -1649,11 +2117,42 @@ def _build_fund_reporter(repository, fund):
         fund.registry,
         settings.operator_private_key,
     )
+    gate_reason = gate_reason or meta_wheel_producer_gate_reason(fund.registry)
     if gate_reason:
         return BlockedReporter(repository, fund, gate_reason)
     w3 = Web3(Web3.HTTPProvider(get_tokenized_fund_rpc_url()))
-    is_csp = fund.registry.get("strategy_kind", "csp") == "csp"
-    if is_csp and settings.fund_csp_sepolia_fair_value_observations_enabled:
+    strategy_kind = fund.registry.get("strategy_kind", "csp")
+    is_csp = strategy_kind == "csp"
+    wheel_contexts: dict[str, ValuationContext] = {}
+    if strategy_kind == "meta_wheel":
+        is_sepolia = fund.chain_id == BASE_SEPOLIA_CHAIN_ID
+        csp_keys = get_fund_csp_sepolia_observer_private_keys() if is_sepolia else ()
+        call_keys = (
+            get_fund_covered_call_sepolia_observer_private_keys() if is_sepolia else ()
+        )
+        csp_policy = get_fund_csp_sepolia_fair_value_policy() if is_sepolia else None
+        call_policy = (
+            get_fund_covered_call_sepolia_fair_value_policy() if is_sepolia else None
+        )
+        wheel_contexts = {
+            "csp": ValuationContext(
+                strategy_kind="csp",
+                adapter_abi=ADAPTER_ABI,
+                lifecycle_index=11,
+                observer_private_keys=csp_keys,
+                fair_value_policy=csp_policy,
+            ),
+            "covered_call": ValuationContext(
+                strategy_kind="covered_call",
+                adapter_abi=COVERED_CALL_ADAPTER_ABI,
+                lifecycle_index=13,
+                observer_private_keys=call_keys,
+                fair_value_policy=call_policy,
+            ),
+        }
+        observer_keys = ()
+        fair_value_policy = None
+    elif is_csp and settings.fund_csp_sepolia_fair_value_observations_enabled:
         observer_keys = get_fund_csp_sepolia_observer_private_keys()
         fair_value_policy = get_fund_csp_sepolia_fair_value_policy()
     elif (
@@ -1671,6 +2170,7 @@ def _build_fund_reporter(repository, fund):
         repository,
         sepolia_observer_private_keys=observer_keys,
         fair_value_policy=fair_value_policy,
+        wheel_valuation_contexts=wheel_contexts,
     )
     reporter = NavReporter(
         gateway,

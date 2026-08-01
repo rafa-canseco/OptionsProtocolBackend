@@ -6,8 +6,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from src.config import get_protocol_fee_bps, settings
+from web3 import Web3
+
+from src.config import get_protocol_fee_bps, get_tokenized_fund_rpc_url, settings
 from src.db.database import get_client
+from src.fund_nav.models import IDLE_COMPONENT_ID
 from src.models.csp_vault import (
     ActionAvailability,
     ActivityItem,
@@ -30,8 +33,10 @@ from src.models.csp_vault import (
     StressNav,
     TokenMetadata,
     TrustedContract,
-    WheelTrancheSummary,
+    WheelLaneNavObservation,
+    WheelNavObservationResponse,
     WheelRedemptionSummary,
+    WheelTrancheSummary,
 )
 
 COMMON_PROXY_ROLES = {
@@ -84,6 +89,15 @@ class UnknownFundError(LookupError):
     """The requested fund key is not registered."""
 
 
+class WheelNavObservationError(RuntimeError):
+    """An exact, canonical Meta Wheel NAV observation is unavailable."""
+
+    def __init__(self, code: str, status_code: int = 409):
+        super().__init__(code)
+        self.code = code
+        self.status_code = status_code
+
+
 class FundRepository(Protocol):
     def registries(self) -> list[dict[str, Any]]: ...
     def state(self, chain_id: int, fund: str) -> dict[str, Any] | None: ...
@@ -98,6 +112,12 @@ class FundRepository(Protocol):
     def wheel_nav(
         self, chain_id: int, fund: str, report_nonce: int
     ) -> dict[str, Any] | None: ...
+    def wheel_nav_observation_rows(
+        self, chain_id: int, fund: str, snapshot_block: int
+    ) -> dict[str, Any]: ...
+    def wheel_nav_chain_binding(
+        self, chain_id: int, snapshot_block: int, transaction_hash: str
+    ) -> dict[str, Any]: ...
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]: ...
     def confirmed_head(self, chain_id: int) -> dict[str, Any] | None: ...
     def activity(
@@ -198,7 +218,9 @@ class SupabaseFundRepository:
         }
 
     def wheel_state(self, chain_id: int, fund: str) -> dict[str, Any] | None:
-        result = self._fund_query("v2_meta_wheel_state", chain_id, fund).limit(1).execute()
+        result = (
+            self._fund_query("v2_meta_wheel_state", chain_id, fund).limit(1).execute()
+        )
         return result.data[0] if result.data else None
 
     def wheel_tranches(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
@@ -222,6 +244,81 @@ class SupabaseFundRepository:
             .execute()
         )
         return result.data[0] if result.data else None
+
+    def wheel_nav_observation_rows(
+        self, chain_id: int, fund: str, snapshot_block: int
+    ) -> dict[str, Any]:
+        snapshots = (
+            self._fund_query("v2_meta_wheel_nav_snapshots", chain_id, fund)
+            .eq("snapshot_block", snapshot_block)
+            .execute()
+            .data
+            or []
+        )
+        if len(snapshots) != 1:
+            raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
+        nav = snapshots[0]
+        runs = (
+            self._fund_query("v2_nav_report_runs", chain_id, fund)
+            .eq("report_nonce", nav["report_nonce"])
+            .eq("status", "confirmed")
+            .execute()
+            .data
+            or []
+        )
+        if len(runs) != 1:
+            raise WheelNavObservationError("WHEEL_NAV_REPORT_NOT_CONFIRMED")
+        lanes = (
+            self._fund_query("v2_meta_wheel_lanes", chain_id, fund)
+            .order("registration_index")
+            .execute()
+            .data
+            or []
+        )
+        valuations = (
+            self._fund_query("v2_meta_wheel_lane_valuations", chain_id, fund)
+            .eq("snapshot_block", snapshot_block)
+            .execute()
+            .data
+            or []
+        )
+        return {
+            "nav": nav,
+            "run": runs[0],
+            "lane_registry": lanes,
+            "valuations": valuations,
+            "contracts": self.contracts(chain_id, fund),
+            "confirmed_head": self.confirmed_head(chain_id),
+        }
+
+    def wheel_nav_chain_binding(
+        self, chain_id: int, snapshot_block: int, transaction_hash: str
+    ) -> dict[str, Any]:
+        rpc_url = get_tokenized_fund_rpc_url()
+        if not rpc_url:
+            raise WheelNavObservationError(
+                "WHEEL_NAV_CANONICAL_RPC_UNAVAILABLE", status_code=503
+            )
+        try:
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            observed_chain_id = int(w3.eth.chain_id)
+            block = w3.eth.get_block(snapshot_block)
+            receipt = w3.eth.get_transaction_receipt(transaction_hash)
+            receipt_block = w3.eth.get_block(int(receipt["blockNumber"]))
+        except Exception as exc:
+            raise WheelNavObservationError(
+                "WHEEL_NAV_CANONICAL_RPC_UNAVAILABLE", status_code=503
+            ) from exc
+        return {
+            "chain_id": observed_chain_id,
+            "snapshot_block": int(block["number"]),
+            "snapshot_block_hash": Web3.to_hex(block["hash"]).lower(),
+            "transaction_hash": Web3.to_hex(receipt["transactionHash"]).lower(),
+            "receipt_status": int(receipt["status"]),
+            "receipt_block": int(receipt["blockNumber"]),
+            "receipt_block_hash": Web3.to_hex(receipt["blockHash"]).lower(),
+            "canonical_receipt_block_hash": Web3.to_hex(receipt_block["hash"]).lower(),
+        }
 
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
         query = self._fund_query("v2_fund_contracts", chain_id, fund)
@@ -299,9 +396,10 @@ class FundService:
         wheel_tranches: list[dict[str, Any]] = []
         wheel_nav = None
         if strategy_kind == "meta_wheel":
-            wheel_state = self.repository.wheel_state(
-                int(row["chain_id"]), row["fund_address"]
-            ) or {}
+            wheel_state = (
+                self.repository.wheel_state(int(row["chain_id"]), row["fund_address"])
+                or {}
+            )
             wheel_tranches = self.repository.wheel_tranches(
                 int(row["chain_id"]), row["fund_address"]
             )
@@ -357,7 +455,9 @@ class FundService:
         )
         wheel_view = None
         if strategy_kind == "meta_wheel":
-            wheel_view = self._wheel_snapshot(wheel_state or {}, wheel_nav, wheel_tranches)
+            wheel_view = self._wheel_snapshot(
+                wheel_state or {}, wheel_nav, wheel_tranches
+            )
             adapter_free = int(wheel_view.pending_csp_assets)
             assigned_weth = int(wheel_view.transition_weth)
             locked_collateral = 0
@@ -368,9 +468,9 @@ class FundService:
             child_exit_cost = sum(
                 int(report.get("base_exit_cost_usdc", 0)) for report in child_reports
             )
-            total_exit_cost = int(
-                (wheel_nav or {}).get("parent_exit_cost_usdc", 0)
-            ) + child_exit_cost
+            total_exit_cost = (
+                int((wheel_nav or {}).get("parent_exit_cost_usdc", 0)) + child_exit_cost
+            )
             valuation_view = {
                 "gross_assets": int((wheel_nav or {}).get("gross_assets", 0)),
                 "fair_liability_assets": child_liabilities,
@@ -379,9 +479,7 @@ class FundService:
                 ),
                 "settlement_receivable_assets": 0,
                 "settlement_cost_assets": total_exit_cost,
-                "transient_usdc_value_assets": int(
-                    wheel_view.returned_usdc_assets
-                ),
+                "transient_usdc_value_assets": int(wheel_view.returned_usdc_assets),
                 "normalization_cost_assets": 0,
                 "option_exit_cost_assets": total_exit_cost,
                 "stress_price_assets": self._wheel_stress_price(
@@ -472,6 +570,480 @@ class FundService:
             wheel=wheel_view,
         )
 
+    def wheel_nav_observation(
+        self, fund_key: str, snapshot_block: int
+    ) -> WheelNavObservationResponse:
+        registry = self._find(fund_key)
+        if registry.get("strategy_kind") != "meta_wheel":
+            raise WheelNavObservationError("FUND_IS_NOT_META_WHEEL")
+        chain_id = int(registry["chain_id"])
+        fund = registry["fund_address"].lower()
+        rows = self.repository.wheel_nav_observation_rows(
+            chain_id, fund, snapshot_block
+        )
+        nav = rows["nav"]
+        run = rows["run"]
+        snapshot_hash = self._hex32(
+            nav.get("snapshot_block_hash"), "WHEEL_NAV_BLOCK_BINDING_INVALID"
+        )
+        nav_snapshot_block = self._uint(
+            nav.get("snapshot_block"), "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL"
+        )
+        report_nonce = self._uint(
+            nav.get("report_nonce"), "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL"
+        )
+        if (
+            nav.get("coherent") is not True
+            or nav_snapshot_block != snapshot_block
+            or report_nonce == 0
+        ):
+            raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
+
+        head = rows.get("confirmed_head")
+        try:
+            head_age = self._age(head.get("observed_at")) if head else float("inf")
+        except (TypeError, ValueError):
+            head_age = float("inf")
+        head_block = self._uint(
+            head.get("block_number") if head else None,
+            "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL",
+        )
+        if (
+            not head
+            or head_block < snapshot_block
+            or head_age > settings.confirmed_head_freshness_seconds
+        ):
+            raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
+        if (
+            head_block == snapshot_block
+            and self._hex32(head.get("block_hash"), "WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
+            != snapshot_hash
+        ):
+            raise WheelNavObservationError("WHEEL_NAV_SNAPSHOT_NOT_CANONICAL")
+
+        if (
+            self._uint(run.get("report_nonce"), "WHEEL_NAV_REPORT_BINDING_INVALID")
+            != report_nonce
+            or self._uint(run.get("snapshot_block"), "WHEEL_NAV_REPORT_BINDING_INVALID")
+            != snapshot_block
+            or self._hex32(
+                run.get("snapshot_block_hash"),
+                "WHEEL_NAV_REPORT_BINDING_INVALID",
+            )
+            != snapshot_hash
+            or run.get("status") != "confirmed"
+            or not run.get("transaction_hash")
+        ):
+            raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+        transaction_hash = self._hex32(
+            run["transaction_hash"], "WHEEL_NAV_REPORT_BINDING_INVALID"
+        )
+        chain_binding = self.repository.wheel_nav_chain_binding(
+            chain_id, snapshot_block, transaction_hash
+        )
+        if (
+            self._uint(
+                chain_binding.get("chain_id"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != chain_id
+            or self._uint(
+                chain_binding.get("snapshot_block"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != snapshot_block
+            or self._hex32(
+                chain_binding.get("snapshot_block_hash"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != snapshot_hash
+            or self._hex32(
+                chain_binding.get("transaction_hash"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != transaction_hash
+            or self._uint(
+                chain_binding.get("receipt_status"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != 1
+            or self._uint(
+                chain_binding.get("receipt_block"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            < snapshot_block
+            or self._hex32(
+                chain_binding.get("receipt_block_hash"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+            != self._hex32(
+                chain_binding.get("canonical_receipt_block_hash"),
+                "WHEEL_NAV_CHAIN_BINDING_INVALID",
+            )
+        ):
+            raise WheelNavObservationError("WHEEL_NAV_CHAIN_BINDING_INVALID")
+
+        coordinator = self._coordinator_at_block(
+            rows.get("contracts") or [], snapshot_block
+        )
+        expected_component_id = Web3.to_hex(
+            Web3.solidity_keccak(
+                ["string", "address"],
+                ["STRATEGY", Web3.to_checksum_address(coordinator)],
+            )
+        ).lower()
+        coordinator_report = self._coordinator_report(
+            run.get("reports"),
+            chain_id=chain_id,
+            fund=fund,
+            snapshot_block=snapshot_block,
+            snapshot_hash=snapshot_hash,
+            expected_component_id=expected_component_id,
+        )
+        coordinator_hash = self._hex32(
+            coordinator_report.get("positionStateHash"),
+            "WHEEL_NAV_REPORT_BINDING_INVALID",
+        )
+        valid_after = self._uint(
+            coordinator_report.get("validAfterBlock"),
+            "WHEEL_NAV_REPORT_WINDOW_INVALID",
+        )
+        valid_until = self._uint(
+            coordinator_report.get("validUntilBlock"),
+            "WHEEL_NAV_REPORT_WINDOW_INVALID",
+        )
+        if valid_until <= valid_after:
+            raise WheelNavObservationError("WHEEL_NAV_REPORT_WINDOW_INVALID")
+
+        lanes = self._wheel_lane_observations(
+            nav.get("child_reports"),
+            rows.get("valuations") or [],
+            rows.get("lane_registry") or [],
+            snapshot_block,
+            snapshot_hash,
+        )
+        return WheelNavObservationResponse(
+            fund_key=fund_key,
+            chain_id=chain_id,
+            fund_address=fund,
+            coordinator=coordinator,
+            report_nonce=report_nonce,
+            component_id=expected_component_id,
+            coordinator_position_state_hash=coordinator_hash,
+            snapshot_block=snapshot_block,
+            snapshot_block_hash=snapshot_hash,
+            valid_after_block=valid_after,
+            valid_until_block=valid_until,
+            lanes=lanes,
+        )
+
+    @classmethod
+    def _coordinator_report(
+        cls,
+        reports,
+        *,
+        chain_id: int,
+        fund: str,
+        snapshot_block: int,
+        snapshot_hash: str,
+        expected_component_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(reports, list) or len(reports) != 2:
+            raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+        by_component: dict[str, dict[str, Any]] = {}
+        common_window: tuple[int, int] | None = None
+        for report in reports:
+            if not isinstance(report, dict):
+                raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+            component_id = cls._hex32(
+                report.get("componentId"), "WHEEL_NAV_REPORT_BINDING_INVALID"
+            )
+            if component_id in by_component:
+                raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+            block_hash = cls._hex32(
+                report.get("snapshotBlockHash"),
+                "WHEEL_NAV_REPORT_BINDING_INVALID",
+            )
+            window = (
+                cls._uint(
+                    report.get("validAfterBlock"),
+                    "WHEEL_NAV_REPORT_WINDOW_INVALID",
+                ),
+                cls._uint(
+                    report.get("validUntilBlock"),
+                    "WHEEL_NAV_REPORT_WINDOW_INVALID",
+                ),
+            )
+            if (
+                str(report.get("fund", "")).lower() != fund
+                or cls._uint(report.get("chainId"), "WHEEL_NAV_REPORT_BINDING_INVALID")
+                != chain_id
+                or cls._uint(
+                    report.get("snapshotBlock"),
+                    "WHEEL_NAV_REPORT_BINDING_INVALID",
+                )
+                != snapshot_block
+                or block_hash != snapshot_hash
+                or (common_window is not None and window != common_window)
+            ):
+                raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+            common_window = window
+            cls._hex32(
+                report.get("positionStateHash"),
+                "WHEEL_NAV_REPORT_BINDING_INVALID",
+            )
+            cls._hex32(report.get("dataHash"), "WHEEL_NAV_REPORT_BINDING_INVALID")
+            by_component[component_id] = report
+        expected = {Web3.to_hex(IDLE_COMPONENT_ID).lower(), expected_component_id}
+        if set(by_component) != expected:
+            raise WheelNavObservationError("WHEEL_NAV_REPORT_BINDING_INVALID")
+        return by_component[expected_component_id]
+
+    @classmethod
+    def _wheel_lane_observations(
+        cls,
+        child_reports,
+        valuations: list[dict[str, Any]],
+        lane_registry: list[dict[str, Any]],
+        snapshot_block: int,
+        snapshot_hash: str,
+    ) -> list[WheelLaneNavObservation]:
+        if not isinstance(child_reports, list):
+            raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+        registered: dict[str, dict[str, Any]] = {}
+        registration_by_lane: dict[str, int] = {}
+        registration_indexes: set[int] = set()
+        for lane in lane_registry:
+            address = cls._address(
+                lane.get("child_vault"), "WHEEL_NAV_LANE_SET_INVALID"
+            )
+            index = cls._uint(
+                lane.get("registration_index"), "WHEEL_NAV_LANE_SET_INVALID"
+            )
+            if address in registered or index in registration_indexes:
+                raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+            registered[address] = lane
+            registration_by_lane[address] = index
+            registration_indexes.add(index)
+
+        valuation_by_lane: dict[str, dict[str, Any]] = {}
+        for valuation in valuations:
+            lane = cls._address(
+                valuation.get("child_vault"), "WHEEL_NAV_LANE_SET_INVALID"
+            )
+            if lane in valuation_by_lane:
+                raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+            valuation_by_lane[lane] = valuation
+
+        reports_by_lane: dict[str, dict[str, Any]] = {}
+        report_order: list[str] = []
+        for report in child_reports:
+            if not isinstance(report, dict):
+                raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+            lane = cls._address(report.get("child_vault"), "WHEEL_NAV_LANE_SET_INVALID")
+            if lane in reports_by_lane:
+                raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+            reports_by_lane[lane] = report
+            report_order.append(lane)
+
+        if set(reports_by_lane) != set(valuation_by_lane) or not set(
+            reports_by_lane
+        ).issubset(registered):
+            raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+        expected_order = sorted(
+            reports_by_lane,
+            key=registration_by_lane.__getitem__,
+        )
+        if report_order != expected_order:
+            raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+
+        observations: list[WheelLaneNavObservation] = []
+        comparable_fields = (
+            "strategy_kind",
+            "custody_domain",
+            "snapshot_block",
+            "snapshot_block_hash",
+            "valid_after_block",
+            "valid_until_block",
+            "child_shares",
+            "position_state_hash",
+            "gross_assets_usdc",
+            "liabilities_usdc",
+            "liquid_usdc",
+            "base_exit_cost_usdc",
+            "data_hash",
+            "valuation_data",
+        )
+        for lane in report_order:
+            report = reports_by_lane[lane]
+            valuation = valuation_by_lane[lane]
+            strategy_kind = report.get("strategy_kind")
+            if (
+                strategy_kind not in {"csp", "covered_call"}
+                or registered[lane].get("lane_type") != strategy_kind
+            ):
+                raise WheelNavObservationError("WHEEL_NAV_LANE_SET_INVALID")
+            if any(
+                cls._canonical_field(field, report.get(field))
+                != cls._canonical_field(field, valuation.get(field))
+                for field in comparable_fields
+            ):
+                raise WheelNavObservationError("WHEEL_NAV_LANE_BINDING_INVALID")
+            report_hash = cls._hex32(
+                report.get("snapshot_block_hash"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            position_hash = cls._hex32(
+                report.get("position_state_hash"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            expected_position_hash = cls._hex32(
+                report.get("expected_position_state_hash"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            cls._address(
+                report.get("custody_domain"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            cls._hex32(report.get("data_hash"), "WHEEL_NAV_LANE_BINDING_INVALID")
+            try:
+                Web3.to_bytes(hexstr=report.get("valuation_data"))
+            except (TypeError, ValueError) as exc:
+                raise WheelNavObservationError(
+                    "WHEEL_NAV_LANE_BINDING_INVALID"
+                ) from exc
+            lane_snapshot = cls._uint(
+                report.get("snapshot_block"), "WHEEL_NAV_LANE_BINDING_INVALID"
+            )
+            child_shares = cls._uint(
+                report.get("child_shares"), "WHEEL_NAV_LANE_BINDING_INVALID"
+            )
+            lane_valid_after = cls._uint(
+                report.get("valid_after_block"),
+                "WHEEL_NAV_LANE_WINDOW_INVALID",
+            )
+            lane_valid_until = cls._uint(
+                report.get("valid_until_block"),
+                "WHEEL_NAV_LANE_WINDOW_INVALID",
+            )
+            gross_assets = cls._uint(
+                report.get("gross_assets_usdc"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            liabilities = cls._uint(
+                report.get("liabilities_usdc"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            liquid = cls._uint(
+                report.get("liquid_usdc"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            exit_cost = cls._uint(
+                report.get("base_exit_cost_usdc"),
+                "WHEEL_NAV_LANE_BINDING_INVALID",
+            )
+            if (
+                lane_snapshot != snapshot_block
+                or report_hash != snapshot_hash
+                or position_hash != expected_position_hash
+                or child_shares == 0
+                or not lane_valid_after <= snapshot_block <= lane_valid_until
+                or liabilities + exit_cost > gross_assets
+                or liquid > gross_assets
+            ):
+                raise WheelNavObservationError("WHEEL_NAV_LANE_BINDING_INVALID")
+            observations.append(
+                WheelLaneNavObservation(
+                    lane=lane,
+                    child_shares=str(child_shares),
+                    position_state_hash=position_hash,
+                    snapshot_block=snapshot_block,
+                    snapshot_block_hash=snapshot_hash,
+                    valid_after_block=lane_valid_after,
+                    valid_until_block=lane_valid_until,
+                )
+            )
+        return observations
+
+    @classmethod
+    def _coordinator_at_block(
+        cls, contracts: list[dict[str, Any]], snapshot_block: int
+    ) -> str:
+        matches = [
+            row
+            for row in contracts
+            if row.get("contract_role") == "wheel_coordinator"
+            and cls._uint(
+                row.get("valid_from_block"), "WHEEL_COORDINATOR_BINDING_INVALID"
+            )
+            <= snapshot_block
+            and (
+                row.get("valid_to_block") is None
+                or snapshot_block
+                <= cls._uint(row["valid_to_block"], "WHEEL_COORDINATOR_BINDING_INVALID")
+            )
+        ]
+        if (
+            len(matches) != 1
+            or cls._uint(
+                matches[0].get("interface_version"),
+                "WHEEL_COORDINATOR_BINDING_INVALID",
+            )
+            != 1
+            or not matches[0].get("implementation_address")
+        ):
+            raise WheelNavObservationError("WHEEL_COORDINATOR_BINDING_INVALID")
+        return cls._address(
+            matches[0].get("contract_address"),
+            "WHEEL_COORDINATOR_BINDING_INVALID",
+        )
+
+    @staticmethod
+    def _canonical_field(field: str, value: Any) -> str:
+        if field in {
+            "snapshot_block",
+            "valid_after_block",
+            "valid_until_block",
+            "child_shares",
+            "gross_assets_usdc",
+            "liabilities_usdc",
+            "liquid_usdc",
+            "base_exit_cost_usdc",
+        }:
+            try:
+                return str(int(value))
+            except (TypeError, ValueError) as exc:
+                raise WheelNavObservationError(
+                    "WHEEL_NAV_LANE_BINDING_INVALID"
+                ) from exc
+        return str(value).lower()
+
+    @staticmethod
+    def _uint(value: Any, code: str) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise WheelNavObservationError(code) from exc
+        if parsed < 0:
+            raise WheelNavObservationError(code)
+        return parsed
+
+    @staticmethod
+    def _hex32(value: Any, code: str) -> str:
+        try:
+            raw = Web3.to_bytes(hexstr=value)
+        except (TypeError, ValueError) as exc:
+            raise WheelNavObservationError(code) from exc
+        if len(raw) != 32:
+            raise WheelNavObservationError(code)
+        return Web3.to_hex(raw).lower()
+
+    @staticmethod
+    def _address(value: Any, code: str) -> str:
+        if not isinstance(value, str) or not Web3.is_address(value):
+            raise WheelNavObservationError(code)
+        return value.lower()
+
     @staticmethod
     def _wheel_snapshot(
         wheel_state: dict[str, Any],
@@ -507,16 +1079,12 @@ class FundService:
                     if row.get("child_position_id") is not None
                     else None
                 ),
-                child_execution_state_hash=row.get(
-                    "child_execution_state_hash"
-                ),
+                child_execution_state_hash=row.get("child_execution_state_hash"),
                 settlement_kind=row.get("settlement_kind"),
                 assignment_lot_ids=[
                     str(lot_id) for lot_id in row.get("assignment_lot_ids") or []
                 ],
-                literal_assignment_floor_usd_8=str(
-                    row.get("literal_call_floor_8", 0)
-                ),
+                literal_assignment_floor_usd_8=str(row.get("literal_call_floor_8", 0)),
                 protected_assignment_floor_usd_8=str(
                     row.get("required_call_floor_8", 0)
                 ),
@@ -547,9 +1115,7 @@ class FundService:
                 wheel_state.get("redemption_reserved_usdc", 0)
             ),
             redemption=WheelRedemptionSummary(
-                reserved_assets=str(
-                    wheel_state.get("redemption_reserved_usdc", 0)
-                ),
+                reserved_assets=str(wheel_state.get("redemption_reserved_usdc", 0)),
                 reserved_principal_assets=str(
                     wheel_state.get("reserved_principal_usdc", 0)
                 ),
@@ -597,7 +1163,11 @@ class FundService:
 
     @staticmethod
     def _wheel_stress_price(wheel_nav, denominator: int, share_decimals: int):
-        if not wheel_nav or wheel_nav.get("stress_net_assets") is None or not denominator:
+        if (
+            not wheel_nav
+            or wheel_nav.get("stress_net_assets") is None
+            or not denominator
+        ):
             return None
         return str(
             (int(wheel_nav["stress_net_assets"]) + 1)
@@ -1066,9 +1636,10 @@ class FundService:
         wheel_reason = None
         if registry.get("strategy_kind") == "meta_wheel":
             if wheel_state is None:
-                wheel_state = self.repository.wheel_state(
-                    chain_id, registry["fund_address"]
-                ) or {}
+                wheel_state = (
+                    self.repository.wheel_state(chain_id, registry["fund_address"])
+                    or {}
+                )
             if wheel_nav is None:
                 wheel_nav = self.repository.wheel_nav(
                     chain_id,
