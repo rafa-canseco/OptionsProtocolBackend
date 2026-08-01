@@ -263,7 +263,15 @@ def b1n419_manifest() -> dict:
         "finalRoles": {
             role: address(index)
             for index, role in enumerate(
-                ("admin", "upgrader", "accounting", "allocator", "processor", "curator", "guardian"),
+                (
+                    "admin",
+                    "upgrader",
+                    "accounting",
+                    "allocator",
+                    "processor",
+                    "curator",
+                    "guardian",
+                ),
                 80,
             )
         },
@@ -304,6 +312,7 @@ def test_b1n419_manifest_maps_confirmed_meta_wheel_only() -> None:
 
     assert deployment.registry["strategy_kind"] == "meta_wheel"
     assert deployment.registry["accounting_asset"] == address(200)
+    assert deployment.registry["accounting_role_account"] == address(82)
     assert deployment.registry["quote_asset"] is None
     assert roles == {
         "access_manager",

@@ -1,9 +1,7 @@
 from pathlib import Path
 
 
-MIGRATION = Path(
-    "supabase/migrations/202607310001_b1n417_meta_wheel_read_model.sql"
-)
+MIGRATION = Path("supabase/migrations/202607310001_b1n417_meta_wheel_read_model.sql")
 
 
 def test_meta_wheel_migration_is_isolated_and_reorg_safe() -> None:
@@ -26,3 +24,16 @@ def test_meta_wheel_migration_is_isolated_and_reorg_safe() -> None:
     assert "'pending_delivery', 'csp_otm', 'csp_assigned'" in sql
     assert "child_position_hash TEXT" not in sql
     assert "lane_id" not in sql
+
+
+def test_meta_wheel_registry_binds_only_its_canonical_accounting_role() -> None:
+    sql = MIGRATION.read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS accounting_role_account TEXT" in sql
+    assert "strategy_kind = 'meta_wheel'" in sql
+    assert "AND accounting_role_account IS NOT NULL" in sql
+    assert "accounting_role_account ~ '^0x[0-9a-f]{40}$'" in sql
+    assert "strategy_kind IN ('csp', 'covered_call')" in sql
+    assert "AND accounting_role_account IS NULL" in sql
+    assert "Meta Wheel handoff requires its canonical accounting role" in sql
+    assert "Standalone handoff cannot bind a Meta Wheel accounting role" in sql

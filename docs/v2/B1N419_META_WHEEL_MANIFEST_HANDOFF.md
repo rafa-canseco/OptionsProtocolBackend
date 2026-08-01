@@ -40,3 +40,13 @@ Base Sepolia receipts exist. The current deploy scaffold status
 No address or block may be copied from a fork/dry-run artifact. Missing or
 placeholder values block `parse_fund_deployment` and therefore block registry
 ingestion.
+
+## NAV reporter identity gate
+
+The Meta Wheel registry persists `finalRoles.accounting` as
+`accounting_role_account`. Before constructing its RPC provider or reporter,
+the backend derives the public address of `OPERATOR_PRIVATE_KEY` and requires
+an exact address match. A missing manifest role, missing or invalid key, or
+mismatch leaves only that Meta Wheel reporter blocked; error codes never
+contain the private key. Standalone CSP and Covered Call reporters do not read
+or enforce this Meta Wheel identity binding.

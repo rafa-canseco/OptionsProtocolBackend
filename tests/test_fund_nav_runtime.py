@@ -38,6 +38,7 @@ from src.fund_nav.runtime import (
     TrustedRegistryLoader,
     Web3ReporterGateway,
     encode_valuation_data,
+    meta_wheel_reporting_gate_reason,
 )
 from src.vaults.csp_service import PROXY_ROLES, REQUIRED_TRUSTED_ROLES
 
@@ -148,6 +149,103 @@ def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
 
     assert reporter.reporter is built_reporter
     assert provider_urls == ["https://fund-rpc.example"]
+
+
+def test_meta_wheel_reporting_gate_accepts_only_canonical_accounting_operator() -> None:
+    private_key = "0x" + f"{73:064x}"
+    registry = {
+        "strategy_kind": "meta_wheel",
+        "accounting_role_account": Account.from_key(private_key).address.lower(),
+    }
+
+    assert meta_wheel_reporting_gate_reason(registry, private_key) is None
+
+
+@pytest.mark.parametrize(
+    ("private_key", "accounting_role", "expected_reason"),
+    [
+        (
+            "",
+            Account.from_key("0x" + f"{74:064x}").address,
+            "META_WHEEL_OPERATOR_KEY_MISSING",
+        ),
+        (
+            "not-a-private-key",
+            Account.from_key("0x" + f"{74:064x}").address,
+            "META_WHEEL_OPERATOR_KEY_INVALID",
+        ),
+        ("0x" + f"{75:064x}", None, "META_WHEEL_ACCOUNTING_ROLE_MISSING"),
+        ("0x" + f"{75:064x}", "not-an-address", "META_WHEEL_ACCOUNTING_ROLE_INVALID"),
+        (
+            "0x" + f"{75:064x}",
+            Account.from_key("0x" + f"{76:064x}").address,
+            "META_WHEEL_OPERATOR_ACCOUNTING_ROLE_MISMATCH",
+        ),
+    ],
+)
+def test_meta_wheel_reporting_gate_fails_closed_without_exposing_key(
+    private_key,
+    accounting_role,
+    expected_reason,
+) -> None:
+    reason = meta_wheel_reporting_gate_reason(
+        {
+            "strategy_kind": "meta_wheel",
+            "accounting_role_account": accounting_role,
+        },
+        private_key,
+    )
+
+    assert reason == expected_reason
+    if private_key:
+        assert private_key not in reason
+
+
+@pytest.mark.parametrize("strategy_kind", ["csp", "covered_call"])
+def test_standalone_reporting_does_not_depend_on_meta_wheel_operator_gate(
+    strategy_kind,
+) -> None:
+    assert (
+        meta_wheel_reporting_gate_reason(
+            {"strategy_kind": strategy_kind},
+            "not-a-private-key",
+        )
+        is None
+    )
+
+
+def test_meta_wheel_operator_mismatch_blocks_before_rpc_construction(
+    monkeypatch,
+) -> None:
+    configured_private_key = "0x" + f"{77:064x}"
+    fund = TrustedFund(
+        registry={
+            "chain_id": 84532,
+            "fund_address": FUND,
+            "strategy_kind": "meta_wheel",
+            "accounting_role_account": Account.from_key(
+                "0x" + f"{78:064x}"
+            ).address.lower(),
+        },
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+    monkeypatch.setattr(
+        runtime.settings,
+        "operator_private_key",
+        configured_private_key,
+    )
+    monkeypatch.setattr(
+        runtime.Web3,
+        "HTTPProvider",
+        lambda _url: pytest.fail("RPC constructed before operator gate"),
+    )
+
+    reporter = runtime._build_fund_reporter(Repository(), fund)
+
+    assert isinstance(reporter, BlockedReporter)
+    assert reporter.reason == "META_WHEEL_OPERATOR_ACCOUNTING_ROLE_MISMATCH"
 
 
 class Repository:

@@ -172,9 +172,7 @@ class SupabaseNavRepository:
             or []
         )
         tranches = (
-            self._fund_table("v2_meta_wheel_tranches", chain_id, fund)
-            .execute()
-            .data
+            self._fund_table("v2_meta_wheel_tranches", chain_id, fund).execute().data
             or []
         )
         active_children = {
@@ -1484,6 +1482,33 @@ class RuntimeReporter:
         self.repository.close()
 
 
+def meta_wheel_reporting_gate_reason(
+    registry: dict[str, Any], operator_private_key: str
+) -> str | None:
+    """Bind Meta Wheel reporting to its canonical accounting operator."""
+    if registry.get("strategy_kind", "csp") != "meta_wheel":
+        return None
+
+    expected_account = registry.get("accounting_role_account")
+    if not expected_account:
+        return "META_WHEEL_ACCOUNTING_ROLE_MISSING"
+    try:
+        expected_address = Web3.to_checksum_address(expected_account).lower()
+    except (TypeError, ValueError):
+        return "META_WHEEL_ACCOUNTING_ROLE_INVALID"
+
+    private_key = operator_private_key.strip()
+    if not private_key:
+        return "META_WHEEL_OPERATOR_KEY_MISSING"
+    try:
+        operator_address = Account.from_key(private_key).address.lower()
+    except Exception:
+        return "META_WHEEL_OPERATOR_KEY_INVALID"
+    if operator_address != expected_address:
+        return "META_WHEEL_OPERATOR_ACCOUNTING_ROLE_MISMATCH"
+    return None
+
+
 class ReporterFleet:
     def __init__(self, reporter_factories):
         self.reporter_factories = reporter_factories
@@ -1620,6 +1645,12 @@ def _build_registered_fund_reporter(registry):
 def _build_fund_reporter(repository, fund):
     if fund.trust_reason:
         return BlockedReporter(repository, fund, fund.trust_reason)
+    gate_reason = meta_wheel_reporting_gate_reason(
+        fund.registry,
+        settings.operator_private_key,
+    )
+    if gate_reason:
+        return BlockedReporter(repository, fund, gate_reason)
     w3 = Web3(Web3.HTTPProvider(get_tokenized_fund_rpc_url()))
     is_csp = fund.registry.get("strategy_kind", "csp") == "csp"
     if is_csp and settings.fund_csp_sepolia_fair_value_observations_enabled:

@@ -1,8 +1,12 @@
 -- B1N-417: isolated Meta Wheel projection and coherent parent NAV read model.
 
 ALTER TABLE v2_fund_registry
+    ADD COLUMN IF NOT EXISTS accounting_role_account TEXT;
+
+ALTER TABLE v2_fund_registry
     DROP CONSTRAINT IF EXISTS v2_fund_registry_strategy_kind_check,
-    DROP CONSTRAINT IF EXISTS v2_fund_registry_quote_asset_check;
+    DROP CONSTRAINT IF EXISTS v2_fund_registry_quote_asset_check,
+    DROP CONSTRAINT IF EXISTS v2_fund_registry_accounting_role_account_check;
 
 ALTER TABLE v2_fund_registry
     ADD CONSTRAINT v2_fund_registry_strategy_kind_check
@@ -20,6 +24,19 @@ ALTER TABLE v2_fund_registry
             AND quote_asset = lower(quote_asset)
             AND quote_asset_symbol IS NOT NULL
             AND quote_asset_decimals BETWEEN 0 AND 255
+        )
+    ),
+    ADD CONSTRAINT v2_fund_registry_accounting_role_account_check CHECK (
+        (
+            strategy_kind = 'meta_wheel'
+            AND accounting_role_account IS NOT NULL
+            AND accounting_role_account = lower(accounting_role_account)
+            AND accounting_role_account ~ '^0x[0-9a-f]{40}$'
+            AND accounting_role_account <> '0x0000000000000000000000000000000000000000'
+        )
+        OR (
+            strategy_kind IN ('csp', 'covered_call')
+            AND accounting_role_account IS NULL
         )
     );
 
@@ -514,6 +531,7 @@ DECLARE
     target_fund TEXT := p_registry->>'fund_address';
     target_key TEXT := p_registry->>'fund_key';
     strategy TEXT := COALESCE(p_registry->>'strategy_kind', 'csp');
+    accounting_role TEXT := p_registry->>'accounting_role_account';
     required_roles TEXT[];
 BEGIN
     required_roles := CASE strategy
@@ -548,6 +566,18 @@ BEGIN
     IF strategy NOT IN ('csp', 'covered_call', 'meta_wheel') THEN
         RAISE EXCEPTION 'Unsupported fund strategy kind: %', strategy;
     END IF;
+    IF strategy = 'meta_wheel'
+       AND (
+           accounting_role IS NULL
+           OR accounting_role <> lower(accounting_role)
+           OR accounting_role !~ '^0x[0-9a-f]{40}$'
+           OR accounting_role = '0x0000000000000000000000000000000000000000'
+       ) THEN
+        RAISE EXCEPTION 'Meta Wheel handoff requires its canonical accounting role';
+    END IF;
+    IF strategy IN ('csp', 'covered_call') AND accounting_role IS NOT NULL THEN
+        RAISE EXCEPTION 'Standalone handoff cannot bind a Meta Wheel accounting role';
+    END IF;
     IF jsonb_typeof(p_contracts) <> 'array'
        OR (SELECT array_agg(role ORDER BY role)
            FROM jsonb_array_elements(p_contracts) item,
@@ -569,7 +599,7 @@ BEGIN
         share_token, weth, strategy_kind, quote_asset, enabled,
         deployment_status, share_symbol, share_decimals,
         accounting_asset_symbol, accounting_asset_decimals,
-        quote_asset_symbol, quote_asset_decimals
+        quote_asset_symbol, quote_asset_decimals, accounting_role_account
     ) VALUES (
         target_chain, target_fund, target_key,
         (p_registry->>'start_block')::BIGINT,
@@ -580,7 +610,8 @@ BEGIN
         p_registry->>'accounting_asset_symbol',
         (p_registry->>'accounting_asset_decimals')::INTEGER,
         p_registry->>'quote_asset_symbol',
-        (p_registry->>'quote_asset_decimals')::INTEGER
+        (p_registry->>'quote_asset_decimals')::INTEGER,
+        accounting_role
     );
 
     INSERT INTO v2_fund_contracts (

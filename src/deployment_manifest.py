@@ -303,11 +303,15 @@ def _parse_meta_wheel_deployment(
     if blocks.get("fundFirst") != start_block:
         raise ValueError("start_block must match network.deploymentBlocks.fundFirst")
     fund_last = blocks.get("fundLast")
-    if isinstance(fund_last, bool) or not isinstance(fund_last, int) or fund_last < start_block:
+    if (
+        isinstance(fund_last, bool)
+        or not isinstance(fund_last, int)
+        or fund_last < start_block
+    ):
         raise ValueError("network.deploymentBlocks.fundLast must follow fundFirst")
     _require_b1n419_receipts(manifest, start_block, fund_last)
     _require_b1n419_readiness(manifest)
-    _require_b1n419_identity(manifest)
+    accounting_role_account = _require_b1n419_identity(manifest)
     _require_b1n419_standalone_baselines(manifest)
     _require_b1n419_libraries(manifest)
 
@@ -412,6 +416,7 @@ def _parse_meta_wheel_deployment(
         "weth": weth,
         "strategy_kind": "meta_wheel",
         "quote_asset": None,
+        "accounting_role_account": accounting_role_account,
         "deployment_status": "DEPLOYED",
         "share_symbol": share_symbol,
         "share_decimals": share_decimals,
@@ -685,7 +690,7 @@ def _require_b1n419_readiness(manifest: dict[str, Any]) -> None:
         )
 
 
-def _require_b1n419_identity(manifest: dict[str, Any]) -> None:
+def _require_b1n419_identity(manifest: dict[str, Any]) -> str:
     source_commit = manifest.get("sourceCommit")
     if not isinstance(source_commit, str) or len(source_commit) != 40:
         raise ValueError("B1N-419 sourceCommit must be a full git commit")
@@ -695,8 +700,8 @@ def _require_b1n419_identity(manifest: dict[str, Any]) -> None:
         raise ValueError("B1N-419 sourceCommit must be a full git commit") from exc
     _bytes32(manifest.get("deploymentId"), "deploymentId")
     roles = _object(manifest, "finalRoles")
-    accounts = [
-        _plain_address(roles.get(role), f"finalRoles.{role}")
+    accounts = {
+        role: _plain_address(roles.get(role), f"finalRoles.{role}")
         for role in (
             "admin",
             "upgrader",
@@ -706,9 +711,10 @@ def _require_b1n419_identity(manifest: dict[str, Any]) -> None:
             "curator",
             "guardian",
         )
-    ]
-    if len(set(accounts)) != len(accounts):
+    }
+    if len(set(accounts.values())) != len(accounts):
         raise ValueError("B1N-419 final roles must be distinct")
+    return accounts["accounting"]
 
 
 def _require_b1n419_receipts(
@@ -734,7 +740,9 @@ def _require_b1n419_receipts(
             or not start_block <= block_number <= fund_last
             or receipt.get("status") != 1
         ):
-            raise ValueError(f"{field} must be a successful receipt in the deployment window")
+            raise ValueError(
+                f"{field} must be a successful receipt in the deployment window"
+            )
         if transaction_hash in hashes:
             raise ValueError("B1N-419 canonical receipt hashes must be unique")
         hashes.add(transaction_hash)
