@@ -103,10 +103,74 @@ if [[ "$mode" == "doctor" ]]; then
   exit 0
 fi
 
-if [[ "$mode" == "full" ]] && "${clean_env[@]}" git -C "$repo_root" grep --untracked -qE \
-  'pytest\.mark\.(integration|network)' -- tests; then
-  echo "full-check prerequisite missing: declare isolated integration services before running marked tests" >&2
-  exit 2
+detect_external_tests() {
+  "${clean_env[@]}" python3 - "$repo_root/tests" <<'PY'
+import ast
+import os
+import sys
+from pathlib import Path
+
+
+def dotted_name(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+tests_root = Path(sys.argv[1])
+if not tests_root.is_dir():
+    raise SystemExit(1)
+
+for current, directories, filenames in os.walk(tests_root, topdown=True):
+    directories[:] = [
+        name
+        for name in directories
+        if name not in {"__pycache__", "options-scenarios"}
+    ]
+    for filename in filenames:
+        if not filename.endswith(".py"):
+            continue
+        path = Path(current) / filename
+        if path.is_symlink():
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError) as error:
+            print(f"full-check prerequisite failed: cannot parse test markers in {path}", file=sys.stderr)
+            raise SystemExit(2) from error
+        for node in ast.walk(tree):
+            name = dotted_name(node)
+            if name.endswith(("mark.integration", "mark.network")):
+                raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+}
+
+has_external_tests=false
+integration_runner_relative="scripts/harness-integration.sh"
+integration_runner="$repo_root/$integration_runner_relative"
+if [[ "$mode" == "full" ]]; then
+  if detect_external_tests; then
+    has_external_tests=true
+    runner_index_entry="$(
+      "${clean_env[@]}" git -C "$repo_root" ls-files -s -- "$integration_runner_relative"
+    )"
+    if [[ "$runner_index_entry" != 100755\ * || ! -f "$integration_runner" || \
+      ! -x "$integration_runner" || -L "$integration_runner" ]]; then
+      echo "full-check prerequisite missing: add tracked executable scripts/harness-integration.sh for integration/network tests" >&2
+      exit 2
+    fi
+  else
+    marker_status=$?
+    if [[ $marker_status -ne 1 ]]; then
+      exit "$marker_status"
+    fi
+  fi
 fi
 
 "${clean_env[@]}" "$uv_bin" run --frozen --offline ruff format --check .
@@ -115,9 +179,45 @@ fi
 pytest_args=(-q)
 if [[ "$mode" == "fast" ]]; then
   pytest_args+=(-m "not integration and not network")
+elif [[ "$mode" == "full" && "$has_external_tests" == true ]]; then
+  pytest_args+=(-m "not integration and not network")
 elif [[ "$mode" == "targeted" ]]; then
   pytest_args+=("${targeted_tests[@]}")
 fi
 
 "${clean_env[@]}" "$uv_bin" run --frozen --offline pytest "${pytest_args[@]}"
+
+if [[ "$mode" == "full" && "$has_external_tests" == true ]]; then
+  echo "harness full: running declared integration entrypoint"
+  mkdir -p \
+    "$runtime_dir/integration-home" \
+    "$runtime_dir/integration-cache" \
+    "$runtime_dir/integration-tmp" \
+    "$runtime_dir/docker"
+  integration_env=(
+    env -i
+    "PATH=$repo_root/.venv/bin:$(dirname "$uv_bin"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    "HOME=$runtime_dir/integration-home"
+    "TMPDIR=$runtime_dir/integration-tmp"
+    "XDG_CACHE_HOME=$runtime_dir/integration-cache"
+    "DOCKER_CONFIG=$runtime_dir/docker"
+    "PYTHONPATH=$repo_root"
+    "PYTHONDONTWRITEBYTECODE=1"
+    "PYTHONHASHSEED=0"
+    "TZ=UTC"
+    "LC_ALL=C"
+    "CI=1"
+    "HARNESS_INTEGRATION=1"
+    "HARNESS_REPO_ROOT=$repo_root"
+    "HARNESS_INTEGRATION_TMPDIR=$runtime_dir/integration-tmp"
+  )
+  if "${integration_env[@]}" "$integration_runner"; then
+    :
+  else
+    runner_status=$?
+    echo "harness full: integration entrypoint failed with exit $runner_status" >&2
+    exit "$runner_status"
+  fi
+fi
+
 echo "harness $mode: passed"

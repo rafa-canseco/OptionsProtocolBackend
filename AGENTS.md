@@ -49,9 +49,15 @@ Never hide a red baseline.
   focused tests under the same isolated environment.
 - Checks run with a synthetic allowlisted environment, without project `.env`
   files, network credentials, or inherited service configuration.
-- `fast` and the current `full` suite are deterministic and offline. If tests are
-  later marked `integration` or `network`, `full` must stop with an explicit
-  prerequisite until their services and isolated configuration are declared.
+- `fast` is deterministic and offline. `full` always runs unit tests under that
+  same isolation. If tests are marked `integration` or `network`, `full` also
+  requires and executes the tracked, non-symlink, executable
+  `scripts/harness-integration.sh` after unit tests pass. That entrypoint owns its
+  service/configuration preflight and generates ephemeral test secrets internally.
+  It runs under a separate `env -i` allowlist with temporary HOME, cache, Docker
+  config, and only harness-defined non-sensitive flags; caller/staging credentials
+  are never forwarded. If it is absent, `full` exits with an explicit prerequisite
+  instead of attempting undeclared services.
 - Never claim completion from prose alone. Record exact commands and exit codes in
   the workspace verification evidence.
 
