@@ -154,6 +154,34 @@ def test_multicall_result_decodes_adapter_and_v1_ledgers() -> None:
     assert decoded["position_ledgers"][0].controller_short_amount == 10
 
 
+def test_meta_wheel_snapshot_decodes_coordinator_summary_without_adapter_state() -> None:
+    results = _base_snapshot_results()
+    results[4] = (
+        True,
+        encode(
+            [
+                "uint64",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+                "uint256",
+            ],
+            [8, 3, 1, 500, 100, 90, 2, 600, 2],
+        ),
+    )
+
+    decoded = _decode_results(
+        results, [], [], 2, strategy_kind="meta_wheel"
+    )
+
+    assert decoded["adapter_usdc"] == 600
+    assert decoded["adapter_weth"] == 2
+
+
 def target_address() -> str:
     return "0xf000000000000000000000000000000000000001"
 
