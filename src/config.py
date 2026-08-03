@@ -219,6 +219,8 @@ class Settings(BaseSettings):
     mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
     # Historical P&L / engagement
+    # Temporary rollback gate for the v1 results, leaderboard, and weekly snapshot.
+    legacy_agora_v1_enabled: bool = False
     coingecko_api_url: str = "https://api.coingecko.com/api/v3"
     weekly_aggregation_day: int = 4  # 0=Monday, 4=Friday
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC

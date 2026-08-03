@@ -6,12 +6,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
-from src.api.results import router as results_router
 from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
 from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
-from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
@@ -449,11 +447,13 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(yield_indexer.run()))
         logger.info("Yield indexer started")
 
-    # Weekly aggregator only needs DB access, not on-chain config
-    from src.bots import weekly_aggregator
+    if settings.legacy_agora_v1_enabled:
+        # Import only inside the rollback gate. The default v2 process must not
+        # load or schedule the global legacy snapshot implementation.
+        from src.bots import weekly_aggregator
 
-    tasks.append(asyncio.create_task(weekly_aggregator.run()))
-    logger.info("Weekly aggregator started")
+        tasks.append(asyncio.create_task(weekly_aggregator.run()))
+        logger.info("Legacy Agora v1 weekly aggregator started")
 
     # ── Solana bots ──
     if has_solana_config() and has_enabled_solana_bots():
@@ -611,17 +611,25 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(series_router)
 app.include_router(fund_series_router)
-app.include_router(results_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)
 app.include_router(mm_ws_router)
 app.include_router(activity_router)
-app.include_router(leaderboard_router)
 app.include_router(notifications_router)
 app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
 app.include_router(csp_vault_router)
 app.include_router(bridge_router)
+
+if settings.legacy_agora_v1_enabled:
+    # Keep the retired API available as an explicit, reversible rollback path
+    # without importing it into the default v2 process.
+    from src.api.leaderboard import router as leaderboard_router
+    from src.api.results import router as results_router
+
+    app.include_router(results_router)
+    app.include_router(leaderboard_router)
+    logger.warning("Legacy Agora v1 API routes enabled")
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router
