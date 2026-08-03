@@ -11,6 +11,14 @@ from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.signature import Signature  # type: ignore[import-untyped]
 
 from src.api.routes import _check_read_rate_limit, _enrich_positions, _get_client_ip
+from src.api.position_pagination import (
+    PAGE_DEFAULT,
+    PositionCursorError,
+    PositionSubject,
+    build_position_page,
+    build_position_snapshot,
+    fetch_position_rpc,
+)
 from src.chains.address import ETH_ADDRESS_RE, is_valid_solana_address
 from src.db.database import get_client
 
@@ -482,48 +490,86 @@ async def link_trusted_wallet(
     return {"wallet": wallet_result.data[0]}
 
 
-def _fetch_account_positions(client, account_id: str) -> list[dict]:
-    wallets_result = (
-        client.table("b1nary_wallets")
-        .select("*")
-        .eq("account_id", account_id)
-        .execute()
-    )
-    wallets = [
-        w
-        for w in (wallets_result.data or [])
-        if w.get("role") == "trading" and w.get("verified_at")
-    ]
-    positions: list[dict] = []
-    for wallet in wallets:
-        result = (
-            client.table("order_events")
-            .select("*")
-            .eq("user_address", wallet["address_normalized"])
-            .eq("chain", wallet["chain"])
-            .order("indexed_at", desc=True)
-            .execute()
+def _account_position_response(
+    client,
+    *,
+    subject: PositionSubject,
+    stream: str | None,
+    cursor: str | None,
+    limit: int,
+    changed_after: datetime | None,
+) -> tuple[dict, bool]:
+    if stream is not None and stream not in {"active", "settled", "changes"}:
+        raise HTTPException(400, "stream must be active, settled, or changes")
+    if stream is None and (cursor is not None or changed_after is not None):
+        raise HTTPException(400, "cursor and changed_after require an explicit stream")
+    try:
+        payload = fetch_position_rpc(
+            client,
+            subject=subject,
+            stream=stream or "snapshot",
+            limit=limit,
+            cursor=cursor,
+            changed_after=changed_after,
         )
-        positions.extend(_enrich_positions(result.data or []))
-    return positions
+        if stream is not None:
+            page = build_position_page(
+                payload,
+                subject=subject,
+                stream=stream,
+                limit=limit,
+                changed_after=changed_after,
+            )
+            page["positions"] = _enrich_positions(page["positions"])
+            return {**page, "errors": []}, bool(payload["account_found"])
+        snapshot = build_position_snapshot(payload, subject=subject)
+        response = {
+            "positions": _enrich_positions(snapshot["positions"]),
+            "errors": [],
+            "pagination": {
+                key: value for key, value in snapshot.items() if key != "positions"
+            },
+        }
+        return response, bool(payload["account_found"])
+    except PositionCursorError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        if "signing key" in str(exc):
+            raise HTTPException(503, "Position pagination is unavailable") from None
+        raise
 
 
 @router.get(
     "/b1nary-accounts/{account_id}/positions",
     summary="Get positions for a b1nary account",
 )
-async def get_account_positions(account_id: str, request: Request):
+async def get_account_positions(
+    account_id: str,
+    request: Request,
+    stream: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, min_length=16, max_length=2048),
+    limit: int = Query(default=PAGE_DEFAULT, ge=1, le=100),
+    changed_after: datetime | None = Query(default=None),
+):
     _check_read_rate_limit(_get_client_ip(request))
     client = get_client()
     try:
-        _fetch_account(client, account_id)
-        positions = _fetch_account_positions(client, account_id)
+        response, account_found = _account_position_response(
+            client,
+            subject=PositionSubject(account_id=account_id),
+            stream=stream,
+            cursor=cursor,
+            limit=limit,
+            changed_after=changed_after,
+        )
+        if not account_found:
+            raise HTTPException(404, "b1nary account not found")
     except HTTPException:
         raise
     except Exception:
         logger.exception("Failed to fetch b1nary account positions")
         raise HTTPException(502, "Could not fetch account positions")
-    return {"positions": positions, "errors": []}
+    return response
 
 
 @router.get(
@@ -533,15 +579,27 @@ async def get_account_positions(account_id: str, request: Request):
 async def get_account_positions_by_privy_user_id(
     request: Request,
     privy_user_id: str = Query(..., min_length=1, max_length=255),
+    stream: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, min_length=16, max_length=2048),
+    limit: int = Query(default=PAGE_DEFAULT, ge=1, le=100),
+    changed_after: datetime | None = Query(default=None),
 ):
     _check_read_rate_limit(_get_client_ip(request))
     client = get_client()
     try:
-        account = _fetch_account_by_privy_user_id(client, privy_user_id)
-        if not account or not account.get("account"):
+        response, account_found = _account_position_response(
+            client,
+            subject=PositionSubject(privy_user_id=privy_user_id),
+            stream=stream,
+            cursor=cursor,
+            limit=limit,
+            changed_after=changed_after,
+        )
+        if not account_found:
             return {"positions": [], "errors": []}
-        positions = _fetch_account_positions(client, account["account"]["id"])
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to fetch b1nary account positions by privy user")
         raise HTTPException(502, "Could not fetch account positions")
-    return {"positions": positions, "errors": []}
+    return response

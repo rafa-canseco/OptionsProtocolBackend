@@ -482,6 +482,207 @@ def _make_quote(
 _VALID_OTOKENS_RESULT = MagicMock(data=[{"otoken_address": FAKE_OTOKEN_ADDR}])
 
 
+def _set_position_count_rpc(
+    mock_db,
+    *,
+    count: int = 0,
+    strike: str = "2400",
+    is_put: bool = True,
+    expiry: int = 9999999999,
+):
+    rows = (
+        [
+            {
+                "strike_price": strike,
+                "is_put": is_put,
+                "expiry": expiry,
+                "position_count": count,
+            }
+        ]
+        if count
+        else []
+    )
+    mock_db.rpc.return_value.execute.return_value = MagicMock(data=rows)
+
+
+class TestPricesBoundedCaching:
+    @pytest.fixture(autouse=True)
+    def clear_price_cache(self):
+        import src.api.routes as routes_mod
+
+        routes_mod._prices_cache.clear()
+        routes_mod._prices_cached_at.clear()
+        yield
+        routes_mod._prices_cache.clear()
+        routes_mod._prices_cached_at.clear()
+
+    def test_empty_menu_is_cached_but_safety_check_runs_on_every_request(self, mock_db):
+        quote_loads = 0
+
+        def side_effect(table_name):
+            nonlocal quote_loads
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                quote_loads += 1
+                _quotes_mock_chain(mock_table).return_value = MagicMock(data=[])
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+        with (
+            patch("src.api.routes.circuit_breaker") as mock_cb,
+            patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)),
+        ):
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            first = client.get("/prices")
+            second = client.get("/prices")
+
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json() == []
+        assert quote_loads == 1
+        assert mock_cb.check.call_count == 2
+        assert mock_cb.update_reference.call_count == 2
+
+    def test_pruned_empty_menu_is_cached(self, mock_db):
+        quote_loads = 0
+        quote = _make_quote(2400.0, True)
+
+        def side_effect(table_name):
+            nonlocal quote_loads
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                quote_loads += 1
+                _quotes_mock_chain(mock_table).return_value = MagicMock(data=[quote])
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(mock_table).return_value = MagicMock(
+                    data=[]
+                )
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+        with (
+            patch("src.api.routes.circuit_breaker") as mock_cb,
+            patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)),
+        ):
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            first = client.get("/prices")
+            second = client.get("/prices")
+
+        assert first.json() == second.json() == []
+        assert quote_loads == 1
+        assert mock_db.rpc.call_count == 0
+        assert mock_cb.check.call_count == 2
+
+    def test_nonempty_menu_and_count_rpc_are_cached(self, mock_db):
+        quote_loads = 0
+        quote = _make_quote(2400.0, True)
+
+        def side_effect(table_name):
+            nonlocal quote_loads
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                quote_loads += 1
+                _quotes_mock_chain(mock_table).return_value = MagicMock(data=[quote])
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
+            return mock_table
+
+        mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db, count=2)
+        with (
+            patch("src.api.routes.circuit_breaker") as mock_cb,
+            patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)),
+        ):
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            first = client.get("/prices")
+            second = client.get("/prices")
+
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        assert quote_loads == 1
+        assert mock_db.rpc.call_count == 1
+        assert mock_cb.check.call_count == 2
+
+    def test_101_series_are_counted_in_globally_exact_batches(self, mock_db):
+        first_expiry = 9_999_990_000
+        quotes = [
+            _make_quote(2400.0, True, expiry=first_expiry + index * 2)
+            for index in range(101)
+        ]
+
+        def table_side_effect(table_name):
+            mock_table = MagicMock()
+            if table_name == "mm_quotes":
+                _quotes_mock_chain(mock_table).return_value = MagicMock(data=quotes)
+            elif table_name == "available_otokens":
+                _available_otokens_mock_chain(
+                    mock_table
+                ).return_value = _VALID_OTOKENS_RESULT
+            return mock_table
+
+        source_counts = {
+            first_expiry + 99 * 2 + 1: 3,
+            first_expiry + 100 * 2: 2,
+        }
+
+        def rpc_side_effect(name, params):
+            assert name == "b1nary_price_position_counts"
+            rows = []
+            for series in params["p_series"]:
+                count = sum(
+                    source_count
+                    for source_expiry, source_count in source_counts.items()
+                    if (
+                        series["lower_expiry"] is None
+                        or source_expiry >= series["lower_expiry"]
+                    )
+                    and (
+                        series["upper_expiry"] is None
+                        or source_expiry <= series["upper_expiry"]
+                    )
+                )
+                if count:
+                    rows.append(
+                        {
+                            "strike_price": series["strike_price"],
+                            "is_put": series["is_put"],
+                            "expiry": series["expiry"],
+                            "position_count": count,
+                        }
+                    )
+            execution = MagicMock()
+            execution.execute.return_value = MagicMock(data=rows)
+            return execution
+
+        mock_db.table.side_effect = table_side_effect
+        mock_db.rpc.side_effect = rpc_side_effect
+        with (
+            patch("src.api.routes.circuit_breaker") as mock_cb,
+            patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)),
+        ):
+            mock_cb.is_paused_for.return_value = False
+            mock_cb.check.return_value = False
+            response = client.get("/prices")
+
+        assert response.status_code == 200
+        items = response.json()
+        assert len(items) == 101
+        assert items[99]["position_count"] == 3
+        assert items[100]["position_count"] == 2
+        assert mock_db.rpc.call_count == 2
+        assert [
+            len(call.args[1]["p_series"]) for call in mock_db.rpc.call_args_list
+        ] == [100, 1]
+        first_batch_last = mock_db.rpc.call_args_list[0].args[1]["p_series"][-1]
+        second_batch_first = mock_db.rpc.call_args_list[1].args[1]["p_series"][0]
+        assert first_batch_last["upper_expiry"] == first_expiry + 99 * 2 + 1
+        assert second_batch_first["lower_expiry"] == first_expiry + 99 * 2 + 2
+
+
 class TestPositionCounts:
     """Tests for position_count field on /prices responses."""
 
@@ -513,6 +714,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -552,6 +754,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db, strike="180", is_put=False)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -594,6 +797,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db, count=1)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -629,6 +833,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        mock_db.rpc.return_value.execute.side_effect = Exception("DB down")
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -666,6 +871,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -680,13 +886,8 @@ class TestPositionCounts:
         items = resp.json()
         assert items[0]["position_count"] == 0
 
-        # Verify the order_events table was queried at all
-        order_events_calls = [
-            call
-            for call in mock_db.table.call_args_list
-            if call[0][0] == "order_events"
-        ]
-        assert len(order_events_calls) >= 1
+        mock_db.rpc.assert_called_once()
+        assert mock_db.rpc.call_args.args[0] == "b1nary_price_position_counts"
 
     def test_multiple_positions_aggregated(self, mock_db):
         """Multiple positions for the same strike are summed before multiplier."""
@@ -715,6 +916,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db, count=2)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -753,6 +955,8 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        # The SQL RPC maps the orphan to the visible expiry before returning.
+        _set_position_count_rpc(mock_db, count=1, expiry=9999999999)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False
@@ -789,6 +993,7 @@ class TestPositionCounts:
             return mock_table
 
         mock_db.table.side_effect = side_effect
+        _set_position_count_rpc(mock_db)
 
         with self._prices_cb_patch() as mock_cb:
             mock_cb.is_paused_for.return_value = False

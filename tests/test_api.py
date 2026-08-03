@@ -63,6 +63,21 @@ class _FakeDatabase:
     def table(self, name: str):
         return _FakeTable(name, self.waitlist)
 
+    def rpc(self, name: str, _params: dict):
+        assert name == "b1nary_position_page"
+        return SimpleNamespace(
+            execute=lambda: SimpleNamespace(
+                data={
+                    "account_found": True,
+                    "wallet_fingerprint": "a" * 64,
+                    "watermark": "2026-08-03T00:00:00Z",
+                    "active": [],
+                    "settled": [],
+                    "rows": [],
+                }
+            )
+        )
+
 
 @pytest.fixture(autouse=True)
 def reset_test_state(monkeypatch):

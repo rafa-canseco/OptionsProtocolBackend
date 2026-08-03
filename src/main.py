@@ -606,6 +606,16 @@ app.add_middleware(
     allow_origins=[o.strip() for o in settings.allowed_origins.split(",")],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Portfolio-Bounded",
+        "X-Portfolio-Watermark",
+        "X-Active-Limit",
+        "X-Active-Has-More",
+        "X-Active-Next-Cursor",
+        "X-Settled-Limit",
+        "X-Settled-Has-More",
+        "X-Settled-Next-Cursor",
+    ],
 )
 
 app.include_router(router)
