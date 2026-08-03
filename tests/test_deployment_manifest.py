@@ -260,6 +260,18 @@ def b1n419_manifest() -> dict:
             },
         ],
         "readiness": dict(META_WHEEL_READINESS),
+        "verificationEvidence": {
+            "method": "SOLC_STANDARD_JSON_RPC_EXACT_V2",
+            "compilerVersion": "0.8.24+commit.e11b9ed9",
+            "sourceRuntimeEvidenceSha256": bytes32(906),
+            "coreBuildInfoSha256": bytes32(907),
+            "libraryBuildInfoSha256": bytes32(908),
+            "coreStandardJsonInputSha256": bytes32(909),
+            "libraryStandardJsonInputSha256": bytes32(910),
+            "inventorySha256": bytes32(911),
+            "addressCount": 47,
+            "artifactCount": 25,
+        },
         "finalRoles": {
             role: address(index)
             for index, role in enumerate(
@@ -341,4 +353,47 @@ def test_b1n419_unconfirmed_dry_run_manifest_is_never_ingested() -> None:
     value["status"] = "UNCONFIRMED_REQUIRES_CANONICAL_RECEIPTS"
 
     with pytest.raises(ValueError, match="requires canonical receipts"):
+        parse_b1n419(value)
+
+
+def test_b1n419_public_explorer_verification_is_not_a_handoff_gate() -> None:
+    value = b1n419_manifest()
+    value["readiness"]["blockscoutVerificationComplete"] = False
+
+    assert parse_b1n419(value).registry["strategy_kind"] == "meta_wheel"
+
+
+def test_b1n419_requires_exact_source_runtime_verification() -> None:
+    value = b1n419_manifest()
+    value["readiness"]["exactSourceRuntimeBytecodeVerified"] = False
+
+    with pytest.raises(ValueError, match="exactSourceRuntimeBytecodeVerified"):
+        parse_b1n419(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    (
+        ("method", "PUBLIC_EXPLORER_ONLY"),
+        ("compilerVersion", "0.8.25"),
+        ("sourceRuntimeEvidenceSha256", "0x" + "00" * 32),
+        ("coreBuildInfoSha256", "0x" + "00" * 32),
+        ("libraryBuildInfoSha256", "0x" + "00" * 32),
+        ("coreStandardJsonInputSha256", "0x" + "00" * 32),
+        ("libraryStandardJsonInputSha256", "0x" + "00" * 32),
+        ("inventorySha256", "0x" + "00" * 32),
+        ("addressCount", 46),
+        ("artifactCount", 24),
+    ),
+)
+def test_b1n419_rejects_invalid_source_runtime_evidence(
+    field: str, invalid: object
+) -> None:
+    value = b1n419_manifest()
+    value["verificationEvidence"][field] = invalid
+
+    with pytest.raises(
+        ValueError,
+        match="source/runtime verification evidence|cannot be zero",
+    ):
         parse_b1n419(value)

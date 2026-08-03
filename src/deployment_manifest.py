@@ -68,7 +68,7 @@ MUTATION_FIELDS = {
 META_WHEEL_CONFIRMED_STATUS = "CONFIRMED_CANONICAL_RECEIPTS"
 META_WHEEL_READINESS = {
     "canonicalReceiptsRecorded": True,
-    "blockscoutVerificationComplete": True,
+    "exactSourceRuntimeBytecodeVerified": True,
     "bootstrapReconciled": True,
     "finalRolesReconciled": True,
     "standaloneBaselinesUnchanged": True,
@@ -311,6 +311,7 @@ def _parse_meta_wheel_deployment(
         raise ValueError("network.deploymentBlocks.fundLast must follow fundFirst")
     _require_b1n419_receipts(manifest, start_block, fund_last)
     _require_b1n419_readiness(manifest)
+    _require_b1n419_verification_evidence(manifest)
     accounting_role_account = _require_b1n419_identity(manifest)
     _require_b1n419_standalone_baselines(manifest)
     _require_b1n419_libraries(manifest)
@@ -688,6 +689,26 @@ def _require_b1n419_readiness(manifest: dict[str, Any]) -> None:
         raise ValueError(
             "B1N-419 readiness is incomplete: " + ", ".join(sorted(incomplete))
         )
+
+
+def _require_b1n419_verification_evidence(manifest: dict[str, Any]) -> None:
+    evidence = _object(manifest, "verificationEvidence")
+    if (
+        evidence.get("method") != "SOLC_STANDARD_JSON_RPC_EXACT_V2"
+        or evidence.get("compilerVersion") != "0.8.24+commit.e11b9ed9"
+        or evidence.get("addressCount") != 47
+        or evidence.get("artifactCount") != 25
+    ):
+        raise ValueError("B1N-419 source/runtime verification evidence is invalid")
+    for field in (
+        "sourceRuntimeEvidenceSha256",
+        "coreBuildInfoSha256",
+        "libraryBuildInfoSha256",
+        "coreStandardJsonInputSha256",
+        "libraryStandardJsonInputSha256",
+        "inventorySha256",
+    ):
+        _bytes32(evidence.get(field), f"verificationEvidence.{field}")
 
 
 def _require_b1n419_identity(manifest: dict[str, Any]) -> str:
