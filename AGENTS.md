@@ -74,3 +74,11 @@ Never hide a red baseline.
   the user explicitly requests it.
 - Harness policies and verification thresholds are reviewed code. Do not silently
   self-modify them while implementing a product ticket.
+
+## Legacy Agora v1 rollback
+
+- `LEGACY_AGORA_V1_ENABLED` defaults to `false`. Keep it disabled for v2.
+- Setting it to `true` temporarily restores the legacy results/leaderboard routes
+  and weekly snapshot aggregator. The `activity` API remains active independently.
+- Do not port dormant Agora modules or delete historical tables/migrations as part
+  of toggling this rollback path.
