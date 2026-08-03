@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,9 +11,64 @@ client = TestClient(app)
 VALID_ADDRESS = "0x1234567890abcdef1234567890abcdef12345678"
 
 
+class _FakeTable:
+    def __init__(self, name: str, waitlist: set[str]):
+        self.name = name
+        self.waitlist = waitlist
+        self.filters: dict[str, object] = {}
+        self.operation = "select"
+        self.row: dict[str, object] | None = None
+        self.exact_count = False
+
+    def select(self, *_args, count=None, **_kwargs):
+        self.operation = "select"
+        self.exact_count = count == "exact"
+        return self
+
+    def eq(self, column, value):
+        self.filters[column] = value
+        return self
+
+    def upsert(self, row, **_kwargs):
+        self.operation = "upsert"
+        self.row = row
+        return self
+
+    def __getattr__(self, name):
+        if name in {"gte", "gt", "or_", "order"}:
+            return lambda *_args, **_kwargs: self
+        raise AttributeError(name)
+
+    def execute(self):
+        if self.name != "waitlist":
+            return SimpleNamespace(data=[], count=0)
+
+        if self.operation == "upsert":
+            email = str((self.row or {})["email"]).lower()
+            self.waitlist.add(email)
+            return SimpleNamespace(data=[{"email": email}], count=None)
+
+        if self.exact_count:
+            return SimpleNamespace(data=[], count=len(self.waitlist))
+
+        email = str(self.filters.get("email", "")).lower()
+        data = [{"id": email}] if email in self.waitlist else []
+        return SimpleNamespace(data=data, count=None)
+
+
+class _FakeDatabase:
+    def __init__(self):
+        self.waitlist: set[str] = set()
+
+    def table(self, name: str):
+        return _FakeTable(name, self.waitlist)
+
+
 @pytest.fixture(autouse=True)
-def reset_rate_limit_state():
-    """Clear in-memory rate-limit dicts between tests to prevent state leakage."""
+def reset_test_state(monkeypatch):
+    """Isolate in-memory state and external persistence between tests."""
+    fake_database = _FakeDatabase()
+    monkeypatch.setattr(routes_module, "get_client", lambda: fake_database)
     routes_module._waitlist_hits.clear()
     routes_module._read_hits.clear()
     routes_module._prices_cache.clear()
@@ -461,9 +518,7 @@ def test_nav_reporter_requires_dedicated_submitter_key(monkeypatch):
         "fund_nav_reporter_private_keys",
         "0x" + f"{1:064x}",
     )
-    monkeypatch.setattr(
-        main_module.settings, "fund_nav_submitter_private_key", ""
-    )
+    monkeypatch.setattr(main_module.settings, "fund_nav_submitter_private_key", "")
 
     with pytest.raises(RuntimeError, match="FUND_NAV_SUBMITTER_PRIVATE_KEY"):
         with TestClient(main_module.app):
@@ -646,9 +701,7 @@ def test_covered_call_fair_value_startup_gates_precede_tasks(
 def test_csp_and_covered_call_observer_key_sets_must_be_separate(monkeypatch):
     import src.main as main_module
 
-    observer_keys = ",".join(
-        ["0x" + f"{5:064x}", "0x" + f"{6:064x}"]
-    )
+    observer_keys = ",".join(["0x" + f"{5:064x}", "0x" + f"{6:064x}"])
     monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
     monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
     monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)

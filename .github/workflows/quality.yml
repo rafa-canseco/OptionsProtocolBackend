@@ -1,0 +1,26 @@
+name: Backend quality
+
+on:
+  pull_request:
+  push:
+    branches: [staging]
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.4.17"
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --frozen --dev
+      - name: Fast deterministic checks
+        run: ./scripts/harness-check.sh fast
+      - name: Full deterministic checks
+        run: ./scripts/harness-check.sh full

@@ -33,9 +33,7 @@ def get_fund_service() -> FundService:
     return _service
 
 
-def _headers(
-    model, private: bool = False, revalidate: bool = False
-) -> dict[str, str]:
+def _headers(model, private: bool = False, revalidate: bool = False) -> dict[str, str]:
     payload = model.model_dump_json(by_alias=True).encode()
     visibility = "private" if private else "public"
     cache_control = (

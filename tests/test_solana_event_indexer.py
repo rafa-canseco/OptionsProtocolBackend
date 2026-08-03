@@ -5,12 +5,8 @@ import pytest
 from src.api import mm_ws
 from src.bots import solana_event_indexer as sei
 
-_EXECUTE_DATA = (
-    "SofnBahqwnUBsQB2Umg4/K/KmFnUnc10sAKnNPDz+lSGrO1qA1dM4k65tOsUGdaebnZpVyODLISsSIwrQLOSBjasbaVmaKAzrYSduniptY3lTtWgBMK2fs8v0OsSevrprOUH/OHeFuZh/3IKAAAAAGj8/AIAAAAAdJkeAAAAAAC2hgEAAAAAAA=="
-)
-_DEPOSIT_DATA = (
-    "9D5NC4dwPWCkR7tWL7/wiqpHkS0EF3T9Av+d6TezAtS4UllaJEiofAEAAAAAAAAAj3jUjO+NvpGhwQD4wjUGsG10/10zRLyg2hXuG0LXnQF/v3YIAAAAAA=="
-)
+_EXECUTE_DATA = "SofnBahqwnUBsQB2Umg4/K/KmFnUnc10sAKnNPDz+lSGrO1qA1dM4k65tOsUGdaebnZpVyODLISsSIwrQLOSBjasbaVmaKAzrYSduniptY3lTtWgBMK2fs8v0OsSevrprOUH/OHeFuZh/3IKAAAAAGj8/AIAAAAAdJkeAAAAAAC2hgEAAAAAAA=="
+_DEPOSIT_DATA = "9D5NC4dwPWCkR7tWL7/wiqpHkS0EF3T9Av+d6TezAtS4UllaJEiofAEAAAAAAAAAj3jUjO+NvpGhwQD4wjUGsG10/10zRLyg2hXuG0LXnQF/v3YIAAAAAA=="
 
 
 def test_parse_log_payloads_decodes_real_execute_order_payload():

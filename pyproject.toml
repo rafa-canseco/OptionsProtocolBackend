@@ -26,16 +26,25 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-xprocess>=1.0.2",
+    "ruff==0.15.2",
 ]
 
 [tool.pytest.ini_options]
 # anchorpy's pytest plugin has a broken import (pytest_xprocess vs xprocess)
 # Disable it since we don't use anchorpy fixtures in tests.
 addopts = "-p no:pytest_anchorpy"
+markers = [
+    "integration: requires explicitly declared local integration services",
+    "network: requires explicitly declared external network access",
+]
+
+[tool.ruff]
+target-version = "py311"
 
 [tool.uv]
 dev-dependencies = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-xprocess>=1.0.2",
+    "ruff==0.15.2",
 ]

@@ -312,6 +312,12 @@ class TestGetCapacity:
 
 
 class TestPricesCapacityIntegration:
+    @pytest.fixture(autouse=True)
+    def mock_spot_price(self):
+        """Keep these API tests independent from RPC availability."""
+        with patch("src.pricing.chainlink.get_asset_price", return_value=(2400.0, 0)):
+            yield
+
     def test_prices_proceeds_when_capacity_available(self, mock_db):
         """When at least one MM is active, /prices proceeds normally."""
         now = _now_iso()

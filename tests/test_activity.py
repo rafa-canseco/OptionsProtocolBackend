@@ -40,7 +40,6 @@ def _make_row(
     }
 
 
-
 def _mock_db_in(rows: list[dict]):
     """Return a mock get_client() that yields the given rows via .in_() chain."""
     mock_client = MagicMock()
@@ -194,7 +193,9 @@ def test_also_param_aggregates_two_addresses():
 
 def test_also_deduplicate_by_id():
     """Same id from both addresses is counted once, positionCount=1."""
-    shared_row = _make_row(collateral="1000000", net_premium="50000", is_put=True, id="shared")
+    shared_row = _make_row(
+        collateral="1000000", net_premium="50000", is_put=True, id="shared"
+    )
     rows = [shared_row, shared_row]  # same row returned twice (both addresses match)
     with patch("src.api.activity.get_client", return_value=_mock_db_in(rows)):
         resp = client.get(f"/activity/{VALID_ADDRESS}?also={ALSO_ADDRESS}")

@@ -209,7 +209,9 @@ def test_link_message_returns_409_when_wallet_belongs_to_another_account(fake_db
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Wallet already belongs to another b1nary account"
+    assert (
+        response.json()["detail"] == "Wallet already belongs to another b1nary account"
+    )
 
 
 def test_link_trusted_wallet_allows_smart_without_signature(fake_db):

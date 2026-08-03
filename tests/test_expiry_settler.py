@@ -140,7 +140,9 @@ class TestBaseSettlementQueries:
 
         with (
             patch("src.bots.expiry_settler.get_expired_unsettled", return_value=[]),
-            patch("src.bots.expiry_settler.get_pending_phase2", return_value=[recovered]),
+            patch(
+                "src.bots.expiry_settler.get_pending_phase2", return_value=[recovered]
+            ),
             patch("src.bots.expiry_settler._ensure_expiry_prices_set"),
             patch("src.bots.expiry_settler.get_batch_settler"),
             patch("src.bots.expiry_settler.get_operator_account"),

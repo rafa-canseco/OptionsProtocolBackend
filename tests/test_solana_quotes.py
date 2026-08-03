@@ -142,9 +142,7 @@ class TestSolanaQuoteSubmission:
         first_eq = delete_chain.eq
         assert first_eq.call_args_list[0].args == ("mm_address", SOL_MAKER)
         assert first_eq.return_value.eq.call_args.args == ("chain", "solana")
-        stale_filter = (
-            first_eq.return_value.eq.return_value.or_.call_args.args[0]
-        )
+        stale_filter = first_eq.return_value.eq.return_value.or_.call_args.args[0]
         assert "is_active.eq.false" in stale_filter
         assert "deadline.lt." in stale_filter
         assert "expiry.lt." in stale_filter
