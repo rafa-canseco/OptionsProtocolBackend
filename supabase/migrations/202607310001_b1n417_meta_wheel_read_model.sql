@@ -40,12 +40,6 @@ ALTER TABLE v2_fund_registry
         )
     );
 
-ALTER TABLE v2_fund_state
-    DROP CONSTRAINT IF EXISTS v2_fund_state_strategy_kind_check;
-ALTER TABLE v2_fund_state
-    ADD CONSTRAINT v2_fund_state_strategy_kind_check
-        CHECK (strategy_kind IN ('csp', 'covered_call', 'meta_wheel'));
-
 ALTER TABLE v2_fund_contracts
     DROP CONSTRAINT IF EXISTS v2_fund_contracts_contract_role_check,
     DROP CONSTRAINT IF EXISTS v2_fund_contracts_proxy_implementation_check;

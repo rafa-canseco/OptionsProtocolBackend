@@ -40,6 +40,7 @@ def test_meta_wheel_registry_binds_only_its_canonical_accounting_role() -> None:
     assert "AND accounting_role_account IS NULL" in sql
     assert "Meta Wheel handoff requires its canonical accounting role" in sql
     assert "Standalone handoff cannot bind a Meta Wheel accounting role" in sql
+    assert "v2_fund_state_strategy_kind_check" not in sql
 
 
 def test_meta_wheel_producer_upserts_are_idempotent_and_immutable() -> None:
