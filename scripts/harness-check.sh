@@ -196,7 +196,7 @@ if [[ "$mode" == "full" && "$has_external_tests" == true ]]; then
     "$runtime_dir/docker"
   integration_env=(
     env -i
-    "PATH=$repo_root/.venv/bin:$(dirname "$uv_bin"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    "PATH=$repo_root/.venv/bin:$(dirname "$uv_bin"):/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     "HOME=$runtime_dir/integration-home"
     "TMPDIR=$runtime_dir/integration-tmp"
     "XDG_CACHE_HOME=$runtime_dir/integration-cache"

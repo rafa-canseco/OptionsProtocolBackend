@@ -39,6 +39,9 @@ def _fixture_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
         "exit 0\n"
     )
     fake_uv.chmod(0o755)
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_docker.chmod(0o755)
     return repo, scripts / "harness-check.sh", log
 
 
@@ -65,6 +68,10 @@ def _add_integration_runner(repo: Path, tmp_path: Path, exit_code: int) -> Path:
         'if [[ -n "${CALLER_SECRET_CANARY:-}" ]]; then exit 97; fi\n'
         'if [[ "${HARNESS_INTEGRATION:-}" != 1 ]]; then exit 98; fi\n'
         'if [[ ! -d "${DOCKER_CONFIG:-}" ]]; then exit 99; fi\n'
+        "command -v uv >/dev/null || exit 100\n"
+        "command -v docker >/dev/null || exit 101\n"
+        'case ":$PATH:" in *":/Applications/Docker.app/Contents/Resources/bin:"*) ;; '
+        "*) exit 102 ;; esac\n"
         f"printf 'executed\\n' >> \"{runner_log!s}\"\n"
         f"exit {exit_code}\n"
     )

@@ -55,9 +55,10 @@ Never hide a red baseline.
   `scripts/harness-integration.sh` after unit tests pass. That entrypoint owns its
   service/configuration preflight and generates ephemeral test secrets internally.
   It runs under a separate `env -i` allowlist with temporary HOME, cache, Docker
-  config, and only harness-defined non-sensitive flags; caller/staging credentials
-  are never forwarded. If it is absent, `full` exits with an explicit prerequisite
-  instead of attempting undeclared services.
+  config, fixed local-tool paths (including Docker Desktop's standard macOS path),
+  and only harness-defined non-sensitive flags; caller/staging credentials are never
+  forwarded. If it is absent, `full` exits with an explicit prerequisite instead of
+  attempting undeclared services.
 - Never claim completion from prose alone. Record exact commands and exit codes in
   the workspace verification evidence.
 
