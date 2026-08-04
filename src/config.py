@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
+    position_cursor_secret: str = ""
     rpc_url: str = ""
     tokenized_fund_rpc_url: str = ""
     wss_rpc_url: str = ""  # WSS RPC — enables eth_subscribe when set

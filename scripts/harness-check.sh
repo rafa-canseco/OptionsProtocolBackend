@@ -71,6 +71,7 @@ clean_env=(
   "SUPABASE_URL=http://127.0.0.1:9"
   "SUPABASE_ANON_KEY=offline-placeholder"
   "SUPABASE_SERVICE_ROLE_KEY=offline-placeholder"
+  "POSITION_CURSOR_SECRET=offline-position-cursor-placeholder"
   "RPC_URL=http://127.0.0.1:9"
   "SOLANA_USDC_MINT=11111111111111111111111111111111"
   "TOKENIZED_FUND_INDEXER_ENABLED=false"
