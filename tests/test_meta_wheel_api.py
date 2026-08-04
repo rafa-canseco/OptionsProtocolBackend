@@ -167,9 +167,7 @@ class WheelRepository:
             "observed_at": "2099-07-31T00:00:00Z",
         }
 
-    def activity(
-        self, _chain, _fund, _cursor, _limit
-    ) -> list[dict[str, Any]]:
+    def activity(self, _chain, _fund, _cursor, _limit) -> list[dict[str, Any]]:
         return []
 
 
@@ -199,7 +197,9 @@ def test_meta_wheel_is_third_product_with_compact_usdc_summary() -> None:
     assert summary.actions.deposit.available is True
 
 
-def test_meta_wheel_user_redemption_remains_usdc_and_fails_closed_on_stale_child() -> None:
+def test_meta_wheel_user_redemption_remains_usdc_and_fails_closed_on_stale_child() -> (
+    None
+):
     repository = WheelRepository()
     service = FundService(repository)
     user = service.position(

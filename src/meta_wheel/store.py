@@ -41,13 +41,9 @@ def nav_snapshot_row(
         "pending_csp_usdc": str(inputs.pending_csp_usdc),
         "redemption_reserved_usdc": str(inputs.redemption_reserved_usdc),
         "transition_weth": str(inputs.transition_weth),
-        "transition_weth_value_assets": str(
-            result.transition_weth_value_assets
-        ),
+        "transition_weth_value_assets": str(result.transition_weth_value_assets),
         "child_csp_value_assets": str(result.child_csp_value_assets),
-        "child_covered_call_value_assets": str(
-            result.child_covered_call_value_assets
-        ),
+        "child_covered_call_value_assets": str(result.child_covered_call_value_assets),
         "parent_exit_cost_usdc": str(inputs.parent_exit_cost_usdc),
         "weth_spot_price_8": str(inputs.weth_spot_price_8),
         "stress_net_assets": (

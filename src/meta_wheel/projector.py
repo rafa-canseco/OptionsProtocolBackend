@@ -51,9 +51,7 @@ class MetaWheelProjection:
     lots: dict[int, dict[str, Any]] = field(default_factory=dict)
     handoffs: dict[str, dict[str, Any]] = field(default_factory=dict)
     _floor_buffer_observed: bool = False
-    _pending_premium_positions: dict[int, tuple[str, int]] = field(
-        default_factory=dict
-    )
+    _pending_premium_positions: dict[int, tuple[str, int]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.fund_address = normalize_address(self.fund_address)
@@ -156,9 +154,7 @@ class MetaWheelProjection:
     def next_action(self) -> str:
         if self.state["paused"]:
             return "paused"
-        active = [
-            row for row in self.tranches.values() if row["state"] != "closed"
-        ]
+        active = [row for row in self.tranches.values() if row["state"] != "closed"]
         if not active:
             return "allocate_csp_lane" if self.state["pending_csp_usdc"] else "wait"
         actions = {
@@ -201,9 +197,7 @@ class MetaWheelProjection:
 
     def _lane_removed(self, event: FundEvent) -> None:
         child_vault, lane = self._lane(event.args["lane"])
-        if lane["lane_type"] != _enum(
-            LANE_KINDS, event.args["kind"], "lane kind"
-        ):
+        if lane["lane_type"] != _enum(LANE_KINDS, event.args["kind"], "lane kind"):
             raise ValueError("Meta Wheel removed lane kind changed")
         if any(
             row["child_vault"] == child_vault and row["child_shares"]
@@ -325,7 +319,11 @@ class MetaWheelProjection:
             if leg == "call_open"
             else None
         )
-        if expected is None or tranche["state"] != expected[0] or lane["lane_type"] != expected[1]:
+        if (
+            expected is None
+            or tranche["state"] != expected[0]
+            or lane["lane_type"] != expected[1]
+        ):
             raise ValueError("Invalid Meta Wheel child-lane open transition")
         shares = integer(args["childShares"])
         if shares <= 0:
@@ -368,9 +366,7 @@ class MetaWheelProjection:
         tranche = self._tranche(args["trancheId"])
         child_vault, lane = self._lane(args["lane"])
         leg = _enum(TRANCHE_LEGS, args["leg"], "tranche leg")
-        settlement = _enum(
-            SETTLEMENT_KINDS, args["settlementKind"], "settlement kind"
-        )
+        settlement = _enum(SETTLEMENT_KINDS, args["settlementKind"], "settlement kind")
         if child_vault != tranche["child_vault"]:
             raise ValueError("Meta Wheel settlement child lane changed")
         valid = (
@@ -408,9 +404,7 @@ class MetaWheelProjection:
             raise ValueError("Meta Wheel handoff child lane changed")
         if integer(args["childSharesBurned"]) != integer(tranche["child_shares"]):
             raise ValueError("Meta Wheel handoff did not burn exact child shares")
-        settlement = _enum(
-            SETTLEMENT_KINDS, args["settlementKind"], "settlement kind"
-        )
+        settlement = _enum(SETTLEMENT_KINDS, args["settlementKind"], "settlement kind")
         usdc = integer(args["usdcAmount"])
         weth = integer(args["wethAmount"])
         if lane["lane_type"] == "csp":
@@ -440,9 +434,7 @@ class MetaWheelProjection:
             state="weth_transition" if weth else "pending_csp",
             state_nonce=integer(tranche["state_nonce"]) + 1,
             state_hash=None,
-            pending_assets=(
-                0 if weth else integer(tranche["pending_assets"]) + usdc
-            ),
+            pending_assets=(0 if weth else integer(tranche["pending_assets"]) + usdc),
             child_shares=0,
             child_execution_state_hash=None,
             last_event_block=event.block_number,
@@ -544,9 +536,7 @@ class MetaWheelProjection:
 
     def _redemption_reserve_changed(self, event: FundEvent) -> None:
         self.state.update(
-            redemption_reserved_usdc=integer(
-                event.args["reservedRedemptionUsdc"]
-            ),
+            redemption_reserved_usdc=integer(event.args["reservedRedemptionUsdc"]),
             pending_csp_usdc=integer(event.args["pendingCspUsdc"]),
         )
 
@@ -554,7 +544,9 @@ class MetaWheelProjection:
         args = event.args
         tranche = self._tranche(args["trancheId"])
         if tranche["state"] != "pending_csp":
-            raise ValueError("Meta Wheel redemption reserved from a non-pending tranche")
+            raise ValueError(
+                "Meta Wheel redemption reserved from a non-pending tranche"
+            )
         amount = integer(args["amount"])
         principal = integer(args["principalReserved"])
         remaining = integer(args["remainingTrancheUsdc"])
@@ -563,8 +555,7 @@ class MetaWheelProjection:
             amount <= 0
             or principal < 0
             or remaining != integer(tranche["pending_assets"]) - amount
-            or remaining_principal
-            != integer(tranche["principal_assets"]) - principal
+            or remaining_principal != integer(tranche["principal_assets"]) - principal
             or remaining < 0
             or remaining_principal < 0
         ):
@@ -627,9 +618,9 @@ class MetaWheelProjection:
         pending = integer(args["pendingConsumed"])
         if amount <= 0 or amount != reserved + pending:
             raise ValueError("Meta Wheel returned-USDC components do not reconcile")
-        if reserved > integer(self.state["redemption_reserved_usdc"]) or pending > integer(
-            self.state["pending_csp_usdc"]
-        ):
+        if reserved > integer(
+            self.state["redemption_reserved_usdc"]
+        ) or pending > integer(self.state["pending_csp_usdc"]):
             raise ValueError("Meta Wheel returned-USDC accounting underflow")
         principal_released = _principal_share(
             integer(self.state["reserved_principal_usdc"]),
@@ -669,12 +660,12 @@ class MetaWheelProjection:
         child_vault, lane = self._lane(event.args["lane"])
         position_id = integer(event.args["childPositionId"])
         if normalize_address(event.contract_address) != child_vault:
-            raise ValueError("Meta Wheel premium does not match the active child position")
+            raise ValueError(
+                "Meta Wheel premium does not match the active child position"
+            )
         if tranche["child_vault"] is None:
             expected_state = (
-                "pending_csp"
-                if lane["lane_type"] == "csp"
-                else "weth_transition"
+                "pending_csp" if lane["lane_type"] == "csp" else "weth_transition"
             )
             if tranche["state"] != expected_state or position_id <= 0:
                 raise ValueError(
@@ -686,11 +677,12 @@ class MetaWheelProjection:
                 child_vault,
                 position_id,
             )
-        elif (
-            child_vault != tranche["child_vault"]
-            or position_id != integer(tranche["child_position_id"])
+        elif child_vault != tranche["child_vault"] or position_id != integer(
+            tranche["child_position_id"]
         ):
-            raise ValueError("Meta Wheel premium does not match the active child position")
+            raise ValueError(
+                "Meta Wheel premium does not match the active child position"
+            )
         gross = integer(event.args["grossPremiumAssets"])
         fee = integer(event.args["protocolFeeAssets"])
         net = integer(event.args["netPremiumAssets"])
@@ -749,7 +741,9 @@ def _principal_share(principal: int, total_assets: int, assets: int) -> int:
 
 
 def _db_value(value: Any) -> Any:
-    return str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+    return (
+        str(value) if isinstance(value, int) and not isinstance(value, bool) else value
+    )
 
 
 def _db_row(row: dict[str, Any]) -> dict[str, Any]:

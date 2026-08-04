@@ -39,9 +39,7 @@ def test_managed_operation_discriminants_and_outer_manager_calldata() -> None:
 
 
 def test_remove_and_register_lane_use_configuration_class() -> None:
-    remove = encode_managed_operation(
-        COORDINATOR, ManagedOperation.REMOVE_LANE, LANE
-    )
+    remove = encode_managed_operation(COORDINATOR, ManagedOperation.REMOVE_LANE, LANE)
     operation, arguments = decode(["uint8", "bytes"], remove.data)
     (decoded_lane,) = decode(["address"], arguments)
 
