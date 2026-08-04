@@ -10,16 +10,16 @@ uv_bin="$(command -v uv || true)"
 postgres_image="postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
 postgrest_image="postgrest/postgrest:v12.2.12@sha256:5f4ce744539bbba786b4e24dbbd95bdb2a956dcf568c5374995a0ff4a68f5bd2"
 run_suffix="$$"
-network_name="b1n430-network-$run_suffix"
-postgres_name="b1n430-postgres-$run_suffix"
-postgrest_name="b1n430-postgrest-$run_suffix"
+network_name="b1n432-network-$run_suffix"
+postgres_name="b1n432-postgres-$run_suffix"
+postgrest_name="b1n432-postgrest-$run_suffix"
 
 if [[ -z "$uv_bin" || ! -x "$python_bin" ]]; then
-  echo "b1n430 integration prerequisite missing: uv environment" >&2
+  echo "b1n432 integration prerequisite missing: uv environment" >&2
   exit 2
 fi
 if ! command -v docker >/dev/null 2>&1; then
-  echo "b1n430 integration prerequisite missing: docker" >&2
+  echo "b1n432 integration prerequisite missing: docker" >&2
   exit 2
 fi
 
@@ -95,7 +95,7 @@ for _attempt in $(seq 1 60); do
   sleep 1
 done
 if [[ "$postgres_ready" != true ]]; then
-  echo "b1n430 integration prerequisite failed: postgres did not become ready" >&2
+  echo "b1n432 integration prerequisite failed: postgres did not become ready" >&2
   exit 2
 fi
 
@@ -104,22 +104,22 @@ docker exec -i "$postgres_name" psql \
   --set "authenticator_password=$authenticator_password" \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n430_postgrest_roles.sql" >/dev/null
+  < "$repo_root/tests/integration/b1n432_postgrest_roles.sql" >/dev/null
 docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n430_postgrest_schema.sql" >/dev/null
+  < "$repo_root/tests/integration/b1n432_postgrest_schema.sql" >/dev/null
 docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
   --dbname options \
-  < "$repo_root/supabase/migrations/202608030002_b1n430_bounded_reads.sql" >/dev/null
+  < "$repo_root/supabase/migrations/202608030003_b1n432_activity_yield_reads.sql" >/dev/null
 docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n430_postgrest_fixture.sql" >/dev/null
+  < "$repo_root/tests/integration/b1n432_postgrest_fixture.sql" >/dev/null
 
 docker run --detach --rm \
   --name "$postgrest_name" \
@@ -134,7 +134,7 @@ docker run --detach --rm \
 
 postgrest_port="$(docker port "$postgrest_name" 3000/tcp | sed -n 's/.*://p' | head -1)"
 if [[ -z "$postgrest_port" ]]; then
-  echo "b1n430 integration prerequisite failed: could not resolve PostgREST port" >&2
+  echo "b1n432 integration prerequisite failed: could not resolve PostgREST port" >&2
   exit 2
 fi
 postgrest_url="http://127.0.0.1:$postgrest_port"
@@ -148,11 +148,12 @@ for _attempt in $(seq 1 60); do
   sleep 1
 done
 if [[ "$postgrest_ready" != true ]]; then
-  echo "b1n430 integration prerequisite failed: PostgREST did not become ready" >&2
+  echo "b1n432 integration prerequisite failed: PostgREST did not become ready" >&2
   docker logs "$postgrest_name" >&2 || true
   exit 2
 fi
 
+integration_started_at="$(date +%s)"
 env -i \
   "PATH=$repo_root/.venv/bin:$(dirname "$uv_bin"):/usr/local/bin:/usr/bin:/bin" \
   "HOME=${HOME}" \
@@ -167,10 +168,12 @@ env -i \
   "SUPABASE_ANON_KEY=local-integration-placeholder" \
   "SUPABASE_SERVICE_ROLE_KEY=local-integration-placeholder" \
   "POSITION_CURSOR_SECRET=$cursor_secret" \
-  "B1N430_POSTGREST_URL=$postgrest_url" \
-  "B1N430_ANON_TOKEN=$anon_token" \
-  "B1N430_AUTHENTICATED_TOKEN=$authenticated_token" \
-  "B1N430_SERVICE_TOKEN=$service_token" \
+  "B1N432_POSTGREST_URL=$postgrest_url" \
+  "B1N432_ANON_TOKEN=$anon_token" \
+  "B1N432_AUTHENTICATED_TOKEN=$authenticated_token" \
+  "B1N432_SERVICE_TOKEN=$service_token" \
   "$uv_bin" run --frozen --offline pytest \
-    -q -m integration \
-    tests/integration/test_b1n430_bounded_reads_postgrest.py
+    -q -s -m integration \
+    tests/integration/test_b1n432_activity_yield_postgrest.py
+integration_finished_at="$(date +%s)"
+echo "B1N-432 integration wall duration_seconds=$((integration_finished_at - integration_started_at))"

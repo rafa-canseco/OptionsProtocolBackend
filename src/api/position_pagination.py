@@ -107,7 +107,7 @@ def _valid_wallet_fingerprint(value: Any) -> bool:
 
 def _filter_hash(
     subject: PositionSubject,
-    stream: PositionStream,
+    stream: str,
     changed_after: str | None,
 ) -> str:
     value = {
@@ -134,12 +134,13 @@ def normalize_watermark(value: datetime | str | None) -> str | None:
 def encode_position_cursor(
     *,
     subject: PositionSubject,
-    stream: PositionStream,
+    stream: str,
     changed_after: str | None,
     key_at: str,
     key_id: str,
     watermark: str,
     wallet_fingerprint: str,
+    provenance: dict[str, Any] | None = None,
 ) -> str:
     try:
         normalized_key_at = normalize_watermark(key_at)
@@ -158,7 +159,14 @@ def encode_position_cursor(
         "s": wallet_fingerprint,
         "w": normalized_watermark,
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    if provenance is not None:
+        payload["p"] = provenance
+    try:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    except (TypeError, ValueError) as exc:
+        raise PositionCursorError("Invalid position cursor provenance") from exc
+    if len(encoded) > 2048:
+        raise PositionCursorError("Position cursor provenance is too large")
     signature = hmac.new(_signing_key(), encoded, hashlib.sha256).digest()
     return f"v{CURSOR_VERSION}.{_urlsafe_encode(encoded)}.{_urlsafe_encode(signature)}"
 
@@ -167,10 +175,12 @@ def decode_position_cursor(
     token: str,
     *,
     subject: PositionSubject,
-    stream: PositionStream,
+    stream: str,
     changed_after: str | None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     try:
+        if len(token) > 4096:
+            raise PositionCursorError("Invalid position cursor")
         prefix, encoded_payload, encoded_signature = token.split(".", 2)
         payload_bytes = _urlsafe_decode(encoded_payload)
         signature = _urlsafe_decode(encoded_signature)
@@ -198,12 +208,15 @@ def decode_position_cursor(
         raise
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise PositionCursorError("Invalid position cursor") from exc
-    return {
+    decoded = {
         "key_at": key[0],
         "key_id": key[1],
         "watermark": payload["w"],
         "wallet_fingerprint": payload["s"],
     }
+    if "p" in payload:
+        decoded["provenance"] = payload["p"]
+    return decoded
 
 
 def _rpc_payload(result: Any) -> dict[str, Any]:
