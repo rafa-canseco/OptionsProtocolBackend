@@ -4,10 +4,14 @@ from datetime import datetime, timezone
 from itertools import count
 from unittest.mock import MagicMock, patch
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.main import app
+from src.api.leaderboard import router as leaderboard_router
 
+# Exercise the retained compatibility router through an explicit opt-in app.
+app = FastAPI()
+app.include_router(leaderboard_router)
 client = TestClient(app)
 
 _id_counter = count(1)
