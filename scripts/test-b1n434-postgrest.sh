@@ -10,16 +10,16 @@ uv_bin="$(command -v uv || true)"
 postgres_image="postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94"
 postgrest_image="postgrest/postgrest:v12.2.12@sha256:5f4ce744539bbba786b4e24dbbd95bdb2a956dcf568c5374995a0ff4a68f5bd2"
 run_suffix="$$"
-network_name="b1n431-network-$run_suffix"
-postgres_name="b1n431-postgres-$run_suffix"
-postgrest_name="b1n431-postgrest-$run_suffix"
+network_name="b1n434-network-$run_suffix"
+postgres_name="b1n434-postgres-$run_suffix"
+postgrest_name="b1n434-postgrest-$run_suffix"
 
 if [[ -z "$uv_bin" || ! -x "$python_bin" ]]; then
-  echo "b1n431 integration prerequisite missing: uv environment" >&2
+  echo "b1n434 integration prerequisite missing: uv environment" >&2
   exit 2
 fi
 if ! command -v docker >/dev/null 2>&1; then
-  echo "b1n431 integration prerequisite missing: docker" >&2
+  echo "b1n434 integration prerequisite missing: docker" >&2
   exit 2
 fi
 
@@ -56,12 +56,12 @@ secret, role = sys.argv[1:]
 header = encode({"alg": "HS256", "typ": "JWT"})
 payload = encode({"role": role, "exp": int(time.time()) + 3600})
 signature = hmac.new(
-    secret.encode(),
-    f"{header}.{payload}".encode(),
-    hashlib.sha256,
+    secret.encode(), f"{header}.{payload}".encode(), hashlib.sha256
 ).digest()
-encoded_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
-print(f"{header}.{payload}.{encoded_signature}")
+print(
+    f"{header}.{payload}."
+    f"{base64.urlsafe_b64encode(signature).decode().rstrip('=')}"
+)
 PY
 }
 
@@ -94,7 +94,7 @@ for _attempt in $(seq 1 60); do
   sleep 1
 done
 if [[ "$postgres_ready" != true ]]; then
-  echo "b1n431 integration prerequisite failed: postgres did not become ready" >&2
+  echo "b1n434 integration prerequisite failed: postgres did not become ready" >&2
   exit 2
 fi
 
@@ -103,12 +103,12 @@ docker exec -i "$postgres_name" psql \
   --set "authenticator_password=$authenticator_password" \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n431_postgrest_roles.sql" >/dev/null
+  < "$repo_root/tests/integration/b1n434_postgrest_roles.sql" >/dev/null
 docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n431_postgrest_schema.sql" >/dev/null
+  < "$repo_root/tests/integration/b1n434_postgrest_schema.sql" >/dev/null
 docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
@@ -118,7 +118,12 @@ docker exec -i "$postgres_name" psql \
   --set ON_ERROR_STOP=1 \
   --username postgres \
   --dbname options \
-  < "$repo_root/tests/integration/b1n431_leaderboard_fixture.sql" >/dev/null
+  < "$repo_root/supabase/migrations/202608030005_b1n434_weekly_aggregate.sql" >/dev/null
+docker exec -i "$postgres_name" psql \
+  --set ON_ERROR_STOP=1 \
+  --username postgres \
+  --dbname options \
+  < "$repo_root/tests/integration/b1n434_weekly_fixture.sql" >/dev/null
 
 docker run --detach --rm \
   --name "$postgrest_name" \
@@ -133,7 +138,7 @@ docker run --detach --rm \
 
 postgrest_port="$(docker port "$postgrest_name" 3000/tcp | sed -n 's/.*://p' | head -1)"
 if [[ -z "$postgrest_port" ]]; then
-  echo "b1n431 integration prerequisite failed: could not resolve PostgREST port" >&2
+  echo "b1n434 integration prerequisite failed: could not resolve PostgREST port" >&2
   exit 2
 fi
 postgrest_url="http://127.0.0.1:$postgrest_port"
@@ -147,7 +152,7 @@ for _attempt in $(seq 1 60); do
   sleep 1
 done
 if [[ "$postgrest_ready" != true ]]; then
-  echo "b1n431 integration prerequisite failed: PostgREST did not become ready" >&2
+  echo "b1n434 integration prerequisite failed: PostgREST did not become ready" >&2
   docker logs "$postgrest_name" >&2 || true
   exit 2
 fi
@@ -166,12 +171,12 @@ env -i \
   "SUPABASE_URL=http://127.0.0.1:9" \
   "SUPABASE_ANON_KEY=local-integration-placeholder" \
   "SUPABASE_SERVICE_ROLE_KEY=local-integration-placeholder" \
-  "B1N431_POSTGREST_URL=$postgrest_url" \
-  "B1N431_ANON_TOKEN=$anon_token" \
-  "B1N431_AUTHENTICATED_TOKEN=$authenticated_token" \
-  "B1N431_SERVICE_TOKEN=$service_token" \
+  "B1N434_POSTGREST_URL=$postgrest_url" \
+  "B1N434_ANON_TOKEN=$anon_token" \
+  "B1N434_AUTHENTICATED_TOKEN=$authenticated_token" \
+  "B1N434_SERVICE_TOKEN=$service_token" \
   "$uv_bin" run --frozen --offline pytest \
     -q -s -m integration \
-    tests/integration/test_b1n431_leaderboard_postgrest.py
+    tests/integration/test_b1n434_weekly_postgrest.py
 integration_finished_at="$(date +%s)"
-echo "B1N-431 integration wall duration_seconds=$((integration_finished_at - integration_started_at))"
+echo "B1N-434 integration wall duration_seconds=$((integration_finished_at - integration_started_at))"
