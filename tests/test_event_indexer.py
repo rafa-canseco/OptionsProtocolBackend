@@ -638,10 +638,12 @@ def test_update_delivery_events_idempotent_on_reindex():
     assert fake.updates == []  # no writes
 
 
-def test_update_delivery_events_no_unmarked_row_logs_warning(caplog):
-    """If the bot already wrote per-vault hashes and the indexer sees a NEW
-    event whose tx isn't in DB and no NULL row remains, log a warning rather
-    than silently overwriting another vault's correct hash."""
+def test_update_delivery_events_no_unmarked_row_logs_error(caplog):
+    """If a real on-chain delivery has no DB row to claim, escalate to
+    ERROR with full event context so on-call can disambiguate "benign
+    bot already filled" from "silent loss — money out, DB blind".
+    Lower severities would let a real corruption hide in noise.
+    """
     rows = [
         {
             "id": "a",
@@ -652,19 +654,27 @@ def test_update_delivery_events_no_unmarked_row_logs_warning(caplog):
         },
     ]
     fake = _FakeTable(rows)
-    events = [_delivery_event("0xu", "0xt", "0xtxOTHER", contra="100")]
+    events = [
+        _delivery_event("0xu", "0xt", "0xtxOTHER", contra="100", asset="usdc"),
+    ]
 
     import logging
 
     with (
         patch("src.bots.event_indexer.get_client", return_value=fake),
-        caplog.at_level(logging.WARNING, logger="src.bots.event_indexer"),
+        caplog.at_level(logging.ERROR, logger="src.bots.event_indexer"),
     ):
         n = event_indexer._update_delivery_events(events)
 
     assert n == 0
     assert fake.updates == []
-    assert any("matched no unmarked DB row" in r.getMessage() for r in caplog.records)
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    msg = error_records[0].getMessage()
+    assert "matched no unmarked DB row" in msg
+    assert "0xu" in msg
+    assert "0xtxOTHER" in msg
+    assert "100" in msg  # contraAmount surfaced for triage
 
 
 def test_update_delivery_events_partial_pre_fill_claims_remaining():

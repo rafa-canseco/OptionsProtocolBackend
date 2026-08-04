@@ -7,9 +7,15 @@ For each group of (user, otoken) where ALL ITM physical rows share one
 delivery_tx_hash, pulls on-chain PhysicalDelivery events for that pair
 and matches each event to a vault by collateralUsed (= vault.collateralAmount).
 Set EXECUTE=1 to apply; default is dry-run.
+
+Imports must come after the env bootstrap that injects Railway vars into
+os.environ — the supabase / web3 clients (and their src.config consumers)
+read configuration at import time.
 """
+# ruff: noqa: E402  (env injection must precede client imports)
 
 import json
+import logging
 import os
 from collections import defaultdict
 
@@ -17,8 +23,6 @@ with open(os.path.join(os.environ["TMPDIR"], "railway_vars.json")) as f:
     PROD = json.load(f)
 for k, v in PROD.items():
     os.environ.setdefault(k, v)
-
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
 
@@ -84,6 +88,10 @@ def parse_data(d) -> bytes:
 
 
 def find_corrupted_groups():
+    """Scan order_events for ITM physical rows whose entire (user, otoken)
+    group shares a single delivery_tx_hash — the signature of the old
+    indexer's overwrite bug. Returns a list of ((user, otoken), rows).
+    """
     rows = (
         db.table("order_events")
         .select(
@@ -105,13 +113,21 @@ def find_corrupted_groups():
     return corrupted
 
 
-def fetch_pair_events(user: str, otoken: str) -> list[dict]:
-    """Search a wide window. Base is fast; PhysicalDelivery topic is unique
-    enough that a 250k-block sweep is cheap."""
+def fetch_pair_events(
+    user: str, otoken: str
+) -> tuple[list[dict], list[tuple[int, int, str]]]:
+    """Fetch all PhysicalDelivery events emitted for (oToken, user).
+
+    Sweeps a ~6-month window in 500k-block chunks. Returns
+    ``(events, failed_ranges)`` where ``failed_ranges`` is a list of
+    ``(from_block, to_block, error)`` for any window that errored. The
+    caller MUST surface failed ranges — silently advancing past them
+    drops events and produces a phantom "event count mismatch" later.
+    """
     latest = w3.eth.block_number
-    # Cover ~6 months of Base history to catch the oldest corrupted groups.
     fb = max(0, latest - 8_000_000)
-    results = []
+    results: list[dict] = []
+    failed: list[tuple[int, int, str]] = []
     step = 500_000
     cur = fb
     while cur <= latest:
@@ -128,6 +144,7 @@ def fetch_pair_events(user: str, otoken: str) -> list[dict]:
         except Exception as e:
             logger = logging.getLogger(__name__)
             logger.error("get_logs %d-%d failed: %s", cur, end, e)
+            failed.append((cur, end, str(e)))
             cur = end + 1
             continue
         for log in logs:
@@ -144,19 +161,20 @@ def fetch_pair_events(user: str, otoken: str) -> list[dict]:
                 {
                     "tx": txh,
                     "block": (
-                        log["blockNumber"]
-                        if isinstance(log, dict)
-                        else log.blockNumber
+                        log["blockNumber"] if isinstance(log, dict) else log.blockNumber
                     ),
                     "contra": int(contra),
                     "collat": int(collat),
                 }
             )
         cur = end + 1
-    return results
+    return results, failed
 
 
 def main():
+    """Backfill delivery_tx_hash and delivered_amount for groups affected
+    by the old indexer bug. Dry-run by default; set EXECUTE=1 to apply.
+    """
     corrupted = find_corrupted_groups()
     print(
         f"Mode: {'EXECUTE' if EXECUTE else 'DRY-RUN'}\n"
@@ -167,14 +185,26 @@ def main():
     total_writes = 0
     total_skips = 0
     for (user, otoken), grp in sorted(corrupted, key=lambda x: -len(x[1])):
-        print(f"=== user={user[:10]}.. otoken={otoken[:10]}.. vaults={[r['vault_id'] for r in sorted(grp, key=lambda r: r['vault_id'])]}")
-        events = fetch_pair_events(user, otoken)
+        print(
+            f"=== user={user[:10]}.. otoken={otoken[:10]}.. vaults={[r['vault_id'] for r in sorted(grp, key=lambda r: (
+                        r['vault_id']
+                    ))]}"
+        )
+        events, failed_ranges = fetch_pair_events(user, otoken)
+        if failed_ranges:
+            print(
+                f"  ! {len(failed_ranges)} block range(s) failed RPC fetch — "
+                "event set may be incomplete. Skipping group; rerun after RPC recovers."
+            )
+            for fb_, tb_, err in failed_ranges:
+                print(f"      blocks {fb_}-{tb_}: {err}")
+            total_skips += len(grp)
+            continue
         events.sort(key=lambda e: (e["block"], e["tx"]))
         print(f"  on-chain events: {len(events)}, db rows: {len(grp)}")
         if len(events) != len(grp):
             print(
-                f"  ! event count mismatch — skipping this group; "
-                f"manual review needed"
+                "  ! event count mismatch — skipping this group; manual review needed"
             )
             total_skips += len(grp)
             continue
@@ -219,15 +249,16 @@ def main():
             total_skips += len(grp)
             continue
 
-        events_by_vault = dict(zip([v["vault_id"] for v in ranked_vaults], ranked_events))
-        events_remaining = []  # unused now; kept only for compat below
+        events_by_vault = dict(
+            zip([v["vault_id"] for v in ranked_vaults], ranked_events)
+        )
         for r in sorted(grp, key=lambda r: r["vault_id"]):
             ev = events_by_vault.get(r["vault_id"])
             if ev is None:
                 print(f"  ! no event paired for vault {r['vault_id']}")
                 total_skips += 1
                 continue
-            cur_tx = (r["delivery_tx_hash"] or "")
+            cur_tx = r["delivery_tx_hash"] or ""
             cur_amt = r.get("delivered_amount")
             new_tx = ev["tx"]
             new_amt = str(ev["contra"])
@@ -250,7 +281,9 @@ def main():
                 total_writes += 1  # would-write count
         print()
 
-    print(f"\nTotals: writes={'(applied)' if EXECUTE else '(dry-run)'} {total_writes}  skipped={total_skips}")
+    print(
+        f"\nTotals: writes={'(applied)' if EXECUTE else '(dry-run)'} {total_writes}  skipped={total_skips}"
+    )
 
 
 if __name__ == "__main__":

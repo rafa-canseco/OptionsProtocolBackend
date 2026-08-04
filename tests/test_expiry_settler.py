@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 import src.bots.expiry_settler as settler_module
 from src.bots.expiry_settler import (
     BETA_SLIPPAGE_BPS,
+    _SETTLE_FIELDS,
     _beta_compute_max_collateral_put,
     _compute_contra_amount,
     _compute_min_amount_out,
@@ -20,6 +21,9 @@ from src.bots.expiry_settler import (
     _post_settle_sweep,
     _reconcile_settled_on_chain,
     compute_slippage_param,
+    get_expired_unsettled,
+    get_pending_phase2,
+    settle_once,
 )
 
 
@@ -831,3 +835,264 @@ class TestEnsureExpiryPricesSetSkipsNonEvmAssets:
             from src.pricing.assets import get_asset_config
 
             assert get_asset_config(a).chain == Chain.BASE
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 recovery: get_pending_phase2 + settle_once orchestration
+# ---------------------------------------------------------------------------
+
+
+class _StubQuery:
+    """Records the chained PostgREST builder calls so tests can assert
+    on the exact filter used. Returns canned `data` on `.execute()`."""
+
+    def __init__(self, response_data=None):
+        self.calls: list[tuple[str, tuple]] = []
+        self._response = response_data or []
+
+    @property
+    def not_(self):
+        # PostgREST exposes `not_` as a property, not a callable: the
+        # chain is `.not_.is_(col, val)`. Returning self keeps the
+        # subsequent method recordable on the same stub.
+        self.calls.append(("not_", ()))
+        return self
+
+    def __getattr__(self, name):
+        def _record(*args):
+            self.calls.append((name, args))
+            return self
+
+        return _record
+
+    def execute(self):
+        self.calls.append(("execute", ()))
+        return MagicMock(data=self._response)
+
+
+class TestSettleFieldsProjection:
+    def test_get_expired_unsettled_projection_includes_phase2_fields(self):
+        """The projection must carry settlement_type, delivery_tx_hash and
+        is_itm so Phase 2 recovery can decide whether a row needs delivery
+        without a follow-up read. A future refactor that drops one would
+        silently break recovery filtering — pin them here."""
+        for f in ("settlement_type", "delivery_tx_hash", "is_itm"):
+            assert f in _SETTLE_FIELDS
+
+    def test_get_expired_unsettled_uses_settle_fields_constant(self):
+        stub = _StubQuery([])
+        client = MagicMock()
+        client.table.return_value = stub
+        with patch("src.bots.expiry_settler.get_client", return_value=client):
+            get_expired_unsettled()
+        select_calls = [c for c in stub.calls if c[0] == "select"]
+        assert len(select_calls) == 1
+        assert select_calls[0][1][0] == _SETTLE_FIELDS
+
+
+class TestGetPendingPhase2:
+    def _run(self, response):
+        stub = _StubQuery(response)
+        client = MagicMock()
+        client.table.return_value = stub
+        with patch("src.bots.expiry_settler.get_client", return_value=client):
+            result = get_pending_phase2()
+        return result, stub
+
+    def test_filter_excludes_unsettled_rows(self):
+        """Phase 2 recovery only targets is_settled=True rows. Pulling
+        is_settled=False would re-run Phase 1 wastefully and contradict
+        get_expired_unsettled's contract."""
+        _, stub = self._run([])
+        eq_calls = [args for op, args in stub.calls if op == "eq"]
+        assert ("is_settled", True) in eq_calls
+
+    def test_filter_excludes_already_delivered(self):
+        """Rows with a delivery_tx_hash MUST be skipped — running Phase 2
+        again would emit a second physicalRedeem and double-charge the MM."""
+        _, stub = self._run([])
+        is_calls = [args for op, args in stub.calls if op == "is_"]
+        assert ("delivery_tx_hash", "null") in is_calls
+
+    def test_filter_excludes_physical_failed(self):
+        """physical_failed rows have exhausted retries; recovery would
+        loop forever. Operator must intervene manually."""
+        _, stub = self._run([])
+        or_args = [args[0] for op, args in stub.calls if op == "or_"]
+        joined = " | ".join(or_args)
+        assert "settlement_type.is.null" in joined
+        assert "settlement_type.eq.cash" in joined
+        assert "physical_failed" not in joined
+
+    def test_filter_includes_unknown_or_itm_only(self):
+        """is_itm=False (known OTM) rows do not need Phase 2; exclude them."""
+        _, stub = self._run([])
+        or_args = [args[0] for op, args in stub.calls if op == "or_"]
+        joined = " | ".join(or_args)
+        assert "is_itm.is.null" in joined
+        assert "is_itm.eq.true" in joined
+
+    def test_returns_rows_when_present(self):
+        rows = [{"vault_id": 1, "user_address": "0xu", "expiry": 100}]
+        result, _ = self._run(rows)
+        assert result == rows
+
+    def test_empty_when_no_rows(self):
+        result, _ = self._run([])
+        assert result == []
+
+
+def _phase2_recovery_position(user="0xu", vault_id=1, expiry=1_700_000_000):
+    return {
+        "id": f"id-{vault_id}",
+        "user_address": user,
+        "vault_id": vault_id,
+        "otoken_address": "0xtoken",
+        "expiry": expiry,
+        "amount": "100000000",
+        "strike_price": "230000000000",
+        "is_put": False,
+        "mm_address": "0xmm",
+        "asset": "eth",
+        "is_settled": True,
+        "settlement_type": "cash",
+        "delivery_tx_hash": None,
+        "is_itm": None,
+    }
+
+
+class TestSettleOncePhase2Recovery:
+    """Cover the scenario the PR exists for: nothing fresh to settle, but
+    prior cycle left ITM positions stuck without delivery. settle_once
+    must skip Phase 0/1, run identify_itm + delivery loop, and not sleep
+    the inter-phase wait when there are no fresh Phase 1 settlements.
+    """
+
+    def _run(self, *, expired=None, pending=None, itm_for_phase2=None):
+        expired = expired or []
+        pending = pending or []
+        # identify_itm_positions returns (itm_positions, expiry_cache, skipped_keys)
+        itm_for_phase2 = itm_for_phase2 or []
+        ensure_called = MagicMock()
+        sleep_called = MagicMock()
+
+        async def fake_sleep(seconds):
+            sleep_called(seconds)
+
+        async def to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with (
+            patch(
+                "src.bots.expiry_settler.get_expired_unsettled",
+                return_value=expired,
+            ),
+            patch(
+                "src.bots.expiry_settler.get_pending_phase2",
+                return_value=pending,
+            ),
+            patch(
+                "src.bots.expiry_settler._reconcile_settled_on_chain",
+                return_value=([], []),
+            ),
+            patch(
+                "src.bots.expiry_settler._ensure_expiry_prices_set",
+                ensure_called,
+            ),
+            patch(
+                "src.bots.expiry_settler.identify_itm_positions",
+                return_value=(itm_for_phase2, {}, set()),
+            ),
+            patch(
+                "src.bots.expiry_settler._physical_redeem_with_retry",
+                new=MagicMock(return_value=("0xtx", 1_000_000)),
+            ),
+            patch("src.bots.expiry_settler._db_update"),
+            patch(
+                "src.bots.expiry_settler.get_batch_settler", return_value=MagicMock()
+            ),
+            patch(
+                "src.bots.expiry_settler.get_operator_account",
+                return_value=MagicMock(),
+            ),
+            patch("src.bots.expiry_settler.asyncio.sleep", new=fake_sleep),
+            patch(
+                "src.bots.expiry_settler.asyncio.to_thread",
+                new=to_thread,
+            ),
+            patch("src.bots.expiry_settler._send_settlement_emails"),
+            patch("src.bots.expiry_settler._post_settle_sweep"),
+        ):
+            asyncio.run(settle_once())
+        return ensure_called, sleep_called
+
+    def test_phase2_only_path_runs_oracle_and_skips_phase1(self):
+        """positions=[] but pending non-empty: settle_once must still
+        call _ensure_expiry_prices_set for the pending expiries (Phase 0
+        is needed for identify_itm) and proceed past the early-return."""
+        pending = [_phase2_recovery_position(expiry=1_777_622_400)]
+        ensure_called, _ = self._run(pending=pending)
+        ensure_called.assert_called_once()
+        expiries_arg = ensure_called.call_args[0][0]
+        assert 1_777_622_400 in expiries_arg
+
+    def test_phase2_only_path_skips_inter_phase_wait(self):
+        """When no fresh Phase 1 settlements happened this cycle, the
+        flash_loan_redeem_delay sleep is wasted — must be skipped."""
+        pending = [_phase2_recovery_position()]
+        _, sleep_called = self._run(pending=pending)
+        # Any real-world delay would be > 1s; confirm we never slept that long.
+        slept_seconds = [c[0][0] for c in sleep_called.call_args_list]
+        assert all(s == 0 or s is None or s < 1 for s in slept_seconds), (
+            f"unexpected long sleep in Phase 2 recovery path: {slept_seconds}"
+        )
+
+    def test_dedup_phase2_recovery_against_reconciled_already_settled(self):
+        """If a vault appears in BOTH the reconcile-discovered and the
+        get_pending_phase2 buckets, the seen_keys dedup must avoid running
+        physicalRedeem twice for the same vault."""
+        pos = _phase2_recovery_position(vault_id=42)
+        seen_phase2: list[dict] = []
+
+        def fake_identify(positions):
+            # Capture what settle_once passed to identify_itm_positions
+            seen_phase2.extend(positions)
+            return ([], {}, set())
+
+        async def fake_sleep(seconds):
+            pass
+
+        async def to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with (
+            patch("src.bots.expiry_settler.get_expired_unsettled", return_value=[]),
+            patch("src.bots.expiry_settler.get_pending_phase2", return_value=[pos]),
+            patch(
+                "src.bots.expiry_settler._reconcile_settled_on_chain",
+                return_value=([], [pos]),  # SAME vault in already_settled
+            ),
+            patch("src.bots.expiry_settler._ensure_expiry_prices_set"),
+            patch(
+                "src.bots.expiry_settler.identify_itm_positions",
+                side_effect=fake_identify,
+            ),
+            patch("src.bots.expiry_settler.asyncio.sleep", new=fake_sleep),
+            patch("src.bots.expiry_settler.asyncio.to_thread", new=to_thread),
+            patch(
+                "src.bots.expiry_settler.get_batch_settler", return_value=MagicMock()
+            ),
+            patch(
+                "src.bots.expiry_settler.get_operator_account",
+                return_value=MagicMock(),
+            ),
+            patch("src.bots.expiry_settler._send_settlement_emails"),
+            patch("src.bots.expiry_settler._post_settle_sweep"),
+        ):
+            # Need both buckets non-empty so settle_once doesn't early-return
+            asyncio.run(settle_once())
+
+        # The same vault must appear exactly once in the Phase 2 input,
+        # never twice — guards against double physicalRedeem.
+        keys = [(p["user_address"], p["vault_id"]) for p in seen_phase2]
+        assert keys.count((pos["user_address"], pos["vault_id"])) == 1

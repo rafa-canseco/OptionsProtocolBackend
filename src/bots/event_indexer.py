@@ -313,13 +313,36 @@ def _update_delivery_events(delivery_events: list[dict]) -> int:
             .execute()
         )
         if not candidates.data:
-            logger.warning(
-                "Physical delivery event matched no unmarked DB row "
-                "(possibly already processed by the bot itself): "
-                "user=%s otoken=%s tx=%s",
+            # Two distinct cases produce this log:
+            #
+            #   1) The bot wrote per-vault hashes for every row already.
+            #      The idempotency check above (matching this exact tx)
+            #      did not fire — meaning the bot used a *different*
+            #      tx_hash for every row. That's only possible if every
+            #      vault for this (user, otoken) was independently
+            #      delivered with its own tx, which is the normal flow.
+            #      Benign.
+            #
+            #   2) An on-chain delivery happened for a (user, otoken)
+            #      with no matching DB row (race with order ingestion,
+            #      archived row, schema drift). The user was paid
+            #      on-chain but no DB row reflects it — UI/email will
+            #      treat the position as undelivered.
+            #
+            # We can't tell the cases apart from the indexer alone, so
+            # log at ERROR with all the evidence the on-call needs to
+            # decide. Continue so other events in the batch progress.
+            logger.error(
+                "ALERT: Physical delivery event matched no unmarked DB "
+                "row. Either the bot already filled all rows with their "
+                "own per-vault hashes (benign) OR an on-chain delivery "
+                "has no DB counterpart (silent loss — investigate). "
+                "user=%s otoken=%s tx=%s contraAmount=%s deliveredAsset=%s",
                 ev["user_address"],
                 ev["otoken_address"],
                 ev["delivery_tx_hash"],
+                ev["delivered_amount"],
+                ev["delivered_asset"],
             )
             continue
 
