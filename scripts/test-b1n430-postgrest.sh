@@ -84,7 +84,11 @@ docker run --detach --rm \
 
 postgres_ready=false
 for _attempt in $(seq 1 60); do
-  if docker exec "$postgres_name" pg_isready -U postgres -d options >/dev/null 2>&1; then
+  if docker exec "$postgres_name" psql \
+    --username postgres \
+    --dbname options \
+    --tuples-only \
+    --command "SELECT 1" >/dev/null 2>&1; then
     postgres_ready=true
     break
   fi
