@@ -65,7 +65,9 @@ def simulate_pnl(
             total_eth_bought += daily_investment / p.price
     dca_value = total_eth_bought * eth_close
     total_invested = daily_investment * days
-    dca_return = (dca_value - total_invested) / total_invested if total_invested > 0 else 0.0
+    dca_return = (
+        (dca_value - total_invested) / total_invested if total_invested > 0 else 0.0
+    )
 
     return SimulateResponse(
         premium_earned=round(premium_net, 2),

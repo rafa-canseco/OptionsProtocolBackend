@@ -113,7 +113,9 @@ def _build_link_message(
     )
 
 
-def _verify_base_signature(address_normalized: str, message: str, signature: str) -> bool:
+def _verify_base_signature(
+    address_normalized: str, message: str, signature: str
+) -> bool:
     try:
         recovered = Account.recover_message(
             encode_defunct(text=message),

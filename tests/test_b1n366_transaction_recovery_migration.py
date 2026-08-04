@@ -2,8 +2,7 @@ from pathlib import Path
 
 
 MIGRATION = Path(
-    "supabase/migrations/"
-    "202607270001_b1n366_recover_replaced_nav_transactions.sql"
+    "supabase/migrations/202607270001_b1n366_recover_replaced_nav_transactions.sql"
 ).read_text()
 
 

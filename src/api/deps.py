@@ -1,6 +1,7 @@
 """
 FastAPI dependencies for MM authentication.
 """
+
 import logging
 import time
 
@@ -25,7 +26,9 @@ def _refresh_api_key_cache() -> None:
             .eq("is_active", True)
             .execute()
         )
-        _API_KEY_CACHE = {row["api_key"]: row["mm_address"] for row in (result.data or [])}
+        _API_KEY_CACHE = {
+            row["api_key"]: row["mm_address"] for row in (result.data or [])
+        }
     except Exception:
         logger.exception("Failed to refresh MM API key cache — clearing stale entries")
         _API_KEY_CACHE = {}

@@ -11,15 +11,12 @@ CALL_MODEL_VERSION = 1
 CALL_MODEL_NAME = "b1nary-european-bs-call-v1"
 CALL_POLICY_IV_BPS = 4_200
 CALL_POLICY_IV_SOURCE = (
-    "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-"
-    "b1n358-covered-call-v2-approved"
+    "deribit-eth-atm-snapshot-2026-07-26T18:30:49Z-b1n358-covered-call-v2-approved"
 )
 CALL_POLICY_RISK_FREE_RATE_BPS = 500
 CALL_POLICY_SETTLEMENT_COST_BPS = 0
 CALL_POLICY_REFERENCE = "policies/covered_call_fund_policy.v2.base-sepolia.json"
-CALL_POLICY_SHA256 = (
-    "4ecb60fc6a19ac0a10c37ca380998b3566a3193693a10fb211f86bb61a2bebf3"
-)
+CALL_POLICY_SHA256 = "4ecb60fc6a19ac0a10c37ca380998b3566a3193693a10fb211f86bb61a2bebf3"
 METHODOLOGY = "european_black_scholes"
 SOURCE_QUALITY = "single_model_multi_signer"
 UINT192_MAX = 2**192 - 1
@@ -258,9 +255,9 @@ def _option_price_8(
 
 def _cost_assets(fair_assets: int, cost_bps: int) -> int:
     return int(
-        (
-            Decimal(fair_assets) * Decimal(cost_bps) / Decimal(10_000)
-        ).to_integral_value(rounding=ROUND_CEILING)
+        (Decimal(fair_assets) * Decimal(cost_bps) / Decimal(10_000)).to_integral_value(
+            rounding=ROUND_CEILING
+        )
     )
 
 

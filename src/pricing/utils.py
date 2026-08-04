@@ -95,9 +95,7 @@ def get_expiries(
     return [int(f.timestamp()) for f in result]
 
 
-def collateral_to_usd(
-    row: dict, eth_spot: float, btc_spot: float
-) -> float:
+def collateral_to_usd(row: dict, eth_spot: float, btc_spot: float) -> float:
     """Convert collateral to USD based on option type and asset."""
     collateral = int(row.get("collateral") or 0)
     is_put = row.get("is_put")

@@ -312,7 +312,9 @@ def _resolve_solana_owner_for_mint_recipient(
                 .eq("role", "trading")
                 .execute()
             )
-            rows.extend(row for row in (account_wallets.data or []) if row.get("verified_at"))
+            rows.extend(
+                row for row in (account_wallets.data or []) if row.get("verified_at")
+            )
     except Exception:
         logger.exception("Failed to resolve Solana owner for user_id=%s", user_id)
         raise HTTPException(502, "Could not resolve Solana owner wallet")
@@ -327,7 +329,9 @@ def _resolve_solana_owner_for_mint_recipient(
             if _derive_solana_usdc_ata(owner) == mint_recipient:
                 return owner
         except Exception:
-            logger.warning("Skipping invalid Solana wallet while resolving ATA: %s", owner)
+            logger.warning(
+                "Skipping invalid Solana wallet while resolving ATA: %s", owner
+            )
             continue
     return None
 
@@ -397,10 +401,14 @@ def _get_solana_account_info(address: str):
 
     from src.chains.solana.client import get_solana_client
 
-    return get_solana_client().get_account_info(
-        Pubkey.from_string(address),
-        commitment=Confirmed,
-    ).value
+    return (
+        get_solana_client()
+        .get_account_info(
+            Pubkey.from_string(address),
+            commitment=Confirmed,
+        )
+        .value
+    )
 
 
 def _wait_for_solana_account_info(address: str, *, timeout_seconds: float = 12.0):
@@ -453,7 +461,9 @@ def _ensure_solana_cctp_mint_recipient_or_raise(
         try:
             account = _wait_for_solana_account_info(address)
         except Exception:
-            logger.exception("Failed to validate created Solana CCTP recipient %s", address)
+            logger.exception(
+                "Failed to validate created Solana CCTP recipient %s", address
+            )
             raise HTTPException(502, "Could not validate Solana mint recipient")
         if account is None:
             raise HTTPException(502, "Solana USDC token account was not created")
@@ -559,7 +569,9 @@ def _create_solana_burn_reservation_or_raise(body: SolanaCCTPBurnSubmitRequest) 
     try:
         result = client.table("bridge_jobs").insert(row).execute()
     except Exception:
-        logger.exception("Failed to reserve Solana CCTP burn for quote %s", body.quote_id)
+        logger.exception(
+            "Failed to reserve Solana CCTP burn for quote %s", body.quote_id
+        )
         raise HTTPException(
             409,
             f"Bridge job already exists or could not be reserved for quote {body.quote_id}",
@@ -594,7 +606,9 @@ def _finalize_solana_burn_reservation_or_raise(job_id: str, burn_tx_hash: str) -
     try:
         result = (
             client.table("bridge_jobs")
-            .update({"burn_tx_hash": burn_tx_hash, "status": BridgeJobState.PENDING.value})
+            .update(
+                {"burn_tx_hash": burn_tx_hash, "status": BridgeJobState.PENDING.value}
+            )
             .eq("id", job_id)
             .execute()
         )

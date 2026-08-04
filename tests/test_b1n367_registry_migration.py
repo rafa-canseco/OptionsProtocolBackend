@@ -23,5 +23,8 @@ def test_contract_rotation_is_service_role_only() -> None:
         "    BIGINT, TEXT, TEXT, TEXT, TEXT, BIGINT, TEXT, BIGINT\n"
         ")"
     )
-    assert f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC, anon, authenticated" in MIGRATION
+    assert (
+        f"REVOKE ALL ON FUNCTION {signature} FROM PUBLIC, anon, authenticated"
+        in MIGRATION
+    )
     assert f"GRANT EXECUTE ON FUNCTION {signature} TO service_role" in MIGRATION

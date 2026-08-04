@@ -94,9 +94,9 @@ _ASSET_MAP: dict[str, Asset] = {
 SYSTEM_PROGRAM = Pubkey.from_string("11111111111111111111111111111111")
 WORMHOLE_PROGRAM = Pubkey.from_string("HDwcJBJXjL9FpJ7UBsYBtaDjsBUhuLCUYoz3zr8SWWaQ")
 _PRICE_UPDATE_V2_DISC = bytes.fromhex("22f123639d7ef4cd")
-_PYTH_POST_UPDATE_ATOMIC_DISC = hashlib.sha256(
-    b"global:post_update_atomic"
-).digest()[:8]
+_PYTH_POST_UPDATE_ATOMIC_DISC = hashlib.sha256(b"global:post_update_atomic").digest()[
+    :8
+]
 _PYTH_FEED_ID_OFFSET = 41
 _PYTH_PRICE_OFFSET = 73
 _PYTH_CONF_OFFSET = 81
@@ -1374,10 +1374,7 @@ def _decode_jupiter_pre_instructions(payload: dict) -> list[Instruction]:
         + payload.get("setupInstructions", [])
         + payload.get("otherInstructions", [])
     )
-    return [
-        _decode_jupiter_instruction(ix)
-        for ix in raw_ixs
-    ]
+    return [_decode_jupiter_instruction(ix) for ix in raw_ixs]
 
 
 def _decode_jupiter_alts(payload: dict) -> list[AddressLookupTableAccount]:
@@ -1423,9 +1420,7 @@ def _build_physical_redeem_ix(
     otoken_token_program = _token_program_for_mint(otoken_mint)
     collateral_token_program = _token_program_for_mint(collateral_mint)
     contra_token_program = _token_program_for_mint(contra_mint)
-    surplus_token_program = (
-        collateral_token_program if is_put else contra_token_program
-    )
+    surplus_token_program = collateral_token_program if is_put else contra_token_program
 
     data = (
         _PHYSICAL_REDEEM_DISC
@@ -1542,8 +1537,7 @@ def _read_otoken_info(otoken_addr: str) -> dict | None:
         ),
         "strike_asset": Pubkey.from_bytes(
             data[
-                _OTOKEN_INFO_STRIKE_ASSET_OFFSET : _OTOKEN_INFO_STRIKE_ASSET_OFFSET
-                + 32
+                _OTOKEN_INFO_STRIKE_ASSET_OFFSET : _OTOKEN_INFO_STRIKE_ASSET_OFFSET + 32
             ]
         ),
         "collateral_mint": Pubkey.from_bytes(

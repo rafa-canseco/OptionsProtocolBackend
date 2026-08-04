@@ -31,7 +31,10 @@ def test_get_client_is_lazy_and_reused_only_within_worker_thread(
         return threading.get_ident(), first, database.get_client()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = [future.result() for future in [executor.submit(load_twice) for _ in range(2)]]
+        results = [
+            future.result()
+            for future in [executor.submit(load_twice) for _ in range(2)]
+        ]
 
     assert len(created) == 2
     assert results[0][0] != results[1][0]

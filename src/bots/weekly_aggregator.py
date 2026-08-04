@@ -9,6 +9,7 @@ Aggregates all testnet activity for the week:
   4. Upsert rows into user_weekly_results
   5. Aggregate into weekly_reports with narrative_data JSON
 """
+
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,10 @@ def _week_boundaries() -> tuple[datetime, datetime]:
     now = datetime.now(timezone.utc)
     days_since_friday = (now.weekday() - 4) % 7
     this_friday = (now - timedelta(days=days_since_friday)).replace(
-        hour=8, minute=0, second=0, microsecond=0,
+        hour=8,
+        minute=0,
+        second=0,
+        microsecond=0,
     )
     if this_friday > now:
         this_friday -= timedelta(days=7)
@@ -61,7 +65,10 @@ def _group_by_user(positions: list[dict]) -> dict[str, list[dict]]:
         if addr:
             grouped.setdefault(addr, []).append(pos)
         else:
-            logger.warning("Dropping position with missing user_address: %s", pos.get("id", "unknown"))
+            logger.warning(
+                "Dropping position with missing user_address: %s",
+                pos.get("id", "unknown"),
+            )
     return grouped
 
 
@@ -81,7 +88,11 @@ def _compute_user_week(
             try:
                 total_premium += float(net) / 1e6  # premium stored in USDC (6 decimals)
             except (ValueError, TypeError):
-                logger.warning("Could not parse premium for position %s: %s", pos.get("id", "unknown"), net)
+                logger.warning(
+                    "Could not parse premium for position %s: %s",
+                    pos.get("id", "unknown"),
+                    net,
+                )
 
         if pos.get("is_settled") and pos.get("is_itm"):
             assignments += 1
@@ -99,7 +110,10 @@ def _compute_user_week(
                 if loss > 0:
                     pnl -= loss
             except (ValueError, TypeError, KeyError):
-                logger.warning("Could not compute assignment loss for position %s", pos.get("id", "unknown"))
+                logger.warning(
+                    "Could not compute assignment loss for position %s",
+                    pos.get("id", "unknown"),
+                )
 
     cumulative = prev_cumulative + pnl
 
@@ -146,7 +160,8 @@ def _build_narrative(
         "most_active_positions": most_positions["positions_opened"],
         "total_unique_users": len(user_results),
         "eth_week_change_pct": round(
-            (eth_close - eth_open) / eth_open * 100 if eth_open > 0 else 0, 2,
+            (eth_close - eth_open) / eth_open * 100 if eth_open > 0 else 0,
+            2,
         ),
     }
 
@@ -188,7 +203,9 @@ async def aggregate_once():
 
     for user_addr, user_positions in grouped.items():
         prev_cumulative = _get_prev_cumulative(user_addr)
-        result = _compute_user_week(user_addr, user_positions, eth_close, prev_cumulative)
+        result = _compute_user_week(
+            user_addr, user_positions, eth_close, prev_cumulative
+        )
         result["week_start"] = week_start_str
         result["week_end"] = week_end_str
         user_results.append(result)
@@ -198,11 +215,14 @@ async def aggregate_once():
     for result in user_results:
         try:
             client.table("user_weekly_results").upsert(
-                result, on_conflict="user_address,week_start",
+                result,
+                on_conflict="user_address,week_start",
             ).execute()
         except Exception:
             upsert_failures += 1
-            logger.exception("Failed to upsert user_weekly_results for %s", result["user_address"])
+            logger.exception(
+                "Failed to upsert user_weekly_results for %s", result["user_address"]
+            )
 
     if upsert_failures:
         raise RuntimeError(
@@ -215,7 +235,9 @@ async def aggregate_once():
         "week_end": week_end_str,
         "total_users": len(grouped),
         "total_positions": len(positions),
-        "total_simulated_premium": round(sum(r["total_simulated_premium"] for r in user_results), 4),
+        "total_simulated_premium": round(
+            sum(r["total_simulated_premium"] for r in user_results), 4
+        ),
         "total_assignments": sum(r["assignments"] for r in user_results),
         "eth_open": round(eth_open, 2),
         "eth_close": round(eth_close, 2),
@@ -226,9 +248,12 @@ async def aggregate_once():
 
     try:
         client.table("weekly_reports").upsert(
-            report, on_conflict="week_start",
+            report,
+            on_conflict="week_start",
         ).execute()
-        logger.info("Weekly report saved: %d users, %d positions", len(grouped), len(positions))
+        logger.info(
+            "Weekly report saved: %d users, %d positions", len(grouped), len(positions)
+        )
     except Exception:
         logger.exception("Failed to upsert weekly_reports")
         raise
@@ -242,17 +267,23 @@ async def _wait_until_target():
     if days_ahead == 0:
         target = now.replace(
             hour=settings.weekly_aggregation_hour_utc,
-            minute=0, second=0, microsecond=0,
+            minute=0,
+            second=0,
+            microsecond=0,
         )
         if target <= now:
             days_ahead = 7
     target = (now + timedelta(days=days_ahead)).replace(
         hour=settings.weekly_aggregation_hour_utc,
-        minute=0, second=0, microsecond=0,
+        minute=0,
+        second=0,
+        microsecond=0,
     )
 
     wait_seconds = (target - now).total_seconds()
-    logger.info("Weekly aggregator waiting %.0fs until %s", wait_seconds, target.isoformat())
+    logger.info(
+        "Weekly aggregator waiting %.0fs until %s", wait_seconds, target.isoformat()
+    )
     await asyncio.sleep(wait_seconds)
 
 
@@ -266,6 +297,8 @@ async def run():
                 await aggregate_once()
                 break
             except Exception:
-                logger.exception("Weekly aggregation failed (attempt %d/%d)", attempt, _MAX_RETRIES)
+                logger.exception(
+                    "Weekly aggregation failed (attempt %d/%d)", attempt, _MAX_RETRIES
+                )
                 if attempt < _MAX_RETRIES:
                     await asyncio.sleep(_RETRY_BACKOFF * attempt)

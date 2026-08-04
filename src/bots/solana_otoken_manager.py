@@ -296,9 +296,7 @@ def _ensure_settler_otoken_account(otoken_mint: Pubkey, label: str) -> None:
     initialized SPL token account owned by the `settler_config` PDA. This is
     protocol setup, not user setup, and must exist for every listed oToken.
     """
-    batch_settler_program = Pubkey.from_string(
-        settings.solana_batch_settler_program_id
-    )
+    batch_settler_program = Pubkey.from_string(settings.solana_batch_settler_program_id)
     settler_config = _derive_settler_config(batch_settler_program)
     settler_otoken_account = get_associated_token_address(
         settler_config,

@@ -188,9 +188,7 @@ class TestBuildSetExpiryPriceIx:
 
     @patch(f"{_MODULE}._read_otoken_info")
     @patch(f"{_MODULE}.settings")
-    def test_instruction_includes_oracle_accounts(
-        self, mock_settings, mock_read_info
-    ):
+    def test_instruction_includes_oracle_accounts(self, mock_settings, mock_read_info):
         settler_id = Pubkey.new_unique()
         controller_id = Pubkey.new_unique()
         oracle_id = Pubkey.new_unique()
@@ -371,22 +369,28 @@ class TestSolanaPhysicalMath:
     def test_put_contra_amount_uses_underlying_decimals(self):
         from src.bots.solana_expiry_settler import _compute_solana_contra_amount
 
-        assert _compute_solana_contra_amount(
-            amount=25_000_000,
-            strike_price=88_00000000,
-            is_put=True,
-            contra_decimals=9,
-        ) == 250_000_000
+        assert (
+            _compute_solana_contra_amount(
+                amount=25_000_000,
+                strike_price=88_00000000,
+                is_put=True,
+                contra_decimals=9,
+            )
+            == 250_000_000
+        )
 
     def test_call_contra_amount_uses_usdc_decimals(self):
         from src.bots.solana_expiry_settler import _compute_solana_contra_amount
 
-        assert _compute_solana_contra_amount(
-            amount=25_000_000,
-            strike_price=88_00000000,
-            is_put=False,
-            contra_decimals=6,
-        ) == 22_000_000
+        assert (
+            _compute_solana_contra_amount(
+                amount=25_000_000,
+                strike_price=88_00000000,
+                is_put=False,
+                contra_decimals=6,
+            )
+            == 22_000_000
+        )
 
 
 class TestIdentifyItmPositions:
