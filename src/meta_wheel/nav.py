@@ -104,9 +104,7 @@ def compose_wheel_nav(value: WheelNavInput) -> WheelNavResult:
         else:
             call_value += net_assets
 
-    accounted_coordinator_usdc = (
-        value.pending_csp_usdc + value.redemption_reserved_usdc
-    )
+    accounted_coordinator_usdc = value.pending_csp_usdc + value.redemption_reserved_usdc
     if accounted_coordinator_usdc != value.actual_coordinator_usdc:
         raise ValueError("Meta Wheel coordinator USDC balance is not reconciled")
     if value.transition_weth != value.actual_coordinator_weth:
@@ -124,9 +122,7 @@ def compose_wheel_nav(value: WheelNavInput) -> WheelNavResult:
         + transition_weth_value
         + sum(report.gross_assets_usdc for report in value.child_reports)
     )
-    parent_liabilities = (
-        value.redemption_reserved_usdc + value.parent_exit_cost_usdc
-    )
+    parent_liabilities = value.redemption_reserved_usdc + value.parent_exit_cost_usdc
     liabilities = parent_liabilities + child_deductions
     if liabilities > gross_assets:
         raise ValueError("Meta Wheel parent liabilities exceed gross assets")
@@ -190,8 +186,7 @@ def _validate_child_report(parent: WheelNavInput, child: ChildNavReport) -> None
         or child.liquid_usdc < 0
         or child.liquid_usdc > child.gross_assets_usdc
         or child.base_exit_cost_usdc < 0
-        or child.liabilities_usdc + child.base_exit_cost_usdc
-        > child.gross_assets_usdc
+        or child.liabilities_usdc + child.base_exit_cost_usdc > child.gross_assets_usdc
     ):
         raise ValueError("Invalid Meta Wheel child NAV quantity")
 
@@ -244,7 +239,4 @@ def _weth_to_usdc(
     weth_decimals: int,
     usdc_decimals: int,
 ) -> int:
-    return (
-        weth_amount * spot_price_8 * 10**usdc_decimals
-        // 10 ** (weth_decimals + 8)
-    )
+    return weth_amount * spot_price_8 * 10**usdc_decimals // 10 ** (weth_decimals + 8)

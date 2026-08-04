@@ -154,7 +154,9 @@ def test_multicall_result_decodes_adapter_and_v1_ledgers() -> None:
     assert decoded["position_ledgers"][0].controller_short_amount == 10
 
 
-def test_meta_wheel_snapshot_decodes_coordinator_summary_without_adapter_state() -> None:
+def test_meta_wheel_snapshot_decodes_coordinator_summary_without_adapter_state() -> (
+    None
+):
     results = _base_snapshot_results()
     results[4] = (
         True,
@@ -174,9 +176,7 @@ def test_meta_wheel_snapshot_decodes_coordinator_summary_without_adapter_state()
         ),
     )
 
-    decoded = _decode_results(
-        results, [], [], 2, strategy_kind="meta_wheel"
-    )
+    decoded = _decode_results(results, [], [], 2, strategy_kind="meta_wheel")
 
     assert decoded["adapter_usdc"] == 600
     assert decoded["adapter_weth"] == 2

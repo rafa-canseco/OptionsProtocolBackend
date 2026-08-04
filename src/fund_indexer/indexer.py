@@ -414,10 +414,7 @@ def _fetch_window(
             events.extend(
                 event
                 for log in child_logs
-                if (
-                    event := _decode_log(w3, registry, lane_bindings, log)
-                )
-                is not None
+                if (event := _decode_log(w3, registry, lane_bindings, log)) is not None
             )
     events = list({event.identity: event for event in events}.values())
     return sorted(
