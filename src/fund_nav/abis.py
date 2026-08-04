@@ -111,11 +111,29 @@ ACCOUNTING_ABI = [
 
 VAULT_ABI = [
     _function("asset", [], [_field("", "address")]),
+    _function("accountedIdleAssets", [], [_field("", "uint256")]),
+    _function("reservedClaimAssets", [], [_field("", "uint256")]),
     _function("fundFlowNonce", [], [_field("", "uint64")]),
     _function("idleStateHash", [], [_field("", "bytes32")]),
 ]
 FLOW_ABI = [_function("hasActiveProcessing", [], [_field("", "bool")])]
-STRATEGY_ABI = [_function("positionsHash", [], [_field("", "bytes32")])]
+STRATEGY_ABI = [
+    _function("positionsHash", [], [_field("", "bytes32")]),
+    *[
+        _function(
+            name,
+            [_field("adapter", "address"), _field("data", "bytes")],
+            [],
+            "nonpayable",
+        )
+        for name in (
+            "executeAdapterAllocationOperation",
+            "executeAdapterProcessingOperation",
+            "executeAdapterGuardianOperation",
+            "executeAdapterConfigurationOperation",
+        )
+    ],
+]
 ERC20_ABI = [
     _function("balanceOf", [_field("account", "address")], [_field("", "uint256")]),
     _function("decimals", [], [_field("", "uint8")]),
@@ -213,6 +231,62 @@ COVERED_CALL_ADAPTER_ABI = [
     _function("positionStateHash", [], [_field("", "bytes32")]),
 ]
 
+WHEEL_SUMMARY_FIELDS = [
+    _field("stateNonce", "uint64"),
+    _field("trancheCount", "uint256"),
+    _field("assignmentLotCount", "uint256"),
+    _field("pendingCspUsdc", "uint256"),
+    _field("reservedRedemptionUsdc", "uint256"),
+    _field("reservedPrincipalUsdc", "uint256"),
+    _field("transitionWeth", "uint256"),
+    _field("accountedUsdc", "uint256"),
+    _field("accountedWeth", "uint256"),
+]
+WHEEL_COORDINATOR_ABI = [
+    _function("interfaceVersion", [], [_field("", "uint64")]),
+    _function("accountingAsset", [], [_field("", "address")]),
+    _function("weth", [], [_field("", "address")]),
+    _function("summary", [], [_field("state", "tuple", WHEEL_SUMMARY_FIELDS)]),
+    _function("registeredLaneCount", [], [_field("", "uint256")]),
+    _function(
+        "registeredLaneAt",
+        [_field("index", "uint256")],
+        [
+            _field("lane", "address"),
+            _field("kind", "uint8"),
+            _field("active", "bool"),
+        ],
+    ),
+    _function("positionStateHash", [], [_field("", "bytes32")]),
+]
+
+WHEEL_CHILD_LANE_ABI = [
+    _function("adapter", [], [_field("", "address")]),
+    _function("childShares", [], [_field("", "uint256")]),
+    _function("activePositionId", [], [_field("", "uint256")]),
+    _function("executionStateHash", [], [_field("", "bytes32")]),
+    _function("positionStateHash", [], [_field("", "bytes32")]),
+]
+WHEEL_CSP_LANE_ACCOUNTING_ABI = [
+    _function(
+        "accountingState",
+        [],
+        [_field("accountedUsdc", "uint256"), _field("accountedWeth", "uint256")],
+    )
+]
+WHEEL_CALL_LANE_ACCOUNTING_ABI = [
+    _function(
+        "accountingState",
+        [],
+        [
+            _field("accountedUsdc", "uint256"),
+            _field("accountedWeth", "uint256"),
+            _field("literalFloor8", "uint256"),
+            _field("requiredFloor8", "uint256"),
+        ],
+    )
+]
+
 POSITION_VALUE_FIELDS = [
     _field("grossAssets", "uint256"),
     _field("liabilities", "uint256"),
@@ -241,6 +315,16 @@ VALUATOR_ABI = [
     _function("spotFeedDecimals", [], [_field("", "uint8")]),
     _function("maxSpotStaleness", [], [_field("", "uint64")]),
     _function(
+        "valuePosition",
+        [
+            _field("adapter", "address"),
+            _field("positionId", "uint256"),
+            _field("snapshotBlock", "uint64"),
+            _field("data", "bytes"),
+        ],
+        [_field("positionValue", "tuple", POSITION_VALUE_FIELDS)],
+    ),
+    _function(
         "isApprovedObserver",
         [_field("observer", "address")],
         [_field("approved", "bool")],
@@ -258,6 +342,13 @@ VALUATOR_ABI = [
         ],
         [_field("", "bytes32")],
     ),
+]
+
+META_WHEEL_VALUATOR_ABI = [
+    *VALUATOR_ABI,
+    _function("cspValuator", [], [_field("", "address")]),
+    _function("coveredCallValuator", [], [_field("", "address")]),
+    _function("transitionExitCostBps", [], [_field("", "uint16")]),
 ]
 OTOKEN_ABI = [
     _function("underlying", [], [_field("", "address")]),

@@ -74,7 +74,13 @@ def reconcile(
     accounting_asset = projection.fund.get("accounting_asset")
     weth = projection.fund.get("weth")
     strategy_kind = projection.fund.get("strategy_kind", "csp")
-    if strategy_kind == "covered_call":
+    if strategy_kind == "meta_wheel":
+        wheel_state = projection.wheel.state if projection.wheel is not None else {}
+        projected_usdc = int(wheel_state.get("pending_csp_usdc", 0)) + int(
+            wheel_state.get("redemption_reserved_usdc", 0)
+        )
+        projected_weth = int(wheel_state.get("transition_weth", 0))
+    elif strategy_kind == "covered_call":
         quote_asset = projection.fund.get("quote_asset")
         projected_usdc = projection.inventory.get((quote_asset, "transient_usdc"), 0)
         projected_weth = projection.inventory.get(

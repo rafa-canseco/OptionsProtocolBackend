@@ -2,6 +2,8 @@ from typing import Any
 
 from web3 import Web3
 
+from src.meta_wheel.events import WHEEL_EVENT_ABIS
+
 
 def _event(
     name: str,
@@ -320,7 +322,7 @@ EVENT_ABIS = [
         ],
     ),
     _event("Upgraded", [("implementation", "address", True)]),
-]
+] + WHEEL_EVENT_ABIS
 
 
 def event_topic(abi: dict[str, Any]) -> str:

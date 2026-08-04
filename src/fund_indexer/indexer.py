@@ -16,6 +16,7 @@ from src.fund_indexer.models import FundEvent, normalize_address
 from src.fund_indexer.projector import project_events
 from src.fund_indexer.reconciliation import reconcile
 from src.fund_indexer.snapshot import SnapshotContracts, read_onchain_snapshot
+from src.meta_wheel.events import WHEEL_EVENTS_BY_TOPIC
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ HIGH_FREQUENCY_NAV_EVENTS = ("NavCommitted", "NavSubmitted")
 EIP1967_IMPLEMENTATION_SLOT = int(
     "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16
 )
+WHEEL_PREMIUM_TOPIC = next(
+    topic
+    for topic, abi in WHEEL_EVENTS_BY_TOPIC.items()
+    if abi["name"] == "WheelPremiumAccrued"
+)
 PROXY_ROLES = {
     "fund_vault",
     "fund_share",
@@ -38,6 +44,7 @@ PROXY_ROLES = {
     "strategy_manager",
     "csp_adapter",
     "covered_call_adapter",
+    "wheel_coordinator",
     "controller",
     "batch_settler",
 }
@@ -47,6 +54,7 @@ IMMUTABLE_ROLES = {
     "address_book",
     "csp_valuator",
     "covered_call_valuator",
+    "meta_wheel_valuator",
     "margin_pool",
     "nav_verifier",
     "oracle",
@@ -332,6 +340,7 @@ def _fetch_window(
     registry: FundRegistry,
     from_block: int,
     to_block: int,
+    client: Client | None = None,
 ) -> list[FundEvent]:
     bindings: dict[str, list[ContractBinding]] = {}
     for contract in registry.contracts:
@@ -349,6 +358,65 @@ def _fetch_window(
         for log in logs
         if (event := _decode_log(w3, registry, bindings, log)) is not None
     ]
+    if registry.strategy_kind == "meta_wheel":
+        active_lanes: dict[str, ContractBinding] = {}
+        lane_bindings: dict[str, list[ContractBinding]] = {}
+        historical = _load_events(registry, client)
+        for event in historical:
+            if event.contract_role != "wheel_coordinator":
+                continue
+            if event.event_name == "WheelLaneRegistered":
+                lane = normalize_address(event.args["lane"])
+                active_lanes[lane] = ContractBinding(
+                    address=lane,
+                    role="wheel_child_lane",
+                    interface_version=event.interface_version,
+                    valid_from_block=event.block_number,
+                    valid_to_block=None,
+                )
+            elif event.event_name == "WheelLaneRemoved":
+                lane = normalize_address(event.args["lane"])
+                active_lanes.pop(lane, None)
+        # Scan every lane active at the start of or registered during this
+        # window. A lane removed mid-window can still have an earlier premium
+        # log in the same window, but it must disappear before the next one.
+        lane_bindings.update(
+            (lane, [binding]) for lane, binding in active_lanes.items()
+        )
+        for event in events:
+            if event.contract_role != "wheel_coordinator":
+                continue
+            if event.event_name == "WheelLaneRegistered":
+                lane = normalize_address(event.args["lane"])
+                binding = ContractBinding(
+                    address=lane,
+                    role="wheel_child_lane",
+                    interface_version=event.interface_version,
+                    valid_from_block=event.block_number,
+                    valid_to_block=None,
+                )
+                active_lanes[lane] = binding
+                lane_bindings[lane] = [binding]
+            elif event.event_name == "WheelLaneRemoved":
+                lane = normalize_address(event.args["lane"])
+                active_lanes.pop(lane, None)
+        if lane_bindings:
+            child_logs = w3.eth.get_logs(
+                {
+                    "address": [
+                        Web3.to_checksum_address(address) for address in lane_bindings
+                    ],
+                    "fromBlock": from_block,
+                    "toBlock": to_block,
+                    "topics": [[WHEEL_PREMIUM_TOPIC]],
+                }
+            )
+            events.extend(
+                event
+                for log in child_logs
+                if (event := _decode_log(w3, registry, lane_bindings, log)) is not None
+            )
+    events = list({event.identity: event for event in events}.values())
     return sorted(
         events,
         key=lambda event: (
@@ -493,11 +561,10 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
         if binding.valid_from_block <= block_number
         and (binding.valid_to_block is None or block_number <= binding.valid_to_block)
     }
-    adapter_role = (
-        "covered_call_adapter"
-        if registry.strategy_kind == "covered_call"
-        else "csp_adapter"
-    )
+    adapter_role = {
+        "covered_call": "covered_call_adapter",
+        "meta_wheel": "wheel_coordinator",
+    }.get(registry.strategy_kind, "csp_adapter")
     required = _required_reconciliation_roles(registry.strategy_kind)
     missing = sorted(required - by_role.keys())
     if missing:
@@ -516,9 +583,10 @@ def _snapshot_contracts(registry: FundRegistry, block_number: int) -> SnapshotCo
 
 
 def _required_reconciliation_roles(strategy_kind: str) -> set[str]:
-    adapter_role = (
-        "covered_call_adapter" if strategy_kind == "covered_call" else "csp_adapter"
-    )
+    adapter_role = {
+        "covered_call": "covered_call_adapter",
+        "meta_wheel": "wheel_coordinator",
+    }.get(strategy_kind, "csp_adapter")
     return {
         "fund_vault",
         "fund_flow_manager",
@@ -695,7 +763,11 @@ def index_registry_once(
                 if to_block == confirmed_head.block_number
                 else Web3.to_hex(w3.eth.get_block(to_block)["hash"])
             )
-            events = _fetch_window(w3, registry, next_block, to_block)
+            events = (
+                _fetch_window(w3, registry, next_block, to_block, client)
+                if registry.strategy_kind == "meta_wheel"
+                else _fetch_window(w3, registry, next_block, to_block)
+            )
             break
         except Exception as error:
             if window <= MIN_WINDOW:
