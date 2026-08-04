@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from pydantic.alias_generators import to_camel
 
 
@@ -23,7 +23,7 @@ class ActionAvailability(FundModel):
 
 class FundRegistryItem(FundModel):
     fund_key: str
-    strategy_kind: Literal["csp", "covered_call"] = "csp"
+    strategy_kind: Literal["csp", "covered_call", "meta_wheel"] = "csp"
     chain_id: int
     fund_address: str
     share_token: TokenMetadata
@@ -107,12 +107,90 @@ class StrategyOperationSummary(FundModel):
 
 
 class FundStrategySnapshot(FundModel):
-    strategy_kind: Literal["csp", "covered_call"] = "csp"
+    strategy_kind: Literal["csp", "covered_call", "meta_wheel"] = "csp"
     latest_position: CspPositionSummary | None = None
     latest_operation: StrategyOperationSummary | None = None
     total_premium_collected_assets: str = "0"
     next_open_after: int | None = None
     next_open_condition: str
+
+
+class WheelTrancheSummary(FundModel):
+    tranche_id: str
+    child_vault: str | None = None
+    state: str
+    principal_assets: str
+    pending_assets: str = "0"
+    child_shares: str
+    child_position_id: str | None = None
+    child_execution_state_hash: str | None = None
+    settlement_kind: str | None = None
+    assignment_lot_ids: list[str] = Field(default_factory=list)
+    literal_assignment_floor_usd_8: str = "0"
+    protected_assignment_floor_usd_8: str = "0"
+    call_strike_usd_8: str | None = None
+    transition_nonce: int
+    next_action: str
+
+
+class WheelRedemptionSummary(FundModel):
+    reserved_assets: str
+    reserved_principal_assets: str
+
+
+class MetaWheelSnapshot(FundModel):
+    pending_csp_assets: str
+    csp_value_assets: str
+    transition_weth: str
+    transition_weth_value_assets: str
+    covered_call_value_assets: str
+    returned_usdc_assets: str
+    reserved_redemption_assets: str
+    redemption: WheelRedemptionSummary
+    active_tranche_count: int
+    protected_assignment_floor_usd_8: str
+    current_phase: str
+    next_action: str
+    cumulative_gross_premium_assets: str
+    cumulative_protocol_fee_assets: str
+    cumulative_net_premium_assets: str
+    policy_version: int = 0
+    policy_hash: str | None = None
+    nav_coherent: bool = False
+    nav_snapshot_block: int | None = None
+    nav_snapshot_block_hash: str | None = None
+    paused: bool = False
+    tranches: list[WheelTrancheSummary] = Field(default_factory=list)
+
+
+class WheelLaneNavObservation(FundModel):
+    lane: str
+    child_shares: str
+    position_state_hash: str
+    snapshot_block: int
+    snapshot_block_hash: str
+    valid_after_block: int
+    valid_until_block: int
+
+
+class WheelNavObservationResponse(FundModel):
+    fund_key: str
+    chain_id: int
+    fund_address: str
+    coordinator: str
+    report_nonce: int
+    component_id: str
+    coordinator_position_state_hash: str
+    snapshot_block: int
+    snapshot_block_hash: str
+    valid_after_block: int
+    valid_until_block: int
+    lanes: list[WheelLaneNavObservation] = Field(
+        description=(
+            "Exactly the active-valued child lanes with positive shares at the "
+            "snapshot; registered idle lanes are intentionally omitted."
+        )
+    )
 
 
 class FundSummaryResponse(FundModel):
@@ -132,6 +210,16 @@ class FundSummaryResponse(FundModel):
     as_of_block_hash: str | None
     indexed_at: str | None
     stale: bool
+    wheel: MetaWheelSnapshot | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_empty_wheel(self, handler):
+        """Keep the established standalone CSP/CC wire payload byte-stable."""
+
+        data = handler(self)
+        if self.wheel is None:
+            data.pop("wheel", None)
+        return data
 
 
 class RedemptionView(FundModel):

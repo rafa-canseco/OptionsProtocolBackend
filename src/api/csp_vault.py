@@ -6,17 +6,24 @@ import logging
 import threading
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from web3 import Web3
 
+from src.api.deps import require_mm_api_key
 from src.models.csp_vault import (
     ActivityResponse,
     FundConfigResponse,
     FundListResponse,
     FundPositionResponse,
     FundSummaryResponse,
+    WheelNavObservationResponse,
 )
-from src.vaults.csp_service import FundService, UnknownFundError, build_fund_service
+from src.vaults.csp_service import (
+    FundService,
+    UnknownFundError,
+    WheelNavObservationError,
+    build_fund_service,
+)
 
 router = APIRouter(prefix="/v2/vaults", tags=["Tokenized Funds"])
 _service: FundService | None = None
@@ -69,6 +76,8 @@ async def _call(method, *args):
         raise HTTPException(status_code=404, detail="Unknown fund") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except WheelNavObservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
     except httpx.TransportError as exc:
         logger.warning("Fund data transport failed: %s", exc)
         raise HTTPException(
@@ -110,6 +119,25 @@ async def get_redemptions(
 async def get_config(fund_key: str, request: Request, response: Response):
     model = await _call(get_fund_service().config, fund_key)
     return _respond(model, request, response, revalidate=True)
+
+
+@router.get(
+    "/{fund_key}/wheel/nav-observation",
+    response_model=WheelNavObservationResponse,
+)
+async def get_wheel_nav_observation(
+    fund_key: str,
+    request: Request,
+    response: Response,
+    snapshot_block: int = Query(ge=1),
+    _mm_address: str = Depends(require_mm_api_key),
+):
+    model = await _call(
+        get_fund_service().wheel_nav_observation,
+        fund_key,
+        snapshot_block,
+    )
+    return _respond(model, request, response, private=True, revalidate=True)
 
 
 @router.get("/{fund_key}/activity", response_model=ActivityResponse)
