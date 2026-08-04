@@ -65,6 +65,16 @@ MUTATION_FIELDS = {
     "transactionHash",
     "block",
 }
+META_WHEEL_CONFIRMED_STATUS = "CONFIRMED_CANONICAL_RECEIPTS"
+META_WHEEL_READINESS = {
+    "canonicalReceiptsRecorded": True,
+    "exactSourceRuntimeBytecodeVerified": True,
+    "bootstrapReconciled": True,
+    "finalRolesReconciled": True,
+    "standaloneBaselinesUnchanged": True,
+    "backendHandoffReady": True,
+    "mainnetAuthorized": False,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +99,18 @@ def parse_fund_deployment(
     quote_asset_decimals: int | None = None,
 ) -> FundDeployment:
     """Return trusted registry rows from a finalized option-fund manifest."""
+    if manifest.get("issue") == "B1N-419":
+        return _parse_meta_wheel_deployment(
+            manifest,
+            start_block=start_block,
+            fund_key=fund_key,
+            share_symbol=share_symbol,
+            share_decimals=share_decimals,
+            accounting_asset_symbol=accounting_asset_symbol,
+            accounting_asset_decimals=accounting_asset_decimals,
+            quote_asset_symbol=quote_asset_symbol,
+            quote_asset_decimals=quote_asset_decimals,
+        )
     if manifest.get("issue") == "B1N-360":
         return _parse_covered_call_deployment(
             manifest,
@@ -225,6 +247,177 @@ def parse_fund_deployment(
         "weth": weth,
         "strategy_kind": "csp",
         "quote_asset": None,
+        "deployment_status": "DEPLOYED",
+        "share_symbol": share_symbol,
+        "share_decimals": share_decimals,
+        "accounting_asset_symbol": accounting_asset_symbol,
+        "accounting_asset_decimals": accounting_asset_decimals,
+        "quote_asset_symbol": None,
+        "quote_asset_decimals": None,
+        "handoff_ready": True,
+    }
+    return FundDeployment(registry, rows)
+
+
+def _parse_meta_wheel_deployment(
+    manifest: dict[str, Any],
+    *,
+    start_block: int,
+    fund_key: str,
+    share_symbol: str,
+    share_decimals: int,
+    accounting_asset_symbol: str,
+    accounting_asset_decimals: int,
+    quote_asset_symbol: str | None,
+    quote_asset_decimals: int | None,
+) -> FundDeployment:
+    """Map only a receipt-confirmed B1N-419 handoff into trusted rows."""
+
+    if manifest.get("schemaVersion") != "1.0.0":
+        raise ValueError("Expected a B1N-419 schemaVersion 1.0.0 manifest")
+    if manifest.get("status") == "UNCONFIRMED_REQUIRES_CANONICAL_RECEIPTS":
+        raise ValueError("B1N-419 manifest requires canonical receipts")
+    if (
+        manifest.get("status") != META_WHEEL_CONFIRMED_STATUS
+        or manifest.get("deploymentStatus") != "DEPLOYED"
+        or manifest.get("handoffReady") is not True
+    ):
+        raise ValueError("B1N-419 deployment handoff is not confirmed")
+    if fund_key != "base-sepolia:meta-wheel":
+        raise ValueError("B1N-419 fund key must be base-sepolia:meta-wheel")
+    if (
+        start_block <= 0
+        or share_decimals < 0
+        or accounting_asset_decimals < 0
+        or not share_symbol
+        or not accounting_asset_symbol
+        or quote_asset_symbol is not None
+        or quote_asset_decimals is not None
+    ):
+        raise ValueError("B1N-419 token metadata must describe a USDC-only fund")
+
+    network = _object(manifest, "network")
+    if network.get("name") != "base-sepolia" or network.get("chainId") != 84532:
+        raise ValueError("B1N-419 must target Base Sepolia (84532)")
+    blocks = _object(network, "deploymentBlocks")
+    if blocks.get("fundFirst") != start_block:
+        raise ValueError("start_block must match network.deploymentBlocks.fundFirst")
+    fund_last = blocks.get("fundLast")
+    if (
+        isinstance(fund_last, bool)
+        or not isinstance(fund_last, int)
+        or fund_last < start_block
+    ):
+        raise ValueError("network.deploymentBlocks.fundLast must follow fundFirst")
+    _require_b1n419_receipts(manifest, start_block, fund_last)
+    _require_b1n419_readiness(manifest)
+    _require_b1n419_verification_evidence(manifest)
+    accounting_role_account = _require_b1n419_identity(manifest)
+    _require_b1n419_standalone_baselines(manifest)
+    _require_b1n419_libraries(manifest)
+
+    policy = _object(manifest, "policy")
+    _bytes32(policy.get("policyHash"), "policy.policyHash")
+    if (
+        policy.get("managementFeeWad") != 20_000_000_000_000_000
+        or policy.get("performanceFeeBps") != 1_000
+        or policy.get("premiumFeeBps") != 1_000
+    ):
+        raise ValueError("B1N-419 fee policy must be 2% AUM / 10% HWM / 10% premium")
+
+    assets = _object(manifest, "assets")
+    usdc = _plain_address(assets.get("usdc"), "assets.usdc")
+    weth = _plain_address(assets.get("weth"), "assets.weth")
+    swap_router = _plain_address(assets.get("swapRouter"), "assets.swapRouter")
+    contracts = _object(manifest, "contracts")
+    boundary = _object(manifest, "v1Boundary")
+
+    role_values = {
+        "fund_vault": _b1n419_proxy(contracts, "fundVault", start_block, fund_last),
+        "fund_share": _b1n419_proxy(contracts, "fundShare", start_block, fund_last),
+        "fund_accounting": _b1n419_proxy(
+            contracts, "fundAccounting", start_block, fund_last
+        ),
+        "fund_flow_manager": _b1n419_proxy(
+            contracts, "fundFlowManager", start_block, fund_last
+        ),
+        "strategy_manager": _b1n419_proxy(
+            contracts, "strategyManager", start_block, fund_last
+        ),
+        "wheel_coordinator": _b1n419_proxy(
+            contracts, "wheelCoordinator", start_block, fund_last
+        ),
+        "claim_escrow": _b1n419_address(
+            contracts, "claimEscrow", start_block, fund_last
+        ),
+        "access_manager": _b1n419_address(
+            contracts, "accessManager", start_block, fund_last
+        ),
+        "meta_wheel_valuator": _b1n419_address(
+            contracts, "metaWheelValuator", start_block, fund_last
+        ),
+        "nav_verifier": _b1n419_address(
+            contracts, "navReportVerifier", start_block, fund_last
+        ),
+        "controller": (*_v1_proxy(boundary, "controller"), start_block),
+        "batch_settler": (*_v1_proxy(boundary, "batchSettler"), start_block),
+        "address_book": (_v1_address(boundary, "addressBook"), None, start_block),
+        "margin_pool": (_v1_address(boundary, "marginPool"), None, start_block),
+        "oracle": (_v1_address(boundary, "oracle"), None, start_block),
+        "otoken_factory": (
+            _v1_address(boundary, "oTokenFactory"),
+            None,
+            start_block,
+        ),
+        "whitelist": (_v1_address(boundary, "whitelist"), None, start_block),
+        "swap_router": (swap_router, None, start_block),
+    }
+    expected_roles = {
+        "access_manager",
+        "address_book",
+        "batch_settler",
+        "claim_escrow",
+        "controller",
+        "fund_accounting",
+        "fund_flow_manager",
+        "fund_share",
+        "fund_vault",
+        "margin_pool",
+        "meta_wheel_valuator",
+        "nav_verifier",
+        "oracle",
+        "otoken_factory",
+        "strategy_manager",
+        "swap_router",
+        "wheel_coordinator",
+        "whitelist",
+    }
+    if set(role_values) != expected_roles:
+        raise ValueError("B1N-419 manifest does not cover the trusted role set")
+    rows = tuple(
+        {
+            "contract_role": role,
+            "contract_address": address,
+            "implementation_address": implementation,
+            "interface_version": 1,
+            "valid_from_block": valid_from_block,
+            "valid_to_block": None,
+        }
+        for role, (address, implementation, valid_from_block) in sorted(
+            role_values.items()
+        )
+    )
+    registry = {
+        "chain_id": 84532,
+        "fund_address": role_values["fund_vault"][0],
+        "fund_key": fund_key,
+        "start_block": start_block,
+        "accounting_asset": usdc,
+        "share_token": role_values["fund_share"][0],
+        "weth": weth,
+        "strategy_kind": "meta_wheel",
+        "quote_asset": None,
+        "accounting_role_account": accounting_role_account,
         "deployment_status": "DEPLOYED",
         "share_symbol": share_symbol,
         "share_decimals": share_decimals,
@@ -483,6 +676,183 @@ def _parse_covered_call_deployment(
         "handoff_ready": True,
     }
     return FundDeployment(registry, tuple(rows))
+
+
+def _require_b1n419_readiness(manifest: dict[str, Any]) -> None:
+    readiness = _object(manifest, "readiness")
+    incomplete = [
+        name
+        for name, expected in META_WHEEL_READINESS.items()
+        if readiness.get(name) is not expected
+    ]
+    if incomplete:
+        raise ValueError(
+            "B1N-419 readiness is incomplete: " + ", ".join(sorted(incomplete))
+        )
+
+
+def _require_b1n419_verification_evidence(manifest: dict[str, Any]) -> None:
+    evidence = _object(manifest, "verificationEvidence")
+    if (
+        evidence.get("method") != "SOLC_STANDARD_JSON_RPC_EXACT_V2"
+        or evidence.get("compilerVersion") != "0.8.24+commit.e11b9ed9"
+        or evidence.get("addressCount") != 47
+        or evidence.get("artifactCount") != 25
+    ):
+        raise ValueError("B1N-419 source/runtime verification evidence is invalid")
+    for field in (
+        "sourceRuntimeEvidenceSha256",
+        "coreBuildInfoSha256",
+        "libraryBuildInfoSha256",
+        "coreStandardJsonInputSha256",
+        "libraryStandardJsonInputSha256",
+        "inventorySha256",
+    ):
+        _bytes32(evidence.get(field), f"verificationEvidence.{field}")
+
+
+def _require_b1n419_identity(manifest: dict[str, Any]) -> str:
+    source_commit = manifest.get("sourceCommit")
+    if not isinstance(source_commit, str) or len(source_commit) != 40:
+        raise ValueError("B1N-419 sourceCommit must be a full git commit")
+    try:
+        bytes.fromhex(source_commit)
+    except ValueError as exc:
+        raise ValueError("B1N-419 sourceCommit must be a full git commit") from exc
+    _bytes32(manifest.get("deploymentId"), "deploymentId")
+    roles = _object(manifest, "finalRoles")
+    accounts = {
+        role: _plain_address(roles.get(role), f"finalRoles.{role}")
+        for role in (
+            "admin",
+            "upgrader",
+            "accounting",
+            "allocator",
+            "processor",
+            "curator",
+            "guardian",
+        )
+    }
+    if len(set(accounts.values())) != len(accounts):
+        raise ValueError("B1N-419 final roles must be distinct")
+    return accounts["accounting"]
+
+
+def _require_b1n419_receipts(
+    manifest: dict[str, Any], start_block: int, fund_last: int
+) -> None:
+    receipts = manifest.get("canonicalReceipts")
+    if not isinstance(receipts, list) or not receipts:
+        raise ValueError("B1N-419 canonicalReceipts must be a non-empty array")
+    hashes: set[str] = set()
+    receipt_blocks: set[int] = set()
+    for index, receipt in enumerate(receipts):
+        field = f"canonicalReceipts[{index}]"
+        if not isinstance(receipt, dict):
+            raise ValueError(f"{field} must be an object")
+        transaction_hash = _bytes32(
+            receipt.get("transactionHash"), f"{field}.transactionHash"
+        )
+        _bytes32(receipt.get("blockHash"), f"{field}.blockHash")
+        block_number = receipt.get("blockNumber")
+        if (
+            isinstance(block_number, bool)
+            or not isinstance(block_number, int)
+            or not start_block <= block_number <= fund_last
+            or receipt.get("status") != 1
+        ):
+            raise ValueError(
+                f"{field} must be a successful receipt in the deployment window"
+            )
+        if transaction_hash in hashes:
+            raise ValueError("B1N-419 canonical receipt hashes must be unique")
+        hashes.add(transaction_hash)
+        receipt_blocks.add(block_number)
+    if start_block not in receipt_blocks or fund_last not in receipt_blocks:
+        raise ValueError("B1N-419 receipts must bind both deployment boundaries")
+
+
+def _require_b1n419_standalone_baselines(manifest: dict[str, Any]) -> None:
+    standalone = _object(manifest, "standaloneBaselines")
+    for key in (
+        "cspVault",
+        "cspAdapter",
+        "coveredCallVault",
+        "coveredCallAdapter",
+    ):
+        value = _object(standalone, key)
+        if value.get("unchanged") is not True:
+            raise ValueError(f"standaloneBaselines.{key}.unchanged must be true")
+        _plain_address(value.get("proxy"), f"standaloneBaselines.{key}.proxy")
+        _plain_address(
+            value.get("implementation"),
+            f"standaloneBaselines.{key}.implementation",
+        )
+        _bytes32(
+            value.get("implementationCodehash"),
+            f"standaloneBaselines.{key}.implementationCodehash",
+        )
+
+
+def _require_b1n419_libraries(manifest: dict[str, Any]) -> None:
+    libraries = manifest.get("linkedLibraries")
+    codehashes = manifest.get("linkedLibraryCodehashes")
+    if (
+        not isinstance(libraries, list)
+        or not isinstance(codehashes, list)
+        or len(libraries) < 5
+        or len(libraries) != len(codehashes)
+    ):
+        raise ValueError("B1N-419 linked library bindings are incomplete")
+    for index, (library, codehash) in enumerate(
+        zip(libraries, codehashes, strict=True)
+    ):
+        _plain_address(library, f"linkedLibraries[{index}]")
+        _bytes32(codehash, f"linkedLibraryCodehashes[{index}]")
+
+
+def _b1n419_proxy(
+    contracts: dict[str, Any], key: str, start_block: int, fund_last: int
+) -> tuple[str, str, int]:
+    value = _object(contracts, key)
+    proxy = _plain_address(value.get("proxy"), f"contracts.{key}.proxy")
+    implementation = _plain_address(
+        value.get("implementation"), f"contracts.{key}.implementation"
+    )
+    valid_from = _bounded_deployment_block(
+        value.get("validFromBlock"),
+        f"contracts.{key}.validFromBlock",
+        start_block,
+        fund_last,
+    )
+    implementation_from = _bounded_deployment_block(
+        value.get("implementationValidFromBlock"),
+        f"contracts.{key}.implementationValidFromBlock",
+        start_block,
+        fund_last,
+    )
+    if implementation_from > valid_from:
+        raise ValueError(f"contracts.{key} implementation cannot follow its proxy")
+    _bytes32(
+        value.get("implementationCodehash"),
+        f"contracts.{key}.implementationCodehash",
+    )
+    return proxy, implementation, valid_from
+
+
+def _b1n419_address(
+    contracts: dict[str, Any], key: str, start_block: int, fund_last: int
+) -> tuple[str, None, int]:
+    value = _object(contracts, key)
+    address = _plain_address(value.get("address"), f"contracts.{key}.address")
+    valid_from = _bounded_deployment_block(
+        value.get("validFromBlock"),
+        f"contracts.{key}.validFromBlock",
+        start_block,
+        fund_last,
+    )
+    _bytes32(value.get("codehash"), f"contracts.{key}.codehash")
+    return address, None, valid_from
 
 
 def _object(parent: dict[str, Any], key: str) -> dict[str, Any]:
