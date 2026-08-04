@@ -160,8 +160,12 @@ class FakeRepository:
 def test_registry_summary_and_fund_inventory() -> None:
     service = FundService(FakeRepository())
     summary = service.summary("base-sepolia:csp")
+    wallet = service.position("base-sepolia:csp", USER)
 
     assert service.list_funds().funds[0].accounting_asset.symbol == "USDC"
+    assert "wheel" not in service.list_funds().model_dump_json(by_alias=True)
+    assert "wheel" not in summary.model_dump_json(by_alias=True)
+    assert "wheel" not in wallet.model_dump_json(by_alias=True)
     assert summary.composition.assigned_weth == "2"
     assert summary.composition.strategy_accounting_assets == "1500"
     assert summary.composition.locked_collateral_assets == "400"

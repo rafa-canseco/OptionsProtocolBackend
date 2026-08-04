@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     fund_nav_submitter_private_key: str = ""
     fund_nav_inclusion_margin_blocks: int = 3
     fund_nav_execution_buffer_blocks: int = 15
+    meta_wheel_fund_key: str = ""
     fund_csp_sepolia_fair_value_observations_enabled: bool = False
     fund_csp_sepolia_observer_private_keys: str = ""
     fund_csp_sepolia_fair_value_iv_bps: int = 0
@@ -220,6 +221,8 @@ class Settings(BaseSettings):
     mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
     # Historical P&L / engagement
+    # Temporary rollback gate for the v1 results, leaderboard, and weekly snapshot.
+    legacy_agora_v1_enabled: bool = False
     coingecko_api_url: str = "https://api.coingecko.com/api/v3"
     weekly_aggregation_day: int = 4  # 0=Monday, 4=Friday
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC

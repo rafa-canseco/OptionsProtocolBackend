@@ -174,7 +174,9 @@ class CoveredCallRepository:
 
 
 def test_covered_call_product_api_preserves_frontend_strategy_shape() -> None:
-    summary = FundService(CoveredCallRepository()).summary("base-sepolia:covered-call")
+    service = FundService(CoveredCallRepository())
+    summary = service.summary("base-sepolia:covered-call")
+    wallet = service.position("base-sepolia:covered-call", USER)
 
     assert summary.fund.strategy_kind == "covered_call"
     assert summary.fund.accounting_asset.symbol == "WETH"
@@ -200,6 +202,9 @@ def test_covered_call_product_api_preserves_frontend_strategy_shape() -> None:
     assert summary.strategy.next_open_condition == "after_current_settlement"
     assert summary.actions.deposit.available is True
     assert "adapterState" not in summary.model_dump_json()
+    assert "wheel" not in service.list_funds().model_dump_json(by_alias=True)
+    assert "wheel" not in summary.model_dump_json(by_alias=True)
+    assert "wheel" not in wallet.model_dump_json(by_alias=True)
 
 
 def test_called_away_inventory_blocks_only_the_next_open_message() -> None:
