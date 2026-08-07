@@ -181,6 +181,10 @@ class MarketDataResponse(BaseModel):
         default="deribit",
         description="Where iv came from: 'deribit' (live) or 'proxy' (AssetConfig fallback)",
     )
+    observed_at: int = Field(
+        gt=0,
+        description="Unix timestamp of the oldest spot/IV observation in this snapshot",
+    )
     protocol_fee_bps: int
     gas_price_gwei: float
     available_otokens: list[OTokenInfo]
