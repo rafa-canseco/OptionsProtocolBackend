@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     fund_nav_inclusion_margin_blocks: int = 3
     fund_nav_execution_buffer_blocks: int = 15
     meta_wheel_fund_key: str = ""
+    meta_wheel_operator_private_key: str = ""
+    meta_wheel_nav_reporter_private_keys: str = ""
+    meta_wheel_csp_sepolia_fair_value_observations_enabled: bool = False
+    meta_wheel_csp_sepolia_observer_private_keys: str = ""
+    meta_wheel_covered_call_sepolia_fair_value_observations_enabled: bool = False
+    meta_wheel_covered_call_sepolia_observer_private_keys: str = ""
     fund_csp_sepolia_fair_value_observations_enabled: bool = False
     fund_csp_sepolia_observer_private_keys: str = ""
     fund_csp_sepolia_fair_value_iv_bps: int = 0
@@ -287,6 +293,120 @@ def get_fund_nav_submitter_private_key() -> str:
     except Exception as exc:
         raise ValueError("Invalid FUND_NAV_SUBMITTER_PRIVATE_KEY") from exc
     return key
+
+
+def get_meta_wheel_nav_reporter_private_keys() -> tuple[str, ...]:
+    """Return the dedicated two-key reporter quorum for the Meta Wheel."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.meta_wheel_nav_reporter_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "META_WHEEL_NAV_REPORTER_PRIVATE_KEYS must contain exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid META_WHEEL_NAV_REPORTER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "META_WHEEL_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters"
+        )
+    return keys
+
+
+def get_meta_wheel_observer_private_keys(strategy_kind: str) -> tuple[str, ...]:
+    """Return the Wheel-only observer quorum without replacing standalone keys."""
+    from eth_account import Account
+
+    if strategy_kind == "csp":
+        raw = settings.meta_wheel_csp_sepolia_observer_private_keys
+        variable = "META_WHEEL_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS"
+    elif strategy_kind == "covered_call":
+        raw = settings.meta_wheel_covered_call_sepolia_observer_private_keys
+        variable = "META_WHEEL_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS"
+    else:
+        raise ValueError("Unsupported Meta Wheel observer strategy")
+    keys = tuple(key.strip() for key in raw.split(",") if key.strip())
+    if len(keys) != 2:
+        raise ValueError(f"{variable} must contain exactly two keys")
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(f"Invalid {variable} entry") from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(f"{variable} contains duplicate observers")
+    return keys
+
+
+def validate_meta_wheel_credential_topology() -> None:
+    """Require every Wheel signing domain to be distinct from all others."""
+    from eth_account import Account
+
+    operator_key = settings.meta_wheel_operator_private_key.strip()
+    if not operator_key:
+        raise ValueError("META_WHEEL_OPERATOR_PRIVATE_KEY is required")
+    try:
+        operator = Account.from_key(operator_key).address.lower()
+    except Exception as exc:
+        raise ValueError("Invalid META_WHEEL_OPERATOR_PRIVATE_KEY") from exc
+
+    groups = {
+        "Meta Wheel operator": {operator},
+        "Meta Wheel NAV reporters": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_nav_reporter_private_keys()
+        },
+        "Meta Wheel CSP observers": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_observer_private_keys("csp")
+        },
+        "Meta Wheel covered-call observers": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_observer_private_keys("covered_call")
+        },
+    }
+    optional = (
+        (
+            "standalone NAV reporters",
+            settings.fund_nav_reporter_private_keys,
+            get_fund_nav_reporter_private_keys,
+        ),
+        (
+            "standalone NAV submitter",
+            settings.fund_nav_submitter_private_key,
+            lambda: (get_fund_nav_submitter_private_key(),),
+        ),
+        (
+            "standalone CSP observers",
+            settings.fund_csp_sepolia_observer_private_keys,
+            get_fund_csp_sepolia_observer_private_keys,
+        ),
+        (
+            "standalone covered-call observers",
+            settings.fund_covered_call_sepolia_observer_private_keys,
+            get_fund_covered_call_sepolia_observer_private_keys,
+        ),
+    )
+    for label, configured, getter in optional:
+        if configured.strip():
+            groups[label] = {Account.from_key(key).address.lower() for key in getter()}
+
+    names = tuple(groups)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            if groups[left] & groups[right]:
+                raise ValueError(f"Credential overlap between {left} and {right}")
 
 
 def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:

@@ -24,8 +24,11 @@ from src.config import (
     get_fund_csp_sepolia_observer_private_keys,
     get_fund_nav_reporter_private_keys,
     get_fund_nav_submitter_private_key,
+    get_meta_wheel_nav_reporter_private_keys,
+    get_meta_wheel_observer_private_keys,
     get_tokenized_fund_rpc_url,
     settings,
+    validate_meta_wheel_credential_topology,
 )
 from src.db.database import get_client
 from src.fund_nav.abis import (
@@ -1988,16 +1991,19 @@ def meta_wheel_producer_gate_reason(registry: dict[str, Any]) -> str | None:
     if configured_key != registry.get("fund_key"):
         return "META_WHEEL_FUND_KEY_MISMATCH"
     if int(registry.get("chain_id", 0)) == BASE_SEPOLIA_CHAIN_ID and not (
-        settings.fund_csp_sepolia_fair_value_observations_enabled
-        and settings.fund_covered_call_sepolia_fair_value_observations_enabled
+        settings.meta_wheel_csp_sepolia_fair_value_observations_enabled
+        and settings.meta_wheel_covered_call_sepolia_fair_value_observations_enabled
     ):
         return "META_WHEEL_CHILD_OBSERVATIONS_DISABLED"
     if int(registry.get("chain_id", 0)) == BASE_SEPOLIA_CHAIN_ID:
         try:
-            if (
-                not get_fund_csp_sepolia_observer_private_keys()
-                or not get_fund_covered_call_sepolia_observer_private_keys()
-            ):
+            validate_meta_wheel_credential_topology()
+        except (TypeError, ValueError):
+            return "META_WHEEL_CREDENTIAL_TOPOLOGY_INVALID"
+        try:
+            if not get_meta_wheel_observer_private_keys(
+                "csp"
+            ) or not get_meta_wheel_observer_private_keys("covered_call"):
                 return "META_WHEEL_CHILD_OBSERVERS_MISSING"
             get_fund_csp_sepolia_fair_value_policy()
             get_fund_covered_call_sepolia_fair_value_policy()
@@ -2149,22 +2155,28 @@ def _build_registered_fund_reporter(registry):
 def _build_fund_reporter(repository, fund):
     if fund.trust_reason:
         return BlockedReporter(repository, fund, fund.trust_reason)
+    strategy_kind = fund.registry.get("strategy_kind")
+    if strategy_kind not in {"csp", "covered_call", "meta_wheel"}:
+        return BlockedReporter(repository, fund, "UNSUPPORTED_STRATEGY_KIND")
     gate_reason = meta_wheel_reporting_gate_reason(
         fund.registry,
-        settings.operator_private_key,
+        (
+            settings.meta_wheel_operator_private_key
+            if fund.registry.get("strategy_kind") == "meta_wheel"
+            else settings.operator_private_key
+        ),
     )
     gate_reason = gate_reason or meta_wheel_producer_gate_reason(fund.registry)
     if gate_reason:
         return BlockedReporter(repository, fund, gate_reason)
     w3 = Web3(Web3.HTTPProvider(get_tokenized_fund_rpc_url()))
-    strategy_kind = fund.registry.get("strategy_kind", "csp")
     is_csp = strategy_kind == "csp"
     wheel_contexts: dict[str, ValuationContext] = {}
     if strategy_kind == "meta_wheel":
         is_sepolia = fund.chain_id == BASE_SEPOLIA_CHAIN_ID
-        csp_keys = get_fund_csp_sepolia_observer_private_keys() if is_sepolia else ()
+        csp_keys = get_meta_wheel_observer_private_keys("csp") if is_sepolia else ()
         call_keys = (
-            get_fund_covered_call_sepolia_observer_private_keys() if is_sepolia else ()
+            get_meta_wheel_observer_private_keys("covered_call") if is_sepolia else ()
         )
         csp_policy = get_fund_csp_sepolia_fair_value_policy() if is_sepolia else None
         call_policy = (
@@ -2208,11 +2220,18 @@ def _build_fund_reporter(repository, fund):
         fair_value_policy=fair_value_policy,
         wheel_valuation_contexts=wheel_contexts,
     )
-    submitter_key = get_fund_nav_submitter_private_key()
+    if strategy_kind == "meta_wheel":
+        reporter_keys = get_meta_wheel_nav_reporter_private_keys()
+        submitter_key = settings.meta_wheel_operator_private_key.strip()
+        if not submitter_key:
+            raise ValueError("META_WHEEL_OPERATOR_PRIVATE_KEY is required")
+    else:
+        reporter_keys = get_fund_nav_reporter_private_keys()
+        submitter_key = get_fund_nav_submitter_private_key()
     reporter = NavReporter(
         gateway,
         SupabaseRunStore(repository),
-        private_keys=get_fund_nav_reporter_private_keys(),
+        private_keys=reporter_keys,
         submitter_private_key=submitter_key,
         expected_chain_id=fund.chain_id,
         transaction_timeout=settings.fund_nav_reporter_tx_timeout_seconds,
