@@ -227,7 +227,8 @@ async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
         worker_clients.append(client)
         return client
 
-    def index_cycle(_w3, client, _chain_id, fund_address):
+    def index_cycle(_w3, client, selected_registry):
+        fund_address = selected_registry.fund_address
         cycle_clients[fund_address] = client
         if fund_address == registry.fund_address:
             slow_started.set()
@@ -248,7 +249,7 @@ async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
     )
     monkeypatch.setattr(
         indexer,
-        "_index_registry_identity_once",
+        "_index_registry_once",
         index_cycle,
     )
 
@@ -287,8 +288,8 @@ async def test_fund_worker_error_does_not_stop_peer(monkeypatch, registry) -> No
     covered_call_ran = asyncio.Event()
     loop = asyncio.get_running_loop()
 
-    def index_cycle(_w3, _client, _chain_id, fund_address):
-        if fund_address == registry.fund_address:
+    def index_cycle(_w3, _client, selected_registry):
+        if selected_registry.fund_address == registry.fund_address:
             failed_fund_ran.set()
             raise RuntimeError("temporary CSP indexing failure")
         loop.call_soon_threadsafe(covered_call_ran.set)
@@ -310,7 +311,7 @@ async def test_fund_worker_error_does_not_stop_peer(monkeypatch, registry) -> No
     )
     monkeypatch.setattr(
         indexer,
-        "_index_registry_identity_once",
+        "_index_registry_once",
         index_cycle,
     )
 
@@ -361,7 +362,7 @@ async def test_workers_construct_provider_from_selected_fund_rpc(
     )
     monkeypatch.setattr(
         indexer,
-        "_index_registry_identity_once",
+        "_index_registry_once",
         index_cycle,
     )
 
@@ -371,6 +372,138 @@ async def test_workers_construct_provider_from_selected_fund_rpc(
     await task
 
     assert provider_urls == ["https://fund-rpc.example"]
+
+
+@pytest.mark.asyncio
+async def test_indexer_worker_failure_backoff_caps_and_resets(
+    monkeypatch, registry
+) -> None:
+    outcomes = iter(
+        [RuntimeError("one"), RuntimeError("two"), None, RuntimeError("three")]
+    )
+    delays = []
+
+    def index_once(*_args):
+        outcome = next(outcomes)
+        if outcome is not None:
+            raise outcome
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(indexer, "_create_worker_client", ClosableWorkerClient)
+    monkeypatch.setattr(indexer, "_index_registry_once", index_once)
+    monkeypatch.setattr(
+        indexer.settings, "tokenized_fund_indexer_poll_interval_seconds", 200
+    )
+    monkeypatch.setattr(indexer.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await indexer._run_registry_worker(registry, "https://fund-rpc.example")
+
+    assert delays == [200, 300, 200, 200]
+
+
+@pytest.mark.asyncio
+async def test_indexer_worker_refreshes_only_on_bounded_interval(
+    monkeypatch, registry
+) -> None:
+    monotonic_values = iter([0, 100, 200, 300, 400, 500])
+    refreshes = []
+    cycles = []
+    sleeps = 0
+
+    def refresh(_client, chain_id, fund_address):
+        refreshes.append((chain_id, fund_address))
+        return registry
+
+    async def sleep(_delay):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(indexer, "_create_worker_client", ClosableWorkerClient)
+    monkeypatch.setattr(indexer, "_monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(indexer, "_load_registry_identity", refresh)
+    monkeypatch.setattr(
+        indexer,
+        "_index_registry_once",
+        lambda _w3, _client, selected: cycles.append(selected),
+    )
+    monkeypatch.setattr(indexer.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await indexer._run_registry_worker(registry, "https://fund-rpc.example")
+
+    assert len(cycles) == 4
+    assert refreshes == [(registry.chain_id, registry.fund_address)]
+
+
+def test_registry_identity_refresh_uses_specific_explicit_queries(registry) -> None:
+    calls = []
+    registry_row = {
+        "chain_id": registry.chain_id,
+        "fund_address": registry.fund_address,
+        "start_block": registry.start_block,
+        "accounting_asset": registry.accounting_asset,
+        "weth": registry.weth,
+        "strategy_kind": registry.strategy_kind,
+        "quote_asset": registry.quote_asset,
+    }
+    contract = registry.contracts[0]
+    contract_row = {
+        "contract_address": contract.address,
+        "contract_role": contract.role,
+        "interface_version": contract.interface_version,
+        "valid_from_block": contract.valid_from_block,
+        "valid_to_block": contract.valid_to_block,
+        "implementation_address": contract.implementation_address,
+    }
+
+    class Query:
+        def __init__(self, table_name, data):
+            self.table_name = table_name
+            self.data = data
+
+        def select(self, columns):
+            calls.append((self.table_name, "select", columns))
+            return self
+
+        def eq(self, column, value):
+            calls.append((self.table_name, "eq", column, value))
+            return self
+
+        def limit(self, value):
+            calls.append((self.table_name, "limit", value))
+            return self
+
+        def execute(self):
+            return self
+
+    class Client:
+        def table(self, name):
+            data = [registry_row] if name == "v2_fund_registry" else [contract_row]
+            return Query(name, data)
+
+    loaded = indexer._load_registry_identity(
+        Client(), registry.chain_id, registry.fund_address
+    )
+
+    assert loaded == registry
+    assert ("v2_fund_registry", "select", indexer.FUND_REGISTRY_COLUMNS) in calls
+    assert ("v2_fund_registry", "eq", "enabled", True) in calls
+    assert ("v2_fund_registry", "eq", "chain_id", registry.chain_id) in calls
+    assert (
+        "v2_fund_registry",
+        "eq",
+        "fund_address",
+        registry.fund_address,
+    ) in calls
+    assert ("v2_fund_contracts", "select", indexer.FUND_CONTRACT_COLUMNS) in calls
+    assert not any(call[1] == "select" and call[2] == "*" for call in calls)
 
 
 def test_reorg_rewinds_without_advancing_checkpoint(monkeypatch, registry) -> None:

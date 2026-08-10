@@ -45,6 +45,26 @@ _LAZY_BASE_ASSET_ADDRESSES = {
 }
 
 
+def validate_fund_runtime_cadences() -> None:
+    """Reject enabled fund loops configured below operationally safe minima."""
+    if (
+        settings.tokenized_fund_indexer_enabled
+        and settings.tokenized_fund_indexer_poll_interval_seconds < 15
+    ):
+        raise RuntimeError(
+            "TOKENIZED_FUND_INDEXER_POLL_INTERVAL_SECONDS must be at least 15 "
+            "when the indexer is enabled"
+        )
+    if (
+        settings.fund_nav_reporter_enabled
+        and settings.fund_nav_reporter_interval_seconds < 30
+    ):
+        raise RuntimeError(
+            "FUND_NAV_REPORTER_INTERVAL_SECONDS must be at least 30 when the "
+            "NAV reporter is enabled"
+        )
+
+
 def _configured_lazy_assets() -> set[str]:
     return {
         item.strip().lower()
@@ -308,6 +328,7 @@ async def lifespan(app: FastAPI):
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
+    validate_fund_runtime_cadences()
     if settings.tokenized_fund_indexer_enabled and not get_tokenized_fund_rpc_url():
         raise RuntimeError(
             "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
