@@ -30,6 +30,7 @@ from src.config import (
     has_bridge_config,
     has_enabled_solana_bots,
     is_solana_bot_enabled,
+    validate_meta_wheel_credential_topology,
 )
 
 logging.basicConfig(
@@ -339,12 +340,24 @@ async def lifespan(app: FastAPI):
             "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
             "FUND_NAV_REPORTER_ENABLED=true"
         )
-    if (
-        settings.fund_nav_reporter_enabled
-        and not settings.fund_nav_reporter_private_keys
+    wheel_reporter_configured = bool(settings.meta_wheel_fund_key.strip())
+    standalone_reporter_configured = bool(
+        settings.fund_nav_reporter_private_keys.strip()
+        or settings.fund_nav_submitter_private_key.strip()
+    )
+    standalone_observations_enabled = bool(
+        settings.fund_csp_sepolia_fair_value_observations_enabled
+        or settings.fund_covered_call_sepolia_fair_value_observations_enabled
+    )
+    wheel_observations_enabled = bool(
+        settings.meta_wheel_csp_sepolia_fair_value_observations_enabled
+        or settings.meta_wheel_covered_call_sepolia_fair_value_observations_enabled
+    )
+    if settings.fund_nav_reporter_enabled and not (
+        wheel_reporter_configured or standalone_reporter_configured
     ):
         raise RuntimeError(
-            "FUND_NAV_REPORTER_PRIVATE_KEYS is required when "
+            "FUND_NAV_REPORTER_PRIVATE_KEYS or Meta Wheel credentials are required when "
             "FUND_NAV_REPORTER_ENABLED=true"
         )
     if settings.fund_nav_reporter_enabled:
@@ -352,21 +365,24 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "FUND_NAV_REPORTER_LEASE_SECONDS must be between 15 and 900"
             )
-        try:
-            reporter_keys = get_fund_nav_reporter_private_keys()
-            submitter_key = get_fund_nav_submitter_private_key()
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
         from eth_account import Account
 
-        reporter_addresses = {
-            Account.from_key(key).address.lower() for key in reporter_keys
-        }
-        submitter_address = Account.from_key(submitter_key).address.lower()
-        if submitter_address in reporter_addresses:
-            raise RuntimeError(
-                "NAV submitter key must be separate from NAV reporter keys"
-            )
+        reporter_addresses = set()
+        submitter_address = None
+        if standalone_reporter_configured or standalone_observations_enabled:
+            try:
+                reporter_keys = get_fund_nav_reporter_private_keys()
+                submitter_key = get_fund_nav_submitter_private_key()
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            reporter_addresses = {
+                Account.from_key(key).address.lower() for key in reporter_keys
+            }
+            submitter_address = Account.from_key(submitter_key).address.lower()
+            if submitter_address in reporter_addresses:
+                raise RuntimeError(
+                    "NAV submitter key must be separate from NAV reporter keys"
+                )
         fair_value_configs = (
             (
                 "CSP",
@@ -402,17 +418,22 @@ async def lifespan(app: FastAPI):
                     f"Sepolia {label} observer keys must be separate from "
                     "NAV reporter keys"
                 )
-            if submitter_address in observer_addresses:
+            if (
+                submitter_address is not None
+                and submitter_address in observer_addresses
+            ):
                 raise RuntimeError(
                     f"NAV submitter key must be separate from {label} observer keys"
                 )
             observer_sets[label] = observer_addresses
         if observer_sets.get("CSP", set()) & observer_sets.get("covered-call", set()):
             raise RuntimeError("CSP and covered-call observer keys must be separate")
-    elif (
-        settings.fund_csp_sepolia_fair_value_observations_enabled
-        or settings.fund_covered_call_sepolia_fair_value_observations_enabled
-    ):
+        if wheel_reporter_configured:
+            try:
+                validate_meta_wheel_credential_topology()
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+    elif standalone_observations_enabled or wheel_observations_enabled:
         raise RuntimeError(
             "FUND_NAV_REPORTER_ENABLED is required for fair-value observations"
         )

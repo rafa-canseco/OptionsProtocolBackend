@@ -12,8 +12,11 @@ from src.config import (
     get_fund_covered_call_sepolia_observer_private_keys,
     get_fund_csp_sepolia_fair_value_policy,
     get_fund_csp_sepolia_observer_private_keys,
+    get_meta_wheel_nav_reporter_private_keys,
+    get_meta_wheel_observer_private_keys,
     get_tokenized_fund_rpc_url,
     settings,
+    validate_meta_wheel_credential_topology,
 )
 from src.fund_nav import runtime
 from src.fund_nav.fair_value import (
@@ -239,12 +242,12 @@ def test_meta_wheel_producer_requires_both_child_observation_pipelines(
     monkeypatch.setattr(settings, "meta_wheel_fund_key", registry["fund_key"])
     monkeypatch.setattr(
         settings,
-        "fund_csp_sepolia_fair_value_observations_enabled",
+        "meta_wheel_csp_sepolia_fair_value_observations_enabled",
         True,
     )
     monkeypatch.setattr(
         settings,
-        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        "meta_wheel_covered_call_sepolia_fair_value_observations_enabled",
         False,
     )
 
@@ -280,7 +283,7 @@ def test_meta_wheel_operator_mismatch_blocks_before_rpc_construction(
     )
     monkeypatch.setattr(
         runtime.settings,
-        "operator_private_key",
+        "meta_wheel_operator_private_key",
         configured_private_key,
     )
     monkeypatch.setattr(
@@ -293,6 +296,204 @@ def test_meta_wheel_operator_mismatch_blocks_before_rpc_construction(
 
     assert isinstance(reporter, BlockedReporter)
     assert reporter.reason == "META_WHEEL_OPERATOR_ACCOUNTING_ROLE_MISMATCH"
+
+
+def test_meta_wheel_credentials_are_strict_and_separate(monkeypatch) -> None:
+    keys = ["0x" + f"{value:064x}" for value in range(81, 88)]
+    operator, reporter_a, reporter_b, csp_a, csp_b, call_a, call_b = keys
+    monkeypatch.setattr(settings, "meta_wheel_operator_private_key", operator)
+    monkeypatch.setattr(
+        settings,
+        "meta_wheel_nav_reporter_private_keys",
+        f"{reporter_a},{reporter_b}",
+    )
+    monkeypatch.setattr(
+        settings,
+        "meta_wheel_csp_sepolia_observer_private_keys",
+        f"{csp_a},{csp_b}",
+    )
+    monkeypatch.setattr(
+        settings,
+        "meta_wheel_covered_call_sepolia_observer_private_keys",
+        f"{call_a},{call_b}",
+    )
+    for name in (
+        "fund_nav_reporter_private_keys",
+        "fund_nav_submitter_private_key",
+        "fund_csp_sepolia_observer_private_keys",
+        "fund_covered_call_sepolia_observer_private_keys",
+    ):
+        monkeypatch.setattr(settings, name, "")
+
+    validate_meta_wheel_credential_topology()
+    assert get_meta_wheel_nav_reporter_private_keys() == (reporter_a, reporter_b)
+    assert get_meta_wheel_observer_private_keys("csp") == (csp_a, csp_b)
+    assert get_meta_wheel_observer_private_keys("covered_call") == (call_a, call_b)
+
+
+def test_meta_wheel_credentials_fail_closed(monkeypatch) -> None:
+    key = "0x" + f"{84:064x}"
+    monkeypatch.setattr(settings, "meta_wheel_nav_reporter_private_keys", key)
+    monkeypatch.setattr(
+        settings, "meta_wheel_csp_sepolia_observer_private_keys", f"{key},{key}"
+    )
+
+    with pytest.raises(ValueError, match="exactly two"):
+        get_meta_wheel_nav_reporter_private_keys()
+    with pytest.raises(ValueError, match="duplicate observers"):
+        get_meta_wheel_observer_private_keys("csp")
+
+
+@pytest.mark.parametrize(
+    ("overlap_target", "message"),
+    [
+        ("reporter", "operator.*NAV reporters"),
+        ("csp", "NAV reporters.*CSP observers"),
+        ("call", "CSP observers.*covered-call observers"),
+        ("standalone", "Meta Wheel NAV reporters.*standalone NAV reporters"),
+    ],
+)
+def test_meta_wheel_credential_topology_rejects_cross_domain_overlap(
+    monkeypatch, overlap_target, message
+) -> None:
+    keys = ["0x" + f"{value:064x}" for value in range(91, 99)]
+    operator, reporter_a, reporter_b, csp_a, csp_b, call_a, call_b, standalone = keys
+    if overlap_target == "reporter":
+        reporter_a = operator
+    elif overlap_target == "csp":
+        csp_a = reporter_a
+    elif overlap_target == "call":
+        call_a = csp_a
+    elif overlap_target == "standalone":
+        standalone = reporter_a
+    monkeypatch.setattr(settings, "meta_wheel_operator_private_key", operator)
+    monkeypatch.setattr(
+        settings, "meta_wheel_nav_reporter_private_keys", f"{reporter_a},{reporter_b}"
+    )
+    monkeypatch.setattr(
+        settings, "meta_wheel_csp_sepolia_observer_private_keys", f"{csp_a},{csp_b}"
+    )
+    monkeypatch.setattr(
+        settings,
+        "meta_wheel_covered_call_sepolia_observer_private_keys",
+        f"{call_a},{call_b}",
+    )
+    monkeypatch.setattr(settings, "fund_nav_reporter_private_keys", standalone)
+    monkeypatch.setattr(settings, "fund_nav_submitter_private_key", "")
+    monkeypatch.setattr(settings, "fund_csp_sepolia_observer_private_keys", "")
+    monkeypatch.setattr(settings, "fund_covered_call_sepolia_observer_private_keys", "")
+
+    with pytest.raises(ValueError, match=message):
+        validate_meta_wheel_credential_topology()
+
+
+def test_unknown_strategy_kind_blocks_before_rpc_or_credentials(monkeypatch) -> None:
+    fund = TrustedFund(
+        registry={"strategy_kind": "meta-wheel-typo"},
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+    monkeypatch.setattr(
+        runtime.Web3,
+        "HTTPProvider",
+        lambda *_: pytest.fail("RPC constructed for unsupported strategy"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_fund_nav_reporter_private_keys",
+        lambda: pytest.fail("credentials selected for unsupported strategy"),
+    )
+
+    reporter = runtime._build_fund_reporter(Repository(), fund)
+
+    assert isinstance(reporter, BlockedReporter)
+    assert reporter.reason == "UNSUPPORTED_STRATEGY_KIND"
+
+
+def test_meta_wheel_reporter_uses_only_wheel_credentials(monkeypatch) -> None:
+    captured = {}
+    fund = TrustedFund(
+        registry={
+            "chain_id": 84532,
+            "fund_address": FUND,
+            "fund_key": "base-sepolia:meta-wheel",
+            "strategy_kind": "meta_wheel",
+        },
+        state={},
+        contracts={},
+        trust_reason=None,
+    )
+    monkeypatch.setattr(runtime, "meta_wheel_reporting_gate_reason", lambda *_: None)
+    monkeypatch.setattr(runtime, "meta_wheel_producer_gate_reason", lambda *_: None)
+    monkeypatch.setattr(runtime, "get_tokenized_fund_rpc_url", lambda: "http://rpc")
+
+    class FakeWeb3:
+        @staticmethod
+        def HTTPProvider(url):
+            return url
+
+        def __init__(self, provider):
+            self.provider = provider
+
+    monkeypatch.setattr(runtime, "Web3", FakeWeb3)
+    monkeypatch.setattr(
+        runtime,
+        "get_meta_wheel_observer_private_keys",
+        lambda kind: (f"{kind}-observer-a", f"{kind}-observer-b"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_meta_wheel_nav_reporter_private_keys",
+        lambda: ("wheel-a", "wheel-b"),
+    )
+    monkeypatch.setattr(
+        runtime.settings, "meta_wheel_operator_private_key", "accounting"
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_fund_nav_reporter_private_keys",
+        lambda: pytest.fail("standalone reporters selected for Meta Wheel"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_fund_nav_submitter_private_key",
+        lambda: pytest.fail("standalone submitter selected for Meta Wheel"),
+    )
+    monkeypatch.setattr(
+        runtime, "get_fund_csp_sepolia_fair_value_policy", lambda: "csp-policy"
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_fund_covered_call_sepolia_fair_value_policy",
+        lambda: "call-policy",
+    )
+
+    def gateway(_w3, _fund, _repository, **kwargs):
+        captured["contexts"] = kwargs["wheel_valuation_contexts"]
+        return object()
+
+    def reporter(_gateway, _store, **kwargs):
+        captured["reporters"] = kwargs["private_keys"]
+        captured["submitter"] = kwargs["submitter_private_key"]
+        return SimpleNamespace(run_once=lambda: ReportRun(status="confirmed"))
+
+    monkeypatch.setattr(runtime, "Web3ReporterGateway", gateway)
+    monkeypatch.setattr(runtime, "NavReporter", reporter)
+
+    built = runtime._build_fund_reporter(Repository(), fund)
+
+    assert isinstance(built, RuntimeReporter)
+    assert captured["reporters"] == ("wheel-a", "wheel-b")
+    assert captured["submitter"] == "accounting"
+    assert captured["contexts"]["csp"].observer_private_keys == (
+        "csp-observer-a",
+        "csp-observer-b",
+    )
+    assert captured["contexts"]["covered_call"].observer_private_keys == (
+        "covered_call-observer-a",
+        "covered_call-observer-b",
+    )
 
 
 class Repository:

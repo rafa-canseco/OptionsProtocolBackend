@@ -587,6 +587,186 @@ def test_nav_reporter_requires_dedicated_submitter_key(monkeypatch):
             pass
 
 
+def test_meta_wheel_credential_topology_blocks_startup(monkeypatch):
+    import src.main as main_module
+
+    def key(value):
+        return "0x" + f"{value:064x}"
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_private_keys", key(1))
+    monkeypatch.setattr(main_module.settings, "fund_nav_submitter_private_key", key(2))
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(main_module.settings, "meta_wheel_fund_key", "wheel")
+    monkeypatch.setattr(main_module.settings, "meta_wheel_operator_private_key", key(3))
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_nav_reporter_private_keys",
+        f"{key(4)},{key(5)}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_csp_sepolia_observer_private_keys",
+        f"{key(6)},{key(7)}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_covered_call_sepolia_observer_private_keys",
+        f"{key(8)},{key(4)}",
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match="Credential overlap"):
+        with TestClient(main_module.app):
+            pass
+
+
+def test_meta_wheel_only_startup_does_not_load_standalone_credentials(monkeypatch):
+    import src.main as main_module
+
+    def key(value):
+        return "0x" + f"{value:064x}"
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_private_keys", "")
+    monkeypatch.setattr(main_module.settings, "fund_nav_submitter_private_key", "")
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(main_module.settings, "meta_wheel_fund_key", "wheel")
+    monkeypatch.setattr(
+        main_module.settings, "meta_wheel_operator_private_key", key(11)
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_nav_reporter_private_keys",
+        f"{key(12)},{key(13)}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_csp_sepolia_observer_private_keys",
+        f"{key(14)},{key(15)}",
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_covered_call_sepolia_observer_private_keys",
+        f"{key(16)},{key(17)}",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_fund_nav_reporter_private_keys",
+        lambda: pytest.fail("standalone reporter credentials were loaded"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_fund_nav_submitter_private_key",
+        lambda: pytest.fail("standalone submitter credentials were loaded"),
+    )
+
+    def task_created(coroutine):
+        coroutine.close()
+        raise RuntimeError("TASK_CREATION_REACHED")
+
+    monkeypatch.setattr(main_module.asyncio, "create_task", task_created)
+
+    with pytest.raises(RuntimeError, match="TASK_CREATION_REACHED"):
+        with TestClient(main_module.app):
+            pass
+
+
+def test_standalone_only_startup_does_not_load_wheel_credentials(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "rpc_url", "https://rpc.example")
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_reporter_private_keys", "0x" + f"{21:064x}"
+    )
+    monkeypatch.setattr(
+        main_module.settings, "fund_nav_submitter_private_key", "0x" + f"{22:064x}"
+    )
+    monkeypatch.setattr(main_module.settings, "meta_wheel_fund_key", "")
+    monkeypatch.setattr(
+        main_module,
+        "validate_meta_wheel_credential_topology",
+        lambda: pytest.fail("Meta Wheel credentials were loaded"),
+    )
+
+    def task_created(coroutine):
+        coroutine.close()
+        raise RuntimeError("TASK_CREATION_REACHED")
+
+    monkeypatch.setattr(main_module.asyncio, "create_task", task_created)
+
+    with pytest.raises(RuntimeError, match="TASK_CREATION_REACHED"):
+        with TestClient(main_module.app):
+            pass
+
+
+def test_wheel_observation_flags_require_reporter_before_tasks(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "allowed_origins", "https://example.com")
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", False)
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_csp_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "fund_covered_call_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_csp_sepolia_fair_value_observations_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "meta_wheel_covered_call_sepolia_fair_value_observations_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        main_module.asyncio,
+        "create_task",
+        lambda *_: pytest.fail("startup validation must precede task creation"),
+    )
+
+    with pytest.raises(RuntimeError, match="FUND_NAV_REPORTER_ENABLED"):
+        with TestClient(main_module.app):
+            pass
+
+
 @pytest.mark.parametrize(
     ("reporter_enabled", "chain_id", "observer_keys", "message"),
     [
