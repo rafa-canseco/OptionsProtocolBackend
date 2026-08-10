@@ -419,6 +419,53 @@ def test_cors_wildcard_allowed_in_beta(monkeypatch):
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("enabled_name", "interval_name", "minimum", "message"),
+    [
+        (
+            "tokenized_fund_indexer_enabled",
+            "tokenized_fund_indexer_poll_interval_seconds",
+            15,
+            "INDEXER_POLL_INTERVAL_SECONDS",
+        ),
+        (
+            "fund_nav_reporter_enabled",
+            "fund_nav_reporter_interval_seconds",
+            30,
+            "NAV_REPORTER_INTERVAL_SECONDS",
+        ),
+    ],
+)
+def test_enabled_fund_runtime_cadence_guardrails(
+    monkeypatch, enabled_name, interval_name, minimum, message
+):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", False)
+    monkeypatch.setattr(main_module.settings, enabled_name, True)
+    monkeypatch.setattr(main_module.settings, interval_name, minimum - 1)
+
+    with pytest.raises(RuntimeError, match=message):
+        main_module.validate_fund_runtime_cadences()
+
+    monkeypatch.setattr(main_module.settings, interval_name, minimum)
+    main_module.validate_fund_runtime_cadences()
+
+
+def test_disabled_fund_runtime_cadences_do_not_block_startup(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", False)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", False)
+    monkeypatch.setattr(
+        main_module.settings, "tokenized_fund_indexer_poll_interval_seconds", 1
+    )
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_interval_seconds", 1)
+
+    main_module.validate_fund_runtime_cadences()
+
+
 def test_fund_indexer_rpc_validation_precedes_task_creation(monkeypatch):
     import src.main as main_module
 

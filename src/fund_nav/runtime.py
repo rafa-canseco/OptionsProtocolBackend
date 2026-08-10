@@ -107,6 +107,29 @@ SUBMIT_NAV_SELECTOR = Web3.keccak(
 )[:4]
 OBSERVATION_TUPLE = "(uint256,uint64,uint64,uint256,uint256,uint256,bytes)[]"
 VALUATION_DATA_TUPLE = f"({OBSERVATION_TUPLE})"
+MAX_FAILURE_BACKOFF_SECONDS = 300.0
+FUND_REGISTRY_COLUMNS = (
+    "chain_id,fund_address,deployment_status,strategy_kind,accounting_asset,weth,"
+    "accounting_role_account,fund_key"
+)
+FUND_CONTRACT_COLUMNS = (
+    "contract_address,contract_role,interface_version,implementation_address,"
+    "valid_from_block,valid_to_block"
+)
+
+
+def failure_backoff_seconds(interval_seconds: float, failure_count: int) -> float:
+    """Return deterministic exponential failure delay, capped at five minutes."""
+    delay = max(0.0, float(interval_seconds))
+    for _ in range(max(0, failure_count - 1)):
+        delay = min(delay * 2, MAX_FAILURE_BACKOFF_SECONDS)
+        if delay == MAX_FAILURE_BACKOFF_SECONDS:
+            break
+    return min(delay, MAX_FAILURE_BACKOFF_SECONDS)
+
+
+def report_run_failed(result: ReportRun) -> bool:
+    return result.status in {"blocked", "failed"}
 
 
 def encode_valuation_data(observations: list[OptionObservation]) -> bytes:
@@ -152,7 +175,7 @@ class SupabaseNavRepository:
     def enabled_funds(self) -> list[dict[str, Any]]:
         result = (
             self.client.table("v2_fund_registry")
-            .select("*")
+            .select(FUND_REGISTRY_COLUMNS)
             .eq("enabled", True)
             .execute()
         )
@@ -164,7 +187,13 @@ class SupabaseNavRepository:
 
     def contracts(self, chain_id: int, fund: str) -> list[dict[str, Any]]:
         return (
-            self._fund_table("v2_fund_contracts", chain_id, fund).execute().data or []
+            self.client.table("v2_fund_contracts")
+            .select(FUND_CONTRACT_COLUMNS)
+            .eq("chain_id", chain_id)
+            .eq("fund_address", fund)
+            .execute()
+            .data
+            or []
         )
 
     def observations(
@@ -2019,6 +2048,7 @@ class ReporterFleet:
         executor: ThreadPoolExecutor,
     ) -> None:
         loop = asyncio.get_running_loop()
+        failure_count = 0
         while True:
             try:
                 result = await loop.run_in_executor(
@@ -2034,7 +2064,13 @@ class ReporterFleet:
                     reason_code="REPORT_BUILD_FAILED",
                 )
             on_result(result)
-            await asyncio.sleep(interval_seconds)
+            if report_run_failed(result):
+                failure_count += 1
+                delay = failure_backoff_seconds(interval_seconds, failure_count)
+            else:
+                failure_count = 0
+                delay = interval_seconds
+            await asyncio.sleep(delay)
 
     def run_once(self) -> ReportRun:
         # Valuation and activation waits are independent per fund and can span
@@ -2172,11 +2208,12 @@ def _build_fund_reporter(repository, fund):
         fair_value_policy=fair_value_policy,
         wheel_valuation_contexts=wheel_contexts,
     )
+    submitter_key = get_fund_nav_submitter_private_key()
     reporter = NavReporter(
         gateway,
         SupabaseRunStore(repository),
         private_keys=get_fund_nav_reporter_private_keys(),
-        submitter_private_key=get_fund_nav_submitter_private_key(),
+        submitter_private_key=submitter_key,
         expected_chain_id=fund.chain_id,
         transaction_timeout=settings.fund_nav_reporter_tx_timeout_seconds,
         inclusion_margin=settings.fund_nav_inclusion_margin_blocks,

@@ -400,6 +400,88 @@ async def test_reporter_loop_reloads_indexed_state_each_cycle(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_reporter_loop_backoff_grows_caps_and_resets(monkeypatch) -> None:
+    statuses = iter(["failed", "failed", "confirmed", "failed", "failed"])
+    delays = []
+
+    class Reporter:
+        def run_once(self):
+            return ReportRun(status=next(statuses))
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 5:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(runtime, "build_reporter", Reporter)
+    monkeypatch.setattr(settings, "fund_nav_reporter_interval_seconds", 200)
+    monkeypatch.setattr(fund_nav_reporter.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await fund_nav_reporter.run()
+
+    assert delays == [200, 300, 200, 200, 300]
+
+
+@pytest.mark.asyncio
+async def test_reporter_fleet_worker_backoff_resets_after_success(monkeypatch) -> None:
+    statuses = iter(["failed", "failed", "confirmed", "failed"])
+    delays = []
+
+    class Reporter:
+        def run_once(self):
+            return ReportRun(status=next(statuses))
+
+    async def sleep(delay):
+        delays.append(delay)
+        if len(delays) == 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await ReporterFleet([Reporter]).run_forever(40, lambda _result: None)
+
+    assert delays == [40, 80, 40, 40]
+
+
+def test_nav_registry_queries_use_explicit_minimal_columns() -> None:
+    calls = []
+
+    class Query:
+        def __init__(self, table):
+            self.table_name = table
+            self.data = []
+
+        def select(self, columns):
+            calls.append((self.table_name, "select", columns))
+            return self
+
+        def eq(self, column, value):
+            calls.append((self.table_name, "eq", column, value))
+            return self
+
+        def execute(self):
+            return self
+
+    class Client:
+        postgrest = SimpleNamespace(aclose=lambda: None)
+
+        def table(self, name):
+            return Query(name)
+
+    repository = SupabaseNavRepository(Client())
+
+    assert repository.enabled_funds() == []
+    assert repository.contracts(84532, FUND) == []
+    assert ("v2_fund_registry", "select", runtime.FUND_REGISTRY_COLUMNS) in calls
+    assert ("v2_fund_contracts", "select", runtime.FUND_CONTRACT_COLUMNS) in calls
+    assert not any(
+        call[:2] == ("v2_fund_registry", "select") and call[2] == "*" for call in calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_reporter_fleet_workers_do_not_barrier_between_cycles(
     monkeypatch,
 ) -> None:

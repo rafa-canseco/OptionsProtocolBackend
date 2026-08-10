@@ -10,7 +10,12 @@ logger = logging.getLogger(__name__)
 
 async def run() -> None:
     """Run the configured reporter factory at the configured interval."""
-    from src.fund_nav.runtime import ReporterFleet, build_reporter
+    from src.fund_nav.runtime import (
+        ReporterFleet,
+        build_reporter,
+        failure_backoff_seconds,
+        report_run_failed,
+    )
 
     def log_result(result) -> None:
         logger.info(
@@ -19,6 +24,7 @@ async def run() -> None:
             result.reason_code,
         )
 
+    failure_count = 0
     while True:
         try:
             reporter = build_reporter()
@@ -30,8 +36,19 @@ async def run() -> None:
                 return
             result = await asyncio.to_thread(reporter.run_once)
             log_result(result)
+            failed = report_run_failed(result)
         except asyncio.CancelledError:
             return
         except Exception:
             logger.exception("Fund NAV reporter run failed")
-        await asyncio.sleep(settings.fund_nav_reporter_interval_seconds)
+            failed = True
+        if failed:
+            failure_count += 1
+            delay = failure_backoff_seconds(
+                settings.fund_nav_reporter_interval_seconds,
+                failure_count,
+            )
+        else:
+            failure_count = 0
+            delay = settings.fund_nav_reporter_interval_seconds
+        await asyncio.sleep(delay)

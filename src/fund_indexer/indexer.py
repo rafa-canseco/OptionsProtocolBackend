@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,6 +29,16 @@ CONFIRMATIONS = 5
 SUPPORTED_INTERFACE_VERSIONS = {1}
 EVENT_PAGE_SIZE = 1_000
 HIGH_FREQUENCY_NAV_EVENTS = ("NavCommitted", "NavSubmitted")
+MAX_FAILURE_BACKOFF_SECONDS = 300.0
+REGISTRY_REFRESH_SECONDS = 300.0
+FUND_REGISTRY_COLUMNS = (
+    "chain_id,fund_address,start_block,accounting_asset,weth,strategy_kind,quote_asset"
+)
+FUND_CONTRACT_COLUMNS = (
+    "contract_address,contract_role,interface_version,valid_from_block,"
+    "valid_to_block,implementation_address"
+)
+_monotonic = time.monotonic
 EIP1967_IMPLEMENTATION_SLOT = int(
     "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc", 16
 )
@@ -95,61 +106,86 @@ class ConfirmedHead:
 
 def _load_registries(client: Client | None = None) -> list[FundRegistry]:
     client = client or get_client()
-    rows = client.table("v2_fund_registry").select("*").eq("enabled", True).execute()
-    registries = []
-    for row in rows.data or []:
-        if int(row["start_block"]) <= 0:
-            raise ValueError(
-                f"Fund {row['fund_address']} requires a positive start_block"
-            )
-        contracts = (
-            client.table("v2_fund_contracts")
-            .select(
-                "contract_address,contract_role,interface_version,"
-                "valid_from_block,valid_to_block,implementation_address"
-            )
-            .eq("chain_id", row["chain_id"])
-            .eq("fund_address", row["fund_address"])
-            .execute()
+    rows = (
+        client.table("v2_fund_registry")
+        .select(FUND_REGISTRY_COLUMNS)
+        .eq("enabled", True)
+        .execute()
+    )
+    return [_registry_from_row(client, row) for row in rows.data or []]
+
+
+def _load_registry_identity(
+    client: Client,
+    chain_id: int,
+    fund_address: str,
+) -> FundRegistry | None:
+    result = (
+        client.table("v2_fund_registry")
+        .select(FUND_REGISTRY_COLUMNS)
+        .eq("enabled", True)
+        .eq("chain_id", chain_id)
+        .eq("fund_address", fund_address)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    return _registry_from_row(client, result.data[0])
+
+
+def _registry_from_row(client: Client, row: dict[str, Any]) -> FundRegistry:
+    if int(row["start_block"]) <= 0:
+        raise ValueError(f"Fund {row['fund_address']} requires a positive start_block")
+    contracts = (
+        client.table("v2_fund_contracts")
+        .select(FUND_CONTRACT_COLUMNS)
+        .eq("chain_id", row["chain_id"])
+        .eq("fund_address", row["fund_address"])
+        .execute()
+    )
+    bindings = tuple(
+        ContractBinding(
+            address=normalize_address(contract["contract_address"]),
+            role=contract["contract_role"],
+            interface_version=int(contract["interface_version"]),
+            valid_from_block=int(contract["valid_from_block"]),
+            valid_to_block=(
+                int(contract["valid_to_block"])
+                if contract["valid_to_block"] is not None
+                else None
+            ),
+            implementation_address=(
+                normalize_address(contract["implementation_address"])
+                if contract["implementation_address"]
+                else None
+            ),
         )
-        bindings = tuple(
-            ContractBinding(
-                address=normalize_address(contract["contract_address"]),
-                role=contract["contract_role"],
-                interface_version=int(contract["interface_version"]),
-                valid_from_block=int(contract["valid_from_block"]),
-                valid_to_block=(
-                    int(contract["valid_to_block"])
-                    if contract["valid_to_block"] is not None
-                    else None
-                ),
-                implementation_address=(
-                    normalize_address(contract["implementation_address"])
-                    if contract["implementation_address"]
-                    else None
-                ),
-            )
-            for contract in contracts.data or []
-        )
-        for binding in bindings:
-            _validate_binding(binding)
-        registries.append(
-            FundRegistry(
-                chain_id=int(row["chain_id"]),
-                fund_address=normalize_address(row["fund_address"]),
-                start_block=int(row["start_block"]),
-                accounting_asset=normalize_address(row["accounting_asset"]),
-                weth=normalize_address(row["weth"]),
-                strategy_kind=row.get("strategy_kind", "csp"),
-                quote_asset=(
-                    normalize_address(row["quote_asset"])
-                    if row.get("quote_asset")
-                    else None
-                ),
-                contracts=bindings,
-            )
-        )
-    return registries
+        for contract in contracts.data or []
+    )
+    for binding in bindings:
+        _validate_binding(binding)
+    return FundRegistry(
+        chain_id=int(row["chain_id"]),
+        fund_address=normalize_address(row["fund_address"]),
+        start_block=int(row["start_block"]),
+        accounting_asset=normalize_address(row["accounting_asset"]),
+        weth=normalize_address(row["weth"]),
+        strategy_kind=row.get("strategy_kind", "csp"),
+        quote_asset=(
+            normalize_address(row["quote_asset"]) if row.get("quote_asset") else None
+        ),
+        contracts=bindings,
+    )
+
+
+def _failure_backoff_seconds(interval_seconds: float, failure_count: int) -> float:
+    delay = max(0.0, float(interval_seconds))
+    for _ in range(max(0, failure_count - 1)):
+        delay = min(delay * 2, MAX_FAILURE_BACKOFF_SECONDS)
+        if delay == MAX_FAILURE_BACKOFF_SECONDS:
+            break
+    return min(delay, MAX_FAILURE_BACKOFF_SECONDS)
 
 
 def _validate_binding(binding: ContractBinding) -> None:
@@ -937,23 +973,12 @@ def _close_worker_client(client: Client) -> None:
     client.postgrest.aclose()
 
 
-def _index_registry_identity_once(
+def _index_registry_once(
     w3: Web3,
     client: Client,
-    chain_id: int,
-    fund_address: str,
+    registry: FundRegistry,
 ) -> int:
-    registry = next(
-        (
-            item
-            for item in _load_registries(client)
-            if item.chain_id == chain_id and item.fund_address == fund_address
-        ),
-        None,
-    )
-    if registry is None:
-        return 0
-    confirmed_head = _capture_confirmed_head(w3, chain_id)
+    confirmed_head = _capture_confirmed_head(w3, registry.chain_id)
     _store_confirmed_head(confirmed_head, client)
     return index_registry_once(
         w3,
@@ -964,10 +989,11 @@ def _index_registry_identity_once(
 
 
 async def _run_registry_worker(
-    chain_id: int,
-    fund_address: str,
+    bootstrap_registry: FundRegistry,
     rpc_url: str,
 ) -> None:
+    chain_id = bootstrap_registry.chain_id
+    fund_address = bootstrap_registry.fund_address
     client = _create_worker_client()
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     executor = ThreadPoolExecutor(
@@ -975,26 +1001,46 @@ async def _run_registry_worker(
         thread_name_prefix=f"fund-index-{fund_address[-6:]}",
     )
     loop = asyncio.get_running_loop()
+    registry: FundRegistry | None = bootstrap_registry
+    registry_refreshed_at = _monotonic()
+    failure_count = 0
     try:
         while True:
             try:
-                await loop.run_in_executor(
-                    executor,
-                    _index_registry_identity_once,
-                    w3,
-                    client,
-                    chain_id,
-                    fund_address,
-                )
+                now = _monotonic()
+                if now - registry_refreshed_at >= REGISTRY_REFRESH_SECONDS:
+                    registry = await loop.run_in_executor(
+                        executor,
+                        _load_registry_identity,
+                        client,
+                        chain_id,
+                        fund_address,
+                    )
+                    registry_refreshed_at = _monotonic()
+                if registry is not None:
+                    await loop.run_in_executor(
+                        executor,
+                        _index_registry_once,
+                        w3,
+                        client,
+                        registry,
+                    )
+                failure_count = 0
+                delay = settings.tokenized_fund_indexer_poll_interval_seconds
             except asyncio.CancelledError:
                 return
             except Exception:
+                failure_count += 1
+                delay = _failure_backoff_seconds(
+                    settings.tokenized_fund_indexer_poll_interval_seconds,
+                    failure_count,
+                )
                 logger.exception(
                     "Tokenized fund indexing failed for %s:%s",
                     chain_id,
                     fund_address,
                 )
-            await asyncio.sleep(settings.tokenized_fund_indexer_poll_interval_seconds)
+            await asyncio.sleep(delay)
     finally:
         shutdown = asyncio.create_task(
             asyncio.to_thread(
@@ -1033,8 +1079,7 @@ async def run() -> None:
         tasks.append(
             asyncio.create_task(
                 _run_registry_worker(
-                    registry.chain_id,
-                    registry.fund_address,
+                    registry,
                     rpc_url,
                 )
             )
