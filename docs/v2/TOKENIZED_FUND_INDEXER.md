@@ -20,7 +20,11 @@ The worker is enabled with `TOKENIZED_FUND_INDEXER_ENABLED=true`. It requires:
 
 No registry seed is included. The worker remains deployment-disabled by
 default. B1N-352 must provide trusted addresses, implementation addresses, and
-the deployment block before `TOKENIZED_FUND_INDEXER_ENABLED` is set.
+the deployment block before `TOKENIZED_FUND_INDEXER_ENABLED` is set. Runtime
+activation must also wait until the ordered database migrations are applied and
+the per-fund reconciliation retention policy is present. Enablement is an
+explicit, observed staging variable change; it must not be checked in as a
+default environment value.
 
 ### Deployment handoff
 
@@ -112,6 +116,9 @@ registered target because upgrades require versioned binding ranges.
 The stored model contains current fund/component state, transferable share
 balances, redemption claims, CSP position lifecycle, fund-level USDC/WETH
 composition, NAV history, product activity, and reconciliation history.
+Reconciliation rows are operational telemetry and are bounded to the newest
+2,048 rows by `block_number` for each `(chain_id, fund_address)`; retention does
+not prune another fund's rows or any canonical event/current-state tables.
 
 B1N-353 additionally stores `accounted_idle_assets`, `virtual_shares`, pause
 flags, execution lock owner, active processing state, flow nonce, idle hash,
