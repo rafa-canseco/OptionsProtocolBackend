@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from eth_abi import encode
+from eth_abi import decode, encode
 from eth_account import Account
 from eth_account.typed_transactions import TypedTransaction
 from hexbytes import HexBytes
@@ -68,6 +68,7 @@ from src.fund_nav.fair_value import (
     versioned_observation_nonce,
 )
 from src.fund_nav.models import ComponentReport, IDLE_COMPONENT_ID, sign_digest
+from src.fund_indexer.snapshot import MULTICALL3_ABI
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
 from src.fund_nav.reporter import (
     AmbiguousSubmission,
@@ -887,27 +888,32 @@ class Web3ReporterGateway:
             address=self.addresses["meta_wheel_valuator"],
             abi=META_WHEEL_VALUATOR_ABI,
         )
-        child_valuators = {
-            "csp": meta_valuator.functions.cspValuator().call(block_identifier=block),
-            "covered_call": meta_valuator.functions.coveredCallValuator().call(
-                block_identifier=block
-            ),
-        }
-        spot = self._meta_wheel_spot(meta_valuator, block)
         block_hash_hex = Web3.to_hex(block_hash).lower()
-        block_timestamp = int(self.w3.eth.get_block(block)["timestamp"])
-        observed_at = datetime.fromtimestamp(
-            block_timestamp, tz=timezone.utc
-        ).isoformat()
         seen_lanes: set[str] = set()
         valuation_rows: list[dict[str, Any]] = []
-        lane_count = int(
-            coordinator.functions.registeredLaneCount().call(block_identifier=block)
+        registered_lanes = self._wheel_registered_lanes(coordinator, block)
+        child_shares_by_lane = self._wheel_child_shares(
+            [lane[0] for lane in registered_lanes if lane[2]], block
         )
-        for index in range(lane_count):
-            lane_address, raw_kind, active = coordinator.functions.registeredLaneAt(
-                index
-            ).call(block_identifier=block)
+        has_active_capital = any(child_shares_by_lane.values())
+        child_valuators: dict[str, str] = {}
+        spot: dict[str, int] = {}
+        observed_at = ""
+        if has_active_capital:
+            child_valuators = {
+                "csp": meta_valuator.functions.cspValuator().call(
+                    block_identifier=block
+                ),
+                "covered_call": meta_valuator.functions.coveredCallValuator().call(
+                    block_identifier=block
+                ),
+            }
+            spot = self._meta_wheel_spot(meta_valuator, block)
+            block_timestamp = int(self.w3.eth.get_block(block)["timestamp"])
+            observed_at = datetime.fromtimestamp(
+                block_timestamp, tz=timezone.utc
+            ).isoformat()
+        for lane_address, raw_kind, active in registered_lanes:
             lane_address = lane_address.lower()
             if lane_address in seen_lanes:
                 raise RuntimeError("DUPLICATE_WHEEL_CUSTODY_DOMAIN")
@@ -921,9 +927,7 @@ class Web3ReporterGateway:
                 address=Web3.to_checksum_address(lane_address),
                 abi=WHEEL_CHILD_LANE_ABI,
             )
-            child_shares = int(
-                lane.functions.childShares().call(block_identifier=block)
-            )
+            child_shares = child_shares_by_lane[lane_address]
             if child_shares == 0:
                 continue
             context = self.wheel_valuation_contexts.get(strategy_kind)
@@ -1034,6 +1038,67 @@ class Web3ReporterGateway:
             )
         for row in valuation_rows:
             self.repository.store_wheel_lane_valuation(row)
+
+    def _wheel_registered_lanes(self, coordinator, block: int):
+        lane_count = int(
+            coordinator.functions.registeredLaneCount().call(block_identifier=block)
+        )
+        if lane_count == 0:
+            return ()
+        calls = [
+            (
+                coordinator.address,
+                False,
+                HexBytes(
+                    coordinator.functions.registeredLaneAt(
+                        index
+                    )._encode_transaction_data()
+                ),
+            )
+            for index in range(lane_count)
+        ]
+        results = self._wheel_multicall(calls, block)
+        lanes = []
+        for success, return_data in results:
+            if not success:
+                raise RuntimeError("META_WHEEL_LANE_DISCOVERY_FAILED")
+            address, kind, active = decode(
+                ["address", "uint8", "bool"], bytes(return_data)
+            )
+            lanes.append((Web3.to_checksum_address(address), int(kind), bool(active)))
+        return tuple(lanes)
+
+    def _wheel_child_shares(self, lanes: list[str], block: int) -> dict[str, int]:
+        if not lanes:
+            return {}
+        contracts = [
+            self.w3.eth.contract(
+                address=Web3.to_checksum_address(lane), abi=WHEEL_CHILD_LANE_ABI
+            )
+            for lane in lanes
+        ]
+        calls = [
+            (
+                contract.address,
+                False,
+                HexBytes(contract.functions.childShares()._encode_transaction_data()),
+            )
+            for contract in contracts
+        ]
+        results = self._wheel_multicall(calls, block)
+        shares = {}
+        for lane, (success, return_data) in zip(lanes, results, strict=True):
+            if not success:
+                raise RuntimeError("META_WHEEL_LANE_DISCOVERY_FAILED")
+            shares[lane.lower()] = int(decode(["uint256"], bytes(return_data))[0])
+        return shares
+
+    def _wheel_multicall(self, calls, block: int):
+        multicall = self.w3.eth.contract(
+            address=Web3.to_checksum_address(settings.multicall3_address),
+            abi=MULTICALL3_ABI,
+        )
+        return multicall.functions.aggregate3(calls).call(block_identifier=block)
 
     def _prepare_wheel_nav_snapshot(
         self,

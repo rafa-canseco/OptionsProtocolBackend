@@ -230,6 +230,17 @@ def _gateway(*, duplicate_lane: bool = False, include_call_lane: bool = False):
     gateway._valuation_observations = lambda *_args, **_kwargs: []
     gateway._require_lane_custody = lambda *_args, **_kwargs: None
     gateway._token_balance = lambda token, *_args: 600 if token == USDC else 0
+    registered_lanes = [(CSP_LANE, 1, True)]
+    if duplicate_lane:
+        registered_lanes.append((CSP_LANE, 1, True))
+    elif include_call_lane:
+        registered_lanes.append((CALL_LANE, 2, True))
+    gateway._wheel_registered_lanes = lambda _coordinator, _block: tuple(
+        registered_lanes
+    )
+    gateway._wheel_child_shares = lambda lanes, _block: {
+        lane.lower(): 200 if lane.lower() == CALL_LANE else 100 for lane in lanes
+    }
     gateway.vault = SimpleNamespace(functions=_Functions({"accountedIdleAssets": 200}))
     gateway.accounting = SimpleNamespace(functions=_Functions({"lastReportNonce": 6}))
     return gateway, repository

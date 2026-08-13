@@ -3,6 +3,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from eth_abi import encode
 from eth_account import Account
 from web3 import Web3
 
@@ -1182,6 +1183,53 @@ def test_meta_wheel_persists_independent_safe_block_lane_hash_binding() -> None:
 
     assert reports[0].position_state_hash == Web3.to_hex(chain_hash)
     assert reports[0].expected_position_state_hash == Web3.to_hex(chain_hash)
+
+
+def test_meta_wheel_decodes_batched_child_shares() -> None:
+    gateway = object.__new__(Web3ReporterGateway)
+    gateway._wheel_multicall = lambda calls, block: [
+        (True, encode(["uint256"], [index + 1])) for index, _ in enumerate(calls)
+    ]
+    functions = SimpleNamespace(
+        childShares=lambda: SimpleNamespace(_encode_transaction_data=lambda: "0x1234")
+    )
+    contracts = iter(
+        [
+            SimpleNamespace(
+                address=Web3.to_checksum_address(ADAPTER), functions=functions
+            ),
+            SimpleNamespace(
+                address=Web3.to_checksum_address(OTOKEN), functions=functions
+            ),
+        ]
+    )
+    gateway.w3 = SimpleNamespace(
+        eth=SimpleNamespace(contract=lambda **_kwargs: next(contracts))
+    )
+
+    shares = gateway._wheel_child_shares([ADAPTER, OTOKEN], 100)
+
+    assert shares == {ADAPTER.lower(): 1, OTOKEN.lower(): 2}
+
+
+def test_meta_wheel_batched_child_share_failure_is_fail_closed() -> None:
+    gateway = object.__new__(Web3ReporterGateway)
+    gateway._wheel_multicall = lambda _calls, _block: [(False, b"")]
+    gateway.w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            contract=lambda **_kwargs: SimpleNamespace(
+                address=Web3.to_checksum_address(ADAPTER),
+                functions=SimpleNamespace(
+                    childShares=lambda: SimpleNamespace(
+                        _encode_transaction_data=lambda: "0x1234"
+                    )
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="META_WHEEL_LANE_DISCOVERY_FAILED"):
+        gateway._wheel_child_shares([ADAPTER], 100)
 
 
 class _SnapshotVaultFunctions:
