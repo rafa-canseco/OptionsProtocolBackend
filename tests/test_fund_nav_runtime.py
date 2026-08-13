@@ -87,6 +87,34 @@ def test_tokenized_fund_rpc_falls_back_to_global_endpoint(monkeypatch) -> None:
     assert get_tokenized_fund_rpc_url() == "https://global-rpc.example"
 
 
+def test_meta_wheel_token_balance_checksums_registry_token_address() -> None:
+    requested = []
+
+    class Call:
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return 42
+
+    class Functions:
+        def balanceOf(self, account):
+            assert account == FUND
+            return Call()
+
+    class Eth:
+        def contract(self, address, abi):
+            requested.append(address)
+            assert abi == runtime.ERC20_ABI
+            return SimpleNamespace(functions=Functions())
+
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(eth=Eth())
+
+    balance = gateway._token_balance(USDC.lower(), FUND, 100)
+
+    assert balance == 42
+    assert requested == [Web3.to_checksum_address(USDC)]
+
+
 def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
     monkeypatch,
 ) -> None:

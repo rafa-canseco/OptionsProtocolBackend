@@ -1172,7 +1172,7 @@ class Web3ReporterGateway:
 
     def _token_balance(self, token: str, account: str, block: int) -> int:
         return int(
-            self.w3.eth.contract(address=token, abi=ERC20_ABI)
+            self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
             .functions.balanceOf(account)
             .call(block_identifier=block)
         )
