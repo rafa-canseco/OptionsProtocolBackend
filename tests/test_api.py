@@ -425,7 +425,7 @@ def test_cors_wildcard_allowed_in_beta(monkeypatch):
         (
             "tokenized_fund_indexer_enabled",
             "tokenized_fund_indexer_poll_interval_seconds",
-            15,
+            5,
             "INDEXER_POLL_INTERVAL_SECONDS",
         ),
         (

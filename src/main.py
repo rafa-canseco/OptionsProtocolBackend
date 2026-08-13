@@ -50,10 +50,10 @@ def validate_fund_runtime_cadences() -> None:
     """Reject enabled fund loops configured below operationally safe minima."""
     if (
         settings.tokenized_fund_indexer_enabled
-        and settings.tokenized_fund_indexer_poll_interval_seconds < 15
+        and settings.tokenized_fund_indexer_poll_interval_seconds < 5
     ):
         raise RuntimeError(
-            "TOKENIZED_FUND_INDEXER_POLL_INTERVAL_SECONDS must be at least 15 "
+            "TOKENIZED_FUND_INDEXER_POLL_INTERVAL_SECONDS must be at least 5 "
             "when the indexer is enabled"
         )
     if (
