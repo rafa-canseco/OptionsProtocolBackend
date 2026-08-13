@@ -431,7 +431,7 @@ def test_cors_wildcard_allowed_in_beta(monkeypatch):
         (
             "fund_nav_reporter_enabled",
             "fund_nav_reporter_interval_seconds",
-            30,
+            15,
             "NAV_REPORTER_INTERVAL_SECONDS",
         ),
     ],
