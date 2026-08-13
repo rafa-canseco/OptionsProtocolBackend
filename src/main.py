@@ -58,10 +58,10 @@ def validate_fund_runtime_cadences() -> None:
         )
     if (
         settings.fund_nav_reporter_enabled
-        and settings.fund_nav_reporter_interval_seconds < 30
+        and settings.fund_nav_reporter_interval_seconds < 15
     ):
         raise RuntimeError(
-            "FUND_NAV_REPORTER_INTERVAL_SECONDS must be at least 30 when the "
+            "FUND_NAV_REPORTER_INTERVAL_SECONDS must be at least 15 when the "
             "NAV reporter is enabled"
         )
 
