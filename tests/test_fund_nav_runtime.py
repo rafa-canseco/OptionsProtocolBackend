@@ -1065,6 +1065,53 @@ def test_meta_wheel_uses_manager_nonce_and_position_hash_domains_separately() ->
     )
 
 
+def test_meta_wheel_parent_valuation_uses_extended_valuator_abi() -> None:
+    requested_abis = []
+
+    class Call:
+        def call(self, block_identifier):
+            assert block_identifier == 100
+            return bytes.fromhex("11" * 32)
+
+    class AdapterFunctions:
+        def summary(self):
+            return SimpleNamespace(
+                call=lambda block_identifier: (8, 0, 0, 0, 0, 0, 0, 0)
+            )
+
+        def positionStateHash(self):
+            return Call()
+
+    class Eth:
+        def contract(self, address, abi):
+            requested_abis.append(abi)
+            if address == ADAPTER:
+                return SimpleNamespace(functions=AdapterFunctions())
+            raise RuntimeError("VALUATOR_CONSTRUCTED")
+
+    gateway = Web3ReporterGateway.__new__(Web3ReporterGateway)
+    gateway.w3 = SimpleNamespace(eth=Eth())
+    gateway.strategy_kind = "meta_wheel"
+    gateway.adapter_role = "wheel_coordinator"
+    gateway.valuator_role = "meta_wheel_valuator"
+    gateway.adapter_abi = runtime.WHEEL_COORDINATOR_ABI
+    gateway.addresses = {
+        "wheel_coordinator": ADAPTER,
+        "meta_wheel_valuator": VALUATOR,
+    }
+
+    with pytest.raises(RuntimeError, match="VALUATOR_CONSTRUCTED"):
+        gateway._value_strategy(
+            component_id=bytes(32),
+            nonce=1,
+            state_hash=bytes.fromhex("11" * 32),
+            block=100,
+            block_hash=bytes.fromhex("22" * 32),
+        )
+
+    assert requested_abis[-1] == runtime.META_WHEEL_VALUATOR_ABI
+
+
 class _BlockValueCall:
     def __init__(self, values):
         self.values = values

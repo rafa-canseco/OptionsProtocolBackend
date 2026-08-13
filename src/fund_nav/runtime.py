@@ -773,7 +773,12 @@ class Web3ReporterGateway:
         ):
             raise RuntimeError("WRONG_POSITION_STATE_HASH")
         valuator = self.w3.eth.contract(
-            address=self.addresses[self.valuator_role], abi=VALUATOR_ABI
+            address=self.addresses[self.valuator_role],
+            abi=(
+                META_WHEEL_VALUATOR_ABI
+                if self.strategy_kind == "meta_wheel"
+                else VALUATOR_ABI
+            ),
         )
         if self.strategy_kind == "meta_wheel":
             reports = self._wheel_lane_valuations(block, block_hash)
