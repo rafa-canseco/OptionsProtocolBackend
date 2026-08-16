@@ -15,11 +15,11 @@ Monitoring:
 
 import logging
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from postgrest.types import CountMethod, ReturnMethod
 from web3 import Web3
 
 from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
@@ -111,7 +111,9 @@ def _prune_stale_quotes_for_mm(db, mm_id: str, chain: str, now_ts: int) -> None:
     Fills and position history live in order_events, so stale mm_quotes rows are
     operational cache entries, not canonical trade history.
     """
-    db.table("mm_quotes").delete().eq("mm_address", mm_id).eq("chain", chain).or_(
+    db.table("mm_quotes").delete(returning=ReturnMethod.minimal).eq(
+        "mm_address", mm_id
+    ).eq("chain", chain).or_(
         f"is_active.eq.false,deadline.lt.{now_ts},expiry.lt.{now_ts}"
     ).execute()
 
@@ -195,11 +197,15 @@ async def submit_quotes(
         try:
             db = get_client()
             otoken_addrs = list({r["otoken_address"] for r in rows_to_upsert})
-            db.table("mm_quotes").update({"is_active": False}).eq(
-                "mm_address", mm_id
-            ).eq("is_active", True).in_("otoken_address", otoken_addrs).execute()
+            db.table("mm_quotes").update(
+                {"is_active": False}, returning=ReturnMethod.minimal
+            ).eq("mm_address", mm_id).eq("is_active", True).in_(
+                "otoken_address", otoken_addrs
+            ).execute()
             db.table("mm_quotes").upsert(
-                rows_to_upsert, on_conflict="mm_address,quote_id"
+                rows_to_upsert,
+                on_conflict="mm_address,quote_id",
+                returning=ReturnMethod.minimal,
             ).execute()
             accepted = len(rows_to_upsert)
         except Exception:
@@ -343,12 +349,16 @@ async def cancel_quotes(mm_address: str = Depends(require_mm_api_key)):
         client = get_client()
         result = (
             client.table("mm_quotes")
-            .update({"is_active": False})
+            .update(
+                {"is_active": False},
+                count=CountMethod.exact,
+                returning=ReturnMethod.minimal,
+            )
             .eq("mm_address", _normalize_mm_address(mm_address))
             .eq("is_active", True)
             .execute()
         )
-        cancelled = len(result.data) if result.data else 0
+        cancelled = result.count or 0
     except Exception:
         logger.exception("Failed to cancel quotes for %s", mm_address)
         raise HTTPException(status_code=502, detail="Could not cancel quotes")
@@ -475,66 +485,50 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
     client = get_client()
 
     try:
-        # Active quotes
-        quotes_result = (
-            client.table("mm_quotes")
-            .select("max_amount")
-            .eq("mm_address", _normalize_mm_address(mm_address))
-            .eq("is_active", True)
-            .gt("deadline", now_ts)
-            .execute()
-        )
-        quotes = quotes_result.data or []
-        active_count = len(quotes)
-        active_notional = sum(Decimal(str(q["max_amount"])) for q in quotes)
+        result = client.rpc(
+            "v1_get_mm_exposure",
+            {
+                "p_mm_address": _normalize_mm_address(mm_address),
+                "p_now_ts": now_ts,
+            },
+        ).execute()
+        if not result.data or len(result.data) != 1:
+            raise RuntimeError("v1_get_mm_exposure returned an invalid payload")
+        row = result.data[0]
+        required_fields = {
+            "active_quotes_count",
+            "active_quotes_notional",
+            "open_positions_by_expiry",
+            "total_premium_earned",
+            "pending_settlement_count",
+        }
+        if not isinstance(row, dict) or not required_fields.issubset(row):
+            raise RuntimeError("v1_get_mm_exposure returned an incomplete payload")
 
-        # All fills for this MM
-        fills_result = (
-            client.table("order_events")
-            .select("expiry,amount,gross_premium,premium,is_settled")
-            .eq("mm_address", _normalize_mm_address(mm_address))
-            .execute()
+        raw_buckets = row["open_positions_by_expiry"]
+        if not isinstance(raw_buckets, list) or len(raw_buckets) > 100:
+            raise RuntimeError("v1_get_mm_exposure returned invalid expiry buckets")
+
+        buckets = [
+            ExpiryBucket(
+                expiry=int(bucket["expiry"]),
+                position_count=int(bucket["position_count"]),
+                total_amount=str(Decimal(str(bucket["total_amount"]))),
+            )
+            for bucket in raw_buckets
+        ]
+        buckets.sort(key=lambda bucket: bucket.expiry)
+
+        return ExposureResponse(
+            active_quotes_count=int(row["active_quotes_count"]),
+            active_quotes_notional=str(Decimal(str(row["active_quotes_notional"]))),
+            open_positions_by_expiry=buckets,
+            total_premium_earned=str(Decimal(str(row["total_premium_earned"]))),
+            pending_settlement_count=int(row["pending_settlement_count"]),
         )
-        fills = fills_result.data or []
     except Exception:
         logger.exception("Failed to fetch exposure for %s", mm_address)
         raise HTTPException(status_code=502, detail="Could not fetch exposure")
-
-    # Group open positions by expiry
-    expiry_buckets: dict[int, dict] = defaultdict(
-        lambda: {"count": 0, "amount": Decimal("0")}
-    )
-    total_premium = Decimal("0")
-    pending_settlement = 0
-
-    for f in fills:
-        prem = f.get("gross_premium") or f.get("premium", "0")
-        total_premium += Decimal(str(prem))
-
-        expiry = f.get("expiry")
-        if expiry and expiry > now_ts:
-            bucket = expiry_buckets[expiry]
-            bucket["count"] += 1
-            bucket["amount"] += Decimal(str(f["amount"]))
-
-        # Positions past expiry but not yet settled
-        if expiry and expiry <= now_ts and not f.get("is_settled"):
-            pending_settlement += 1
-
-    return ExposureResponse(
-        active_quotes_count=active_count,
-        active_quotes_notional=str(active_notional),
-        open_positions_by_expiry=[
-            ExpiryBucket(
-                expiry=exp,
-                position_count=b["count"],
-                total_amount=str(b["amount"]),
-            )
-            for exp, b in sorted(expiry_buckets.items())
-        ],
-        total_premium_earned=str(total_premium),
-        pending_settlement_count=pending_settlement,
-    )
 
 
 @router.get(
