@@ -564,7 +564,7 @@ async def get_exposure(mm_address: str = Depends(require_mm_api_key)):
             raise RuntimeError("v1_get_mm_exposure returned an incomplete payload")
 
         raw_buckets = row["open_positions_by_expiry"]
-        if not isinstance(raw_buckets, list):
+        if not isinstance(raw_buckets, list) or len(raw_buckets) > 100:
             raise RuntimeError("v1_get_mm_exposure returned invalid expiry buckets")
 
         buckets = [

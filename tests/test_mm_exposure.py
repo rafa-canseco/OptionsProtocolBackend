@@ -51,6 +51,42 @@ def _get_exposure(data):
     return response.model_dump()
 
 
+def test_exposure_uses_one_rpc_row_and_preserves_exact_values() -> None:
+    response = _get_exposure(
+        [
+            {
+                "active_quotes_count": 2,
+                "active_quotes_notional": "90071992547409931234.1234567",
+                "open_positions_by_expiry": [
+                    {
+                        "expiry": 2_000,
+                        "position_count": 1,
+                        "total_amount": "0.0000001",
+                    },
+                    {
+                        "expiry": 1_500,
+                        "position_count": 2,
+                        "total_amount": "3.25",
+                    },
+                ],
+                "total_premium_earned": "80071992547409931234.1234567",
+                "pending_settlement_count": 3,
+            }
+        ]
+    )
+
+    assert response == {
+        "active_quotes_count": 2,
+        "active_quotes_notional": str(Decimal("90071992547409931234.1234567")),
+        "open_positions_by_expiry": [
+            {"expiry": 1_500, "position_count": 2, "total_amount": "3.25"},
+            {"expiry": 2_000, "position_count": 1, "total_amount": "1E-7"},
+        ],
+        "total_premium_earned": str(Decimal("80071992547409931234.1234567")),
+        "pending_settlement_count": 3,
+    }
+
+
 def _legacy_exposure(quotes: list[dict], fills: list[dict]) -> dict:
     expiry_buckets: dict[int, dict] = defaultdict(
         lambda: {"count": 0, "amount": Decimal("0")}
@@ -225,7 +261,25 @@ def test_exposure_preserves_all_history_classes(
     assert _get_exposure([rpc_row]) == _legacy_exposure(quotes, fills)
 
 
-@pytest.mark.parametrize("payload", [None, [], [{}], [{}, {}]])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        [{}],
+        [{}, {}],
+        [{"open_positions_by_expiry": {}}],
+        [
+            {
+                "active_quotes_count": 0,
+                "active_quotes_notional": "0",
+                "open_positions_by_expiry": [{}] * 101,
+                "total_premium_earned": "0",
+                "pending_settlement_count": 0,
+            }
+        ],
+    ],
+)
 def test_exposure_fails_closed_on_invalid_rpc_payload(payload) -> None:
     client = _RpcClient(payload)
     with (

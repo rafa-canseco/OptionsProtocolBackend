@@ -56,6 +56,8 @@ open_by_expiry AS (
         f.total_amount
     FROM fill_by_expiry AS f
     WHERE f.expiry_value > p_now_ts
+    ORDER BY f.expiry_value
+    LIMIT 100
 ),
 expiry_totals AS (
     SELECT COALESCE(
