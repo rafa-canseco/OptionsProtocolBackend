@@ -329,6 +329,14 @@ async def lifespan(app: FastAPI):
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
+    if not settings.background_workers_enabled:
+        logger.warning(
+            "Background workers disabled by BACKGROUND_WORKERS_ENABLED=false; "
+            "API routes and health checks remain active"
+        )
+        yield
+        return
+
     validate_fund_runtime_cadences()
     if settings.tokenized_fund_indexer_enabled and not get_tokenized_fund_rpc_url():
         raise RuntimeError(

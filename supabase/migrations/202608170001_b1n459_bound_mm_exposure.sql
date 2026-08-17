@@ -1,3 +1,5 @@
+-- B1N-459 follow-up: reapply the bounded function for databases that
+-- already recorded 202608030001 before the 100-bucket production hotfix.
 -- B1N-423: aggregate MM exposure in Postgres so API egress is independent of
 -- the number of historical order_events rows.
 

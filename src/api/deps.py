@@ -20,11 +20,12 @@ _API_KEY_RETRY_SECONDS = 5
 _API_KEY_LOCK = threading.Lock()
 
 
-def _open_api_key_circuit(now: float) -> None:
+def _open_api_key_circuit() -> None:
     global _API_KEY_CACHE, _API_KEY_CACHE_AT, _API_KEY_RETRY_AT
+    failure_at = time.monotonic()
     _API_KEY_CACHE = {}
-    _API_KEY_CACHE_AT = now
-    _API_KEY_RETRY_AT = now + _API_KEY_RETRY_SECONDS
+    _API_KEY_CACHE_AT = failure_at
+    _API_KEY_RETRY_AT = failure_at + _API_KEY_RETRY_SECONDS
 
 
 def _refresh_api_key_cache(now: float) -> bool:
@@ -41,8 +42,8 @@ def _refresh_api_key_cache(now: float) -> bool:
             row["api_key"]: row["mm_address"] for row in (result.data or [])
         }
     except Exception:
+        _open_api_key_circuit()
         logger.exception("Failed to refresh MM API key cache — opening circuit")
-        _open_api_key_circuit(now)
         return False
     _API_KEY_CACHE_AT = now
     _API_KEY_RETRY_AT = 0.0
@@ -95,8 +96,8 @@ def require_mm_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> str:
                 .execute()
             )
         except Exception:
+            _open_api_key_circuit()
             logger.exception("MM API key validation DB lookup failed")
-            _open_api_key_circuit(now)
             raise _auth_unavailable()
 
         if result.data:
