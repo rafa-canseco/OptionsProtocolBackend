@@ -53,6 +53,14 @@ async def lifespan(app: FastAPI):
 
     tasks = []
 
+    if not settings.background_workers_enabled:
+        logger.warning(
+            "Background workers disabled by BACKGROUND_WORKERS_ENABLED=false; "
+            "API routes and health checks remain active"
+        )
+        yield
+        return
+
     has_on_chain_config = (
         settings.batch_settler_address
         and settings.operator_private_key
