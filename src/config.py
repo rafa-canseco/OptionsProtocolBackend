@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_env: str = "dev"
+    background_workers_enabled: bool = True
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
