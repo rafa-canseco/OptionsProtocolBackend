@@ -104,6 +104,16 @@ if [[ "$mode" == "doctor" ]]; then
   exit 0
 fi
 
+graphify_check=".pi/packages/graphify-balanced/test/index.check.ts"
+if [[ -f "$graphify_check" ]]; then
+  node_bin="$(command -v node || true)"
+  if [[ -z "$node_bin" ]]; then
+    echo "harness prerequisite missing: node" >&2
+    exit 2
+  fi
+  "${clean_env[@]}" "$node_bin" --test "$graphify_check"
+fi
+
 detect_external_tests() {
   "${clean_env[@]}" python3 - "$repo_root/tests" <<'PY'
 import ast
