@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.main import app
+from src.api.activity import _compute_metrics, _deduplicate
 
 client = TestClient(app)
 
@@ -40,15 +41,25 @@ def _make_row(
     }
 
 
-
 def _mock_db_in(rows: list[dict]):
-    """Return a mock get_client() that yields the given rows via .in_() chain."""
+    """Return a mock client whose aggregate matches the legacy Python oracle."""
     mock_client = MagicMock()
     mock_result = MagicMock()
-    mock_result.data = rows
-    (
-        mock_client.table.return_value.select.return_value.in_.return_value.execute.return_value
-    ) = mock_result
+    metrics = _compute_metrics(_deduplicate(rows))
+    mock_result.data = {
+        "total_volume": str(metrics["totalVolume"]),
+        "total_premium": str(metrics["totalPremiumEarned"]),
+        "position_count": metrics["positionCount"],
+        "active_days": metrics["activeDays"],
+        "days_since_first": metrics["daysSinceFirst"],
+        "total_collateral_usd": str(metrics["total_collateral_usd"]),
+        "earning_rate": (
+            str(metrics["earning_rate"])
+            if metrics["earning_rate"] is not None
+            else None
+        ),
+    }
+    mock_client.rpc.return_value.execute.return_value = mock_result
     return mock_client
 
 
@@ -194,7 +205,9 @@ def test_also_param_aggregates_two_addresses():
 
 def test_also_deduplicate_by_id():
     """Same id from both addresses is counted once, positionCount=1."""
-    shared_row = _make_row(collateral="1000000", net_premium="50000", is_put=True, id="shared")
+    shared_row = _make_row(
+        collateral="1000000", net_premium="50000", is_put=True, id="shared"
+    )
     rows = [shared_row, shared_row]  # same row returned twice (both addresses match)
     with patch("src.api.activity.get_client", return_value=_mock_db_in(rows)):
         resp = client.get(f"/activity/{VALID_ADDRESS}?also={ALSO_ADDRESS}")
@@ -244,6 +257,27 @@ def test_new_fields_present():
     assert "total_collateral_usd" in data
     assert "total_premium_usd" in data
     assert "earning_rate" in data
+
+
+def test_rpc_float_aggregates_keep_legacy_python_rounding():
+    mock_client = MagicMock()
+    mock_client.rpc.return_value.execute.return_value.data = {
+        "total_volume": "2.675",
+        "total_premium": "3.2",
+        "position_count": 2,
+        "active_days": 1,
+        "days_since_first": -2,
+        "total_collateral_usd": "2.675",
+    }
+
+    with patch("src.api.activity.get_client", return_value=mock_client):
+        resp = client.get(f"/activity/{VALID_ADDRESS}")
+
+    assert resp.status_code == 200
+    assert resp.json()["totalVolume"] == 2.67
+    assert resp.json()["total_collateral_usd"] == 2.67
+    assert resp.json()["earning_rate"] == 1.198502
+    assert resp.json()["daysSinceFirst"] == -2
 
 
 def test_backward_compat_no_also():

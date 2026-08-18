@@ -1,7 +1,20 @@
 # Environment
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+.mcp.json
+settings.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*keystore*.json
+*mnemonic*.json
+*private-key*.json
+*private_key*.json
+*secrets*.json
+*wallet*.json
 
 # Python
 __pycache__/
@@ -10,6 +23,10 @@ __pycache__/
 dist/
 build/
 .venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # uv
 .python-version
@@ -22,3 +39,6 @@ build/
 # OS
 .DS_Store
 supabase/.temp/
+.worktrees/
+data/
+broadcast/

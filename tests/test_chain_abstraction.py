@@ -293,17 +293,39 @@ def mock_db():
         yield mock_client.return_value
 
 
+def _position_rpc_result(*, active=None, settled=None):
+    def with_ordering(rows):
+        return [
+            {
+                **row,
+                "id": row.get("id") or f"00000000-0000-0000-0000-{index:012d}",
+                "indexed_at": row.get("indexed_at") or f"2026-08-03T00:00:{index:02d}Z",
+            }
+            for index, row in enumerate(rows or [], start=1)
+        ]
+
+    return MagicMock(
+        data={
+            "account_found": True,
+            "wallet_fingerprint": "a" * 64,
+            "watermark": "2026-08-03T00:00:00Z",
+            "active": with_ordering(active),
+            "settled": with_ordering(settled),
+            "rows": [],
+        }
+    )
+
+
 class TestPositionsByAddress:
     """GET /positions/{address} — chain detection from address format."""
 
     def test_solana_address_returns_200(self, mock_db):
         addr = "jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9"
-        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
-            data=[]
-        )
+        mock_db.rpc.return_value.execute.return_value = _position_rpc_result(active=[])
         resp = client.get(f"/positions/{addr}")
         assert resp.status_code == 200
         assert resp.json() == []
+        mock_db.rpc.assert_called_once()
 
     def test_invalid_address_returns_400(self):
         resp = client.get("/positions/not-an-address")
@@ -327,8 +349,8 @@ class TestPositionsByUserId:
 
     def test_returns_positions_and_errors_structure(self, mock_db):
         base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
-        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
-            data=[{"user_address": base_addr.lower(), "is_settled": False}]
+        mock_db.rpc.return_value.execute.return_value = _position_rpc_result(
+            active=[{"user_address": base_addr.lower(), "is_settled": False}]
         )
         resp = client.get(f"/positions?user_id=test&base_address={base_addr}")
         assert resp.status_code == 200
@@ -337,28 +359,12 @@ class TestPositionsByUserId:
         assert "errors" in body
         assert isinstance(body["errors"], list)
 
-    def test_partial_failure_returns_errors(self, mock_db):
+    def test_multiple_chains_use_one_atomic_rpc(self, mock_db):
         base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
         sol_addr = "jfbMwzb3LsJEsnPadFfnftHwstz8iirvFR1snKCayd9"
-
-        results = [
-            MagicMock(data=[{"user_address": base_addr.lower()}]),
-            Exception("Solana DB down"),
-        ]
-        call_idx = [0]
-
-        original_table = mock_db.table.return_value
-
-        def execute_side_effect():
-            i = call_idx[0]
-            call_idx[0] += 1
-            if i < len(results) and isinstance(results[i], Exception):
-                raise results[i]
-            return results[i] if i < len(results) else MagicMock(data=[])
-
-        (
-            original_table.select.return_value.eq.return_value.eq.return_value.order.return_value.execute
-        ).side_effect = execute_side_effect
+        mock_db.rpc.return_value.execute.return_value = _position_rpc_result(
+            active=[{"user_address": base_addr.lower(), "is_settled": False}]
+        )
 
         resp = client.get(
             f"/positions?user_id=test"
@@ -367,14 +373,17 @@ class TestPositionsByUserId:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert len(body["errors"]) == 1
-        assert body["errors"][0]["chain"] == "solana"
+        assert body["errors"] == []
+        mock_db.rpc.assert_called_once()
+        wallets = mock_db.rpc.call_args.args[1]["p_wallets"]
+        assert wallets == [
+            {"chain": "base", "address": base_addr.lower()},
+            {"chain": "solana", "address": sol_addr},
+        ]
 
     def test_all_chains_fail_returns_502(self, mock_db):
         base_addr = "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
-        mock_db.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.execute.side_effect = Exception(
-            "DB down"
-        )
+        mock_db.rpc.return_value.execute.side_effect = Exception("DB down")
         resp = client.get(f"/positions?user_id=test&base_address={base_addr}")
         assert resp.status_code == 502
 

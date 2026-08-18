@@ -1,15 +1,23 @@
-from supabase import create_client, Client
+import threading
+
+from supabase import Client, create_client
 
 from src.config import settings
 
-_client: Client | None = None
+
+class _ClientLocal(threading.local):
+    """Keep the synchronous Supabase transport isolated to one worker thread."""
+
+    client: Client | None = None
+
+
+_clients = _ClientLocal()
 
 
 def get_client() -> Client:
-    global _client
-    if _client is None:
-        _client = create_client(
+    if _clients.client is None:
+        _clients.client = create_client(
             settings.supabase_url,
             settings.supabase_service_role_key,
         )
-    return _client
+    return _clients.client

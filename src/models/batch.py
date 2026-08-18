@@ -5,9 +5,9 @@ from pydantic import BaseModel
 
 
 class BatchStatus(str, Enum):
-    PENDING = "pending"          # collecting orders
-    EXECUTING = "executing"      # settlement in progress
-    SETTLED = "settled"          # on-chain settlement complete
+    PENDING = "pending"  # collecting orders
+    EXECUTING = "executing"  # settlement in progress
+    SETTLED = "settled"  # on-chain settlement complete
     FAILED = "failed"
 
 

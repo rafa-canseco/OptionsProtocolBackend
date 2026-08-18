@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from src.pricing.black_scholes import OptionType, delta
 from src.pricing.price_sheet import generate_otoken_specs, generate_strikes
 from src.pricing.utils import get_expiries
 
@@ -45,6 +48,56 @@ def test_otoken_specs_default_expiries():
     assert len(expiry_ts_set) >= 3  # 1d + near_fri + 7d + 14d (dedup may collapse)
     for ts in expiry_ts_set:
         assert ts % 86400 == 28800, f"{ts} is not 08:00 UTC"
+
+
+def test_rolling_csp_expiry_lists_exact_15pct_otm_tick(monkeypatch):
+    now = datetime(2026, 3, 3, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("src.pricing.price_sheet.time.time", lambda: now.timestamp())
+    expiries = get_expiries(now=now)
+    rolling = next(
+        ts for ts in expiries if 36 * 3600 <= ts - int(now.timestamp()) <= 60 * 3600
+    )
+    specs = generate_otoken_specs(spot=2000.0, expiry_timestamps=[rolling])
+
+    assert any(
+        spec.expiry_ts == rolling
+        and spec.option_type.value == "put"
+        and spec.strike == 1700.0
+        for spec in specs
+    )
+
+
+def test_rolling_expiry_adds_one_precise_policy_call(monkeypatch):
+    now = datetime(2026, 3, 3, 16, 0, 0, tzinfo=timezone.utc)
+    expiry = int(datetime(2026, 3, 5, 8, 0, 0, tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr("src.pricing.price_sheet.time.time", lambda: now.timestamp())
+
+    specs = generate_otoken_specs(
+        spot=1861.6051,
+        expiry_timestamps=[expiry],
+        iv=0.329,
+        risk_free_rate=0.05,
+    )
+    target = next(
+        spec
+        for spec in specs
+        if spec.option_type == OptionType.CALL and spec.strike == 1930.0
+    )
+
+    time_years = (expiry - int(now.timestamp())) / (365 * 86_400)
+    actual_delta = delta(
+        OptionType.CALL,
+        1861.6051,
+        target.strike,
+        time_years,
+        0.05,
+        0.329,
+    )
+    assert abs(actual_delta - 0.05) * 10_000 <= 150
+    assert not any(
+        spec.option_type == OptionType.PUT and spec.strike == target.strike
+        for spec in specs
+    )
 
 
 def test_otoken_specs_both_types():

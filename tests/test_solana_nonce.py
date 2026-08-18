@@ -46,7 +46,9 @@ class TestGetSolanaMakerNonce:
         mock_client.get_account_info.return_value = mock_resp
 
         with (
-            patch("src.chains.solana.client.get_solana_client", return_value=mock_client),
+            patch(
+                "src.chains.solana.client.get_solana_client", return_value=mock_client
+            ),
             patch("src.chains.solana.client.settings", _mock_settings()),
         ):
             result = get_solana_maker_nonce(str(maker_pk))
@@ -64,7 +66,9 @@ class TestGetSolanaMakerNonce:
         mock_client.get_account_info.return_value = mock_resp
 
         with (
-            patch("src.chains.solana.client.get_solana_client", return_value=mock_client),
+            patch(
+                "src.chains.solana.client.get_solana_client", return_value=mock_client
+            ),
             patch("src.chains.solana.client.settings", _mock_settings()),
         ):
             result = get_solana_maker_nonce(str(maker_pk))
@@ -79,7 +83,9 @@ class TestGetSolanaMakerNonce:
         mock_client.get_account_info.side_effect = Exception("connection refused")
 
         with (
-            patch("src.chains.solana.client.get_solana_client", return_value=mock_client),
+            patch(
+                "src.chains.solana.client.get_solana_client", return_value=mock_client
+            ),
             patch("src.chains.solana.client.settings", _mock_settings()),
         ):
             with pytest.raises(RuntimeError):

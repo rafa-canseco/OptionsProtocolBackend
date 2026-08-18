@@ -180,6 +180,41 @@ def test_store_events_refuses_incomplete_rows():
         )
 
 
+def test_store_events_updates_first_fill_in_one_bulk_query():
+    events = [
+        {
+            "tx_hash": f"0x{i}",
+            "otoken_address": address,
+            "strike_price": "2000",
+            "expiry": 1773993600,
+            "is_put": True,
+        }
+        for i, address in enumerate(
+            [
+                "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+                "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            ]
+        )
+    ]
+    client = MagicMock()
+    order_table = MagicMock()
+    order_table.upsert.return_value.execute.return_value.data = events
+    lifecycle_table = MagicMock()
+    client.table.side_effect = [order_table, lifecycle_table]
+
+    with patch("src.bots.event_indexer.get_client", return_value=client):
+        assert event_indexer._store_events(events) == 3
+
+    lifecycle_table.update.return_value.eq.return_value.in_.assert_called_once_with(
+        "otoken_address",
+        [
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+    )
+
+
 def test_fetch_and_store_skips_events_with_failed_enrichment():
     """Events whose enrichment returned None must not reach _store_events."""
     ev_good = MagicMock()

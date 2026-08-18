@@ -104,7 +104,11 @@ def _collect_candidate_signatures() -> list[dict]:
             if item.get("confirmationStatus") not in (None, "confirmed", "finalized"):
                 continue
             block_time = item.get("blockTime")
-            if min_block_time is not None and block_time is not None and block_time < min_block_time:
+            if (
+                min_block_time is not None
+                and block_time is not None
+                and block_time < min_block_time
+            ):
                 stop = True
                 break
             collected.append(item)
@@ -297,11 +301,7 @@ def _store_rows(rows: list[dict]) -> int:
     if not rows:
         return 0
     client = get_client()
-    result = (
-        client.table("order_events")
-        .upsert(rows, on_conflict="tx_hash")
-        .execute()
-    )
+    result = client.table("order_events").upsert(rows, on_conflict="tx_hash").execute()
     return len(result.data or [])
 
 

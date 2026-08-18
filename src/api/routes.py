@@ -3,18 +3,33 @@ import math
 import re
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
+from typing import Literal
 from datetime import datetime, timezone
 
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
-from src.config import settings, is_asset_tradable, is_asset_visible
+from src.config import (
+    get_protocol_fee_bps,
+    is_asset_tradable,
+    is_asset_visible,
+    settings,
+)
 from src.db.database import get_client
 from src.models.mm import CapacityResponse
 from src.models.price import PriceResponse
 from src.models.waitlist import WaitlistRequest, WaitlistResponse
+from src.api.position_pagination import (
+    PAGE_DEFAULT,
+    PositionCursorError,
+    build_position_page,
+    build_position_snapshot,
+    fetch_position_rpc,
+    normalized_wallet_subject,
+)
 from src.chains import Chain
 from src.chains.address import detect_chain, ETH_ADDRESS_RE, is_valid_solana_address
 from src.chains.explorer import tx_explorer_url
@@ -60,13 +75,6 @@ _CAPACITY_SELECT = "mm_address,capacity_eth,capacity_usd,status,reported_at"
 _PRICE_QUOTE_SELECT = (
     "id,mm_address,otoken_address,bid_price,deadline,quote_id,max_amount,"
     "maker_nonce,signature,strike_price,expiry,is_put,chain"
-)
-_POSITION_SELECT = (
-    "id,tx_hash,block_number,chain,user_address,mm_address,otoken_address,"
-    "amount,premium,gross_premium,net_premium,protocol_fee,collateral,vault_id,"
-    "strike_price,expiry,is_put,is_settled,settled_at,settlement_tx_hash,"
-    "settlement_type,is_itm,expiry_price,delivered_asset,delivered_amount,"
-    "delivery_tx_hash,group_id,indexed_at,asset"
 )
 
 
@@ -258,18 +266,21 @@ async def get_capacity(
     return _aggregate_capacity(rows, asset)
 
 
-def _fetch_valid_otoken_addresses(asset: Asset) -> set[str]:
-    """Return set of otoken_addresses in available_otokens for the given asset."""
+def _fetch_valid_otoken_addresses(asset: Asset) -> dict[str, str]:
+    """Return available address → lifecycle status for the asset chain."""
     try:
         chain = get_chain_for_asset(asset).value
         client = get_client()
         result = (
             client.table("available_otokens")
-            .select("otoken_address")
+            .select("otoken_address,deployment_status")
             .eq("chain", chain)
             .execute()
         )
-        return {r["otoken_address"] for r in (result.data or [])}
+        return {
+            r["otoken_address"]: r.get("deployment_status", "ready")
+            for r in (result.data or [])
+        }
     except Exception:
         logger.error(
             "Could not fetch available_otokens for %s",
@@ -337,26 +348,85 @@ def _best_quotes_by_otoken(quotes: list[dict]) -> list[dict]:
     return list(by_option.values())
 
 
-def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
+def _price_count_series_batches(visible_series: list[dict]) -> list[list[dict]]:
+    """Build <=100-item batches with globally exact nearest-expiry regions."""
+    descriptors: list[dict] = []
+    grouped: dict[tuple[Decimal, bool], list[dict]] = defaultdict(list)
+    for ordinal, series in enumerate(visible_series):
+        try:
+            strike = Decimal(str(series["strike_price"]))
+            is_put = bool(series["is_put"])
+            expiry = int(series["expiry"])
+        except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Invalid visible price series") from exc
+        descriptor = {
+            "ordinal": ordinal,
+            "strike_price": str(strike),
+            "is_put": is_put,
+            "expiry": expiry,
+            "lower_expiry": None,
+            "upper_expiry": None,
+        }
+        descriptors.append(descriptor)
+        grouped[(strike, is_put)].append(descriptor)
+
+    for candidates in grouped.values():
+        candidates.sort(key=lambda item: (item["expiry"], item["ordinal"]))
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                previous = candidates[index - 1]
+                boundary_sum = previous["expiry"] + candidate["expiry"]
+                lower = boundary_sum // 2 + 1
+                if boundary_sum % 2 == 0 and candidate["ordinal"] < previous["ordinal"]:
+                    lower -= 1
+                candidate["lower_expiry"] = lower
+            if index + 1 < len(candidates):
+                following = candidates[index + 1]
+                boundary_sum = candidate["expiry"] + following["expiry"]
+                upper = boundary_sum // 2
+                if (
+                    boundary_sum % 2 == 0
+                    and candidate["ordinal"] > following["ordinal"]
+                ):
+                    upper -= 1
+                candidate["upper_expiry"] = upper
+
+    descriptors.sort(key=lambda item: item["ordinal"])
+    payloads = [
+        {key: value for key, value in descriptor.items() if key != "ordinal"}
+        for descriptor in descriptors
+    ]
+    return [payloads[index : index + 100] for index in range(0, len(payloads), 100)]
+
+
+def _fetch_position_counts(
+    asset: Asset, visible_series: list[dict]
+) -> dict[tuple, int]:
     """Count active positions per (strike_usd, is_put, expiry) for the asset.
 
     Active = not settled and not expired. Returns empty dict on any failure
     so callers can default position_count to 0 without surfacing the error.
     """
+    if not visible_series:
+        return {}
     now_ts = int(time.time())
     chain = get_chain_for_asset(asset).value
     try:
+        batches = _price_count_series_batches(visible_series)
         client = get_client()
-        result = (
-            client.table("order_events")
-            .select("strike_price,is_put,expiry")
-            .eq("asset", asset.value)
-            .eq("chain", chain)
-            .or_("is_settled.eq.false,is_settled.is.null")
-            .gt("expiry", now_ts)
-            .execute()
-        )
-        rows = result.data or []
+        rows = []
+        for batch in batches:
+            result = client.rpc(
+                "b1nary_price_position_counts",
+                {
+                    "p_asset": asset.value,
+                    "p_chain": chain,
+                    "p_now": now_ts,
+                    "p_series": batch,
+                },
+            )
+            result = result.execute()
+            rows.extend(result.data or [])
     except Exception:
         logger.warning(
             "Failed to fetch position counts; defaulting to 0", exc_info=True
@@ -366,13 +436,14 @@ def _fetch_position_counts(asset: Asset) -> dict[tuple, int]:
     counts: dict[tuple, int] = {}
     for row in rows:
         try:
-            strike_usd = float(row["strike_price"]) / 1e8
-            is_put = row["is_put"]
-            expiry = row["expiry"]
+            strike_usd = float(row["strike_price"])
+            is_put = bool(row["is_put"])
+            expiry = int(row["expiry"])
+            count = int(row["position_count"])
         except (KeyError, ValueError, TypeError):
             continue
         key = (strike_usd, is_put, expiry)
-        counts[key] = counts.get(key, 0) + 1
+        counts[key] = count
     return counts
 
 
@@ -389,7 +460,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
 
         # BatchSettler treats bid_price as USDC smallest units on every chain.
         premium_usd = bid_price_raw / (10**USDC_DECIMALS)
-        fee_mult = (10_000 - settings.protocol_fee_bps) / 10_000
+        fee_mult = (10_000 - get_protocol_fee_bps(chain)) / 10_000
         net_premium = premium_usd * fee_mult
 
         available_eth = max_amount_raw / (10**OTOKEN_DECIMALS)
@@ -429,6 +500,7 @@ def _quote_to_price_response(q: dict) -> PriceResponse | None:
             max_amount_raw=max_amount_raw,
             maker_nonce=q["maker_nonce"],
             chain=chain,
+            deployment_status=q.get("deployment_status", "ready"),
         )
     except Exception:
         logger.exception(
@@ -540,6 +612,17 @@ async def get_prices(
                 detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
             )
 
+    if not spot_ok:
+        raise HTTPException(503, "Spot price unavailable")
+
+    # The live price safety check runs on every request, including cache hits.
+    if circuit_breaker.check(spot, asset.value):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
+        )
+    circuit_breaker.update_reference(spot, asset.value)
+
     cache_key = f"{asset.value}:{'tradable' if tradable else 'readonly'}"
     now = time.monotonic()
     cached = _prices_cache.get(cache_key)
@@ -547,9 +630,6 @@ async def get_prices(
     if cached is not None and (now - cached_at) < _PRICES_TTL:
         logger.debug("prices cache hit for %s (age=%.1fs)", cache_key, now - cached_at)
         return cached
-
-    if not spot_ok:
-        raise HTTPException(503, "Spot price unavailable")
 
     logger.info("prices cache miss for %s — fetching from mm_quotes", cache_key)
 
@@ -561,12 +641,19 @@ async def get_prices(
 
     if not all_quotes:
         logger.info("No active quotes in mm_quotes for %s", cache_key)
+        _prices_cache[cache_key] = []
+        _prices_cached_at[cache_key] = time.monotonic()
         return []
 
     # Filter quotes to only those with oTokens in available_otokens
-    valid_addrs = _fetch_valid_otoken_addresses(asset)
+    valid_series = _fetch_valid_otoken_addresses(asset)
+    # Keep tests and temporary old callers compatible with the previous set return.
+    if isinstance(valid_series, set):
+        valid_series = {address: "ready" for address in valid_series}
     before = len(all_quotes)
-    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_addrs]
+    all_quotes = [q for q in all_quotes if q.get("otoken_address") in valid_series]
+    for quote in all_quotes:
+        quote["deployment_status"] = valid_series[quote["otoken_address"]]
     pruned = before - len(all_quotes)
     if pruned:
         logger.info(
@@ -575,23 +662,16 @@ async def get_prices(
             cache_key,
         )
     if not all_quotes:
+        _prices_cache[cache_key] = []
+        _prices_cached_at[cache_key] = time.monotonic()
         return []
 
     best_quotes = _best_quotes_by_otoken(all_quotes)
 
-    # Check circuit breaker with fresh spot
-    if spot_ok:
-        if circuit_breaker.check(spot, asset.value):
-            raise HTTPException(
-                status_code=503,
-                detail=f"Pricing paused: {circuit_breaker.pause_reason_for(asset.value)}",
-            )
-        circuit_breaker.update_reference(spot, asset.value)
-
     # Fetch position counts for social proof (best effort)
     position_counts: dict[tuple, int] = {}
     try:
-        position_counts = _fetch_position_counts(asset)
+        position_counts = _fetch_position_counts(asset, best_quotes)
     except Exception:
         logger.warning("Could not enrich position counts", exc_info=True)
 
@@ -758,20 +838,65 @@ def _enrich_positions(positions: list[dict]) -> list[dict]:
     return positions
 
 
+def _validated_position_stream(stream: str | None) -> str | None:
+    if stream is not None and stream not in {"active", "settled", "changes"}:
+        raise HTTPException(400, "stream must be active, settled, or changes")
+    return stream
+
+
+def _set_snapshot_headers(response: Response, snapshot: dict) -> None:
+    response.headers["X-Portfolio-Bounded"] = "true"
+    response.headers["X-Portfolio-Watermark"] = snapshot["watermark"]
+    for stream in ("active", "settled"):
+        metadata = snapshot[stream]
+        title = stream.title()
+        response.headers[f"X-{title}-Limit"] = str(metadata["limit"])
+        response.headers[f"X-{title}-Has-More"] = str(metadata["has_more"]).lower()
+        if metadata["next_cursor"]:
+            response.headers[f"X-{title}-Next-Cursor"] = metadata["next_cursor"]
+
+
+def _position_rpc_or_http_error(client, **kwargs) -> dict:
+    try:
+        return fetch_position_rpc(client, **kwargs)
+    except PositionCursorError as exc:
+        raise HTTPException(400, str(exc)) from None
+    except RuntimeError as exc:
+        if "signing key" in str(exc):
+            raise HTTPException(503, "Position pagination is unavailable") from None
+        raise
+
+
+def _raise_position_runtime_http_error(exc: RuntimeError) -> None:
+    if "signing key" in str(exc):
+        raise HTTPException(503, "Position pagination is unavailable") from None
+    raise exc
+
+
 @router.get(
     "/positions/{address}",
     tags=["Positions"],
     summary="Get positions for a wallet",
 )
-async def get_positions(address: str, request: Request):
-    """Return all option positions for the given wallet address.
+async def get_positions(
+    address: str,
+    request: Request,
+    response: Response,
+    stream: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, min_length=16, max_length=2048),
+    limit: int = Query(default=PAGE_DEFAULT, ge=1, le=100),
+    changed_after: datetime | None = Query(default=None),
+):
+    """Return a bounded portfolio snapshot or an explicit keyset page.
 
     Accepts both EVM (0x hex) and Solana (base58) addresses.
-    Data comes from on-chain events indexed into Supabase.
-    Each position includes strike, expiry, premium paid, settlement status,
-    and a human-readable `outcome` field for settled positions.
+    Calls without ``stream`` preserve the historical bare-list JSON shape and
+    expose snapshot bounds, continuations, and watermark in response headers.
     """
     _check_read_rate_limit(_get_client_ip(request))
+    stream = _validated_position_stream(stream)
+    if stream is None and (cursor is not None or changed_after is not None):
+        raise HTTPException(400, "cursor and changed_after require an explicit stream")
 
     try:
         chain = detect_chain(address)
@@ -782,22 +907,116 @@ async def get_positions(address: str, request: Request):
         )
 
     addr_normalized = address.lower() if chain == Chain.BASE else address
+    subject = normalized_wallet_subject(
+        [(chain.value, addr_normalized)], scope="wallet-route"
+    )
 
     try:
         client = get_client()
-        result = (
-            client.table("order_events")
-            .select(_POSITION_SELECT)
-            .eq("user_address", addr_normalized)
-            .eq("chain", chain.value)
-            .order("indexed_at", desc=True)
-            .execute()
+        payload = _position_rpc_or_http_error(
+            client,
+            subject=subject,
+            stream=stream or "snapshot",
+            limit=limit,
+            cursor=cursor,
+            changed_after=changed_after,
         )
+        if stream is not None:
+            page = build_position_page(
+                payload,
+                subject=subject,
+                stream=stream,
+                limit=limit,
+                changed_after=changed_after,
+            )
+            page["positions"] = _enrich_positions(page["positions"])
+            return page
+        snapshot = build_position_snapshot(payload, subject=subject)
+        _set_snapshot_headers(response, snapshot)
+        return _enrich_positions(snapshot["positions"])
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        _raise_position_runtime_http_error(exc)
     except Exception:
-        logger.exception(f"Failed to fetch positions for {address}")
+        logger.exception("Failed to fetch positions for %s", address)
         raise HTTPException(status_code=502, detail="Could not fetch positions")
 
-    return _enrich_positions(result.data or [])
+
+class PositionBatchWallet(BaseModel):
+    chain: Literal["base", "solana"]
+    address: str = Field(min_length=1, max_length=128)
+
+
+class PositionBatchRequest(BaseModel):
+    wallets: list[PositionBatchWallet] = Field(min_length=1, max_length=100)
+    stream: Literal["active", "settled", "changes"] | None = None
+    cursor: str | None = Field(default=None, min_length=16, max_length=2048)
+    limit: int = Field(default=PAGE_DEFAULT, ge=1, le=100)
+    changed_after: datetime | None = None
+
+
+@router.post(
+    "/positions/batch",
+    tags=["Positions"],
+    summary="Get a bounded portfolio for a wallet set",
+)
+async def get_positions_batch(
+    body: PositionBatchRequest,
+    request: Request,
+):
+    """Read up to 100 Base/Solana wallets through one bounded database RPC."""
+    _check_read_rate_limit(_get_client_ip(request))
+    if body.stream is None and (
+        body.cursor is not None or body.changed_after is not None
+    ):
+        raise HTTPException(400, "cursor and changed_after require an explicit stream")
+
+    wallets: list[tuple[str, str]] = []
+    for wallet in body.wallets:
+        if wallet.chain == "base":
+            if not ETH_ADDRESS_RE.match(wallet.address):
+                raise HTTPException(400, "Invalid Base wallet address")
+            wallets.append((wallet.chain, wallet.address.lower()))
+        else:
+            if not is_valid_solana_address(wallet.address):
+                raise HTTPException(400, "Invalid Solana wallet address")
+            wallets.append((wallet.chain, wallet.address))
+
+    subject = normalized_wallet_subject(wallets, scope="batch-wallet-route")
+    try:
+        payload = _position_rpc_or_http_error(
+            get_client(),
+            subject=subject,
+            stream=body.stream or "snapshot",
+            limit=body.limit,
+            cursor=body.cursor,
+            changed_after=body.changed_after,
+        )
+        if body.stream is not None:
+            page = build_position_page(
+                payload,
+                subject=subject,
+                stream=body.stream,
+                limit=body.limit,
+                changed_after=body.changed_after,
+            )
+            page["positions"] = _enrich_positions(page["positions"])
+            return page
+        snapshot = build_position_snapshot(payload, subject=subject)
+        return {
+            "positions": _enrich_positions(snapshot["positions"]),
+            "pagination": {
+                key: value for key, value in snapshot.items() if key != "positions"
+            },
+        }
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        _raise_position_runtime_http_error(exc)
+    except Exception:
+        logger.exception("Failed to fetch positions for wallet batch")
+        raise HTTPException(502, "Could not fetch positions for wallet batch")
 
 
 class GroupPositionsRequest(BaseModel):
@@ -888,6 +1107,10 @@ async def get_positions_by_user(
     solana_address: str | None = Query(
         None, description="User's Solana wallet address"
     ),
+    stream: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, min_length=16, max_length=2048),
+    limit: int = Query(default=PAGE_DEFAULT, ge=1, le=100),
+    changed_after: datetime | None = Query(default=None),
 ):
     """Return positions across both chains for a Privy user.
 
@@ -896,59 +1119,61 @@ async def get_positions_by_user(
     on each position.
     """
     _check_read_rate_limit(_get_client_ip(request))
+    stream = _validated_position_stream(stream)
+    if stream is None and (cursor is not None or changed_after is not None):
+        raise HTTPException(400, "cursor and changed_after require an explicit stream")
 
     if not base_address and not solana_address:
         raise HTTPException(
             400, "At least one of base_address or solana_address is required"
         )
 
-    client = get_client()
-    positions: list[dict] = []
-    errors: list[dict] = []
-
+    wallets: list[tuple[str, str]] = []
     if base_address:
         if not ETH_ADDRESS_RE.match(base_address):
             raise HTTPException(400, "Invalid base_address")
-        try:
-            result = (
-                client.table("order_events")
-                .select(_POSITION_SELECT)
-                .eq("user_address", base_address.lower())
-                .eq("chain", "base")
-                .order("indexed_at", desc=True)
-                .execute()
-            )
-            positions.extend(_enrich_positions(result.data or []))
-        except Exception:
-            logger.exception("Failed to fetch Base positions for %s", user_id)
-            errors.append({"chain": "base", "message": "Could not load Base positions"})
+        wallets.append(("base", base_address.lower()))
 
     if solana_address:
         if not is_valid_solana_address(solana_address):
             raise HTTPException(400, "Invalid solana_address")
-        try:
-            result = (
-                client.table("order_events")
-                .select(_POSITION_SELECT)
-                .eq("user_address", solana_address)
-                .eq("chain", "solana")
-                .order("indexed_at", desc=True)
-                .execute()
-            )
-            positions.extend(_enrich_positions(result.data or []))
-        except Exception:
-            logger.exception("Failed to fetch Solana positions for %s", user_id)
-            errors.append(
-                {
-                    "chain": "solana",
-                    "message": "Could not load Solana positions",
-                }
-            )
+        wallets.append(("solana", solana_address))
 
-    if not positions and errors:
+    subject = normalized_wallet_subject(wallets, scope=f"privy:{user_id}")
+    try:
+        payload = _position_rpc_or_http_error(
+            get_client(),
+            subject=subject,
+            stream=stream or "snapshot",
+            limit=limit,
+            cursor=cursor,
+            changed_after=changed_after,
+        )
+        if stream is not None:
+            page = build_position_page(
+                payload,
+                subject=subject,
+                stream=stream,
+                limit=limit,
+                changed_after=changed_after,
+            )
+            page["positions"] = _enrich_positions(page["positions"])
+            return {**page, "errors": []}
+        snapshot = build_position_snapshot(payload, subject=subject)
+        return {
+            "positions": _enrich_positions(snapshot["positions"]),
+            "errors": [],
+            "pagination": {
+                key: value for key, value in snapshot.items() if key != "positions"
+            },
+        }
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        _raise_position_runtime_http_error(exc)
+    except Exception:
+        logger.exception("Failed to fetch positions for %s", user_id)
         raise HTTPException(502, "Could not fetch positions from any chain")
-
-    return {"positions": positions, "errors": errors}
 
 
 @router.get(

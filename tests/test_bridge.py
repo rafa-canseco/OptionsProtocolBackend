@@ -546,7 +546,9 @@ class TestSolanaCCTPBurnEndpoints:
     def test_submit_requires_quote_id(self, monkeypatch):
         monkeypatch.setattr("src.bridge.routes.settings.tradable_chains", "base,solana")
 
-        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+        with patch(
+            "src.bridge.routes.submit_solana_cctp_burn_transaction"
+        ) as mock_submit:
             resp = client.post(
                 "/api/bridge/solana-cctp-burn/submit",
                 json={
@@ -571,7 +573,9 @@ class TestSolanaCCTPBurnEndpoints:
             "duplicate key"
         )
 
-        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+        with patch(
+            "src.bridge.routes.submit_solana_cctp_burn_transaction"
+        ) as mock_submit:
             resp = client.post(
                 "/api/bridge/solana-cctp-burn/submit",
                 json={
@@ -593,7 +597,9 @@ class TestSolanaCCTPBurnEndpoints:
             data=[{"id": "active-job", "status": "minting", "quote_id": "q-old"}]
         )
 
-        with patch("src.bridge.routes.submit_solana_cctp_burn_transaction") as mock_submit:
+        with patch(
+            "src.bridge.routes.submit_solana_cctp_burn_transaction"
+        ) as mock_submit:
             resp = client.post(
                 "/api/bridge/solana-cctp-burn/submit",
                 json={

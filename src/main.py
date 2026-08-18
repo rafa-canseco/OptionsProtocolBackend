@@ -6,22 +6,31 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import router
-from src.api.results import router as results_router
 from src.api.analytics import router as analytics_router
 from src.api.mm_routes import router as mm_router
 from src.api.mm_ws import router as mm_ws_router
 from src.api.activity import router as activity_router
-from src.api.leaderboard import router as leaderboard_router
 from src.api.notifications import router as notifications_router
 from src.api.b1nary_accounts import router as b1nary_accounts_router
 from src.api.yield_routes import router as yield_router
+from src.api.csp_vault import router as csp_vault_router
+from src.api.series import router as series_router
+from src.api.fund_series import router as fund_series_router
 from src.bridge.routes import router as bridge_router
 from src.config import (
+    get_tokenized_fund_rpc_url,
+    get_fund_covered_call_sepolia_fair_value_policy,
+    get_fund_covered_call_sepolia_observer_private_keys,
+    get_fund_csp_sepolia_fair_value_policy,
+    get_fund_csp_sepolia_observer_private_keys,
+    get_fund_nav_reporter_private_keys,
+    get_fund_nav_submitter_private_key,
     settings,
     has_solana_config,
     has_bridge_config,
     has_enabled_solana_bots,
     is_solana_bot_enabled,
+    validate_meta_wheel_credential_topology,
 )
 
 logging.basicConfig(
@@ -29,6 +38,275 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+SUPPORTED_LAZY_OTOKEN_CHAIN_IDS = {8453, 84532}
+_LAZY_BASE_ASSET_ADDRESSES = {
+    "eth": ("WETH_ADDRESS", "weth_address"),
+    "btc": ("WBTC_ADDRESS", "wbtc_address"),
+}
+
+
+def validate_fund_runtime_cadences() -> None:
+    """Reject enabled fund loops configured below operationally safe minima."""
+    if (
+        settings.tokenized_fund_indexer_enabled
+        and settings.tokenized_fund_indexer_poll_interval_seconds < 5
+    ):
+        raise RuntimeError(
+            "TOKENIZED_FUND_INDEXER_POLL_INTERVAL_SECONDS must be at least 5 "
+            "when the indexer is enabled"
+        )
+    if (
+        settings.fund_nav_reporter_enabled
+        and settings.fund_nav_reporter_interval_seconds < 15
+    ):
+        raise RuntimeError(
+            "FUND_NAV_REPORTER_INTERVAL_SECONDS must be at least 15 when the "
+            "NAV reporter is enabled"
+        )
+
+
+def _configured_lazy_assets() -> set[str]:
+    return {
+        item.strip().lower()
+        for item in settings.otoken_lazy_assets.split(",")
+        if item.strip()
+    }
+
+
+def validate_lazy_otoken_config(series_mode: str) -> None:
+    """Fail fast only for lazy mode; eager remains the rollback-safe default."""
+    if series_mode != "lazy":
+        return
+    lazy_assets = _configured_lazy_assets()
+    if not lazy_assets:
+        raise RuntimeError("OTOKEN_LAZY_ASSETS must contain at least one Base asset")
+    unsupported_assets = lazy_assets - set(_LAZY_BASE_ASSET_ADDRESSES)
+    if unsupported_assets:
+        raise RuntimeError(
+            "OTOKEN_LAZY_ASSETS contains unsupported Base assets: "
+            + ", ".join(sorted(unsupported_assets))
+        )
+    required = {
+        "RPC_URL": settings.rpc_url,
+        "BATCH_SETTLER_ADDRESS": settings.batch_settler_address,
+        "OTOKEN_FACTORY_ADDRESS": settings.otoken_factory_address,
+        "WHITELIST_ADDRESS": settings.whitelist_address,
+        "OPERATOR_PRIVATE_KEY": settings.operator_private_key,
+        "USDC_ADDRESS": settings.usdc_address,
+        "OTOKEN_INTENT_HMAC_SECRET": settings.otoken_intent_hmac_secret,
+        "PRIVY_APP_ID": settings.privy_app_id,
+        "PRIVY_APP_SECRET": settings.privy_app_secret,
+    }
+    for asset in lazy_assets:
+        env_name, setting_name = _LAZY_BASE_ASSET_ADDRESSES[asset]
+        required[env_name] = getattr(settings, setting_name)
+    missing = [
+        name
+        for name, value in required.items()
+        if not value or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise RuntimeError(
+            "Lazy oToken mode is missing required configuration: " + ", ".join(missing)
+        )
+    if not (
+        settings.privy_jwt_verification_key.strip() or settings.privy_jwks_url.strip()
+    ):
+        raise RuntimeError(
+            "Lazy oToken mode requires at least one of "
+            "PRIVY_JWT_VERIFICATION_KEY or PRIVY_JWKS_URL"
+        )
+    if settings.privy_jwks_url.strip():
+        from src.api.user_auth import validate_privy_jwks_url
+
+        try:
+            validate_privy_jwks_url(settings.privy_jwks_url)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
+    if settings.chain_id not in SUPPORTED_LAZY_OTOKEN_CHAIN_IDS:
+        raise RuntimeError(
+            "Lazy oToken mode only supports Base mainnet (8453) or Base Sepolia (84532)"
+        )
+    materialization_buffer = settings.otoken_materialization_deadline_buffer_seconds
+    execution_buffer = settings.otoken_ensure_deadline_buffer_seconds
+    if materialization_buffer <= 120 or materialization_buffer < execution_buffer + 120:
+        raise RuntimeError(
+            "OTOKEN_MATERIALIZATION_DEADLINE_BUFFER_SECONDS must exceed "
+            "120 seconds and cover the execution buffer plus the 120-second "
+            "transaction timeout"
+        )
+
+
+def _lazy_contract_addresses():
+    """Return named, checksummed addresses without exposing values in errors."""
+    from web3 import Web3
+
+    configured = {
+        "BATCH_SETTLER_ADDRESS": settings.batch_settler_address,
+        "OTOKEN_FACTORY_ADDRESS": settings.otoken_factory_address,
+        "WHITELIST_ADDRESS": settings.whitelist_address,
+        "USDC_ADDRESS": settings.usdc_address,
+    }
+    for asset in _configured_lazy_assets():
+        env_name, setting_name = _LAZY_BASE_ASSET_ADDRESSES[asset]
+        configured[env_name] = getattr(settings, setting_name)
+
+    checksummed = {}
+    for name, value in configured.items():
+        try:
+            address = Web3.to_checksum_address(value)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{name} must be a valid EVM address") from None
+        if address == "0x0000000000000000000000000000000000000000":
+            raise RuntimeError(f"{name} must not be the zero address")
+        checksummed[name] = address
+
+    by_address: dict[str, list[str]] = {}
+    for name, address in checksummed.items():
+        by_address.setdefault(address.lower(), []).append(name)
+    duplicates = [names for names in by_address.values() if len(names) > 1]
+    if duplicates:
+        names = ", ".join(sorted(duplicates[0]))
+        raise RuntimeError(f"Lazy oToken configuration reuses one address for {names}")
+    return checksummed
+
+
+def _has_contract_code(code) -> bool:
+    if isinstance(code, str):
+        normalized = code.removeprefix("0x")
+        return bool(normalized) and any(char != "0" for char in normalized)
+    raw = bytes(code)
+    return bool(raw) and any(raw)
+
+
+def validate_lazy_otoken_chain_config(series_mode: str, w3=None) -> None:
+    """Verify lazy-mode Base deployment wiring with read-only RPC calls."""
+    if series_mode != "lazy":
+        return
+    validate_lazy_otoken_config(series_mode)
+
+    from src.contracts.abis import (
+        ADDRESS_BOOK_ABI,
+        BATCH_SETTLER_ABI,
+        OTOKEN_FACTORY_ABI,
+    )
+    from src.contracts.web3_client import get_operator_account, get_w3
+
+    addresses = _lazy_contract_addresses()
+    try:
+        expected_operator = get_operator_account().address
+    except (TypeError, ValueError):
+        raise RuntimeError("OPERATOR_PRIVATE_KEY must be a valid private key") from None
+
+    if w3 is None:
+        try:
+            w3 = get_w3()
+        except Exception:
+            raise RuntimeError(
+                "Lazy oToken RPC preflight could not initialize RPC_URL"
+            ) from None
+    try:
+        connected = w3.is_connected()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not connect to RPC_URL"
+        ) from None
+    if not connected:
+        raise RuntimeError("Lazy oToken RPC preflight could not connect to RPC_URL")
+    try:
+        rpc_chain_id = int(w3.eth.chain_id)
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not read the chain ID"
+        ) from None
+    if rpc_chain_id != settings.chain_id:
+        raise RuntimeError(
+            "Lazy oToken RPC chain mismatch: CHAIN_ID does not match RPC_URL"
+        )
+
+    for name, address in addresses.items():
+        try:
+            code = w3.eth.get_code(address)
+        except Exception:
+            raise RuntimeError(
+                f"Lazy oToken RPC preflight could not read code for {name}"
+            ) from None
+        if not _has_contract_code(code):
+            raise RuntimeError(f"{name} has no deployed bytecode on configured chain")
+
+    factory = w3.eth.contract(
+        address=addresses["OTOKEN_FACTORY_ADDRESS"],
+        abi=OTOKEN_FACTORY_ABI,
+    )
+    batch_settler = w3.eth.contract(
+        address=addresses["BATCH_SETTLER_ADDRESS"],
+        abi=BATCH_SETTLER_ABI,
+    )
+    try:
+        factory_address_book = factory.functions.addressBook().call()
+        batch_address_book = batch_settler.functions.addressBook().call()
+        configured_operator = factory.functions.operator().call()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken preflight could not read factory/settler configuration"
+        ) from None
+
+    if factory_address_book.lower() != batch_address_book.lower():
+        raise RuntimeError(
+            "Lazy oToken crossed configuration: factory and settler use "
+            "different AddressBook contracts"
+        )
+    if configured_operator.lower() != expected_operator.lower():
+        raise RuntimeError(
+            "Lazy oToken crossed configuration: OPERATOR_PRIVATE_KEY does not "
+            "match factory operator"
+        )
+
+    try:
+        address_book_code = w3.eth.get_code(factory_address_book)
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken RPC preflight could not read AddressBook code"
+        ) from None
+    if not _has_contract_code(address_book_code):
+        raise RuntimeError("Factory AddressBook has no deployed bytecode")
+
+    address_book = w3.eth.contract(
+        address=factory_address_book,
+        abi=ADDRESS_BOOK_ABI,
+    )
+    try:
+        address_book_factory = address_book.functions.oTokenFactory().call()
+        address_book_whitelist = address_book.functions.whitelist().call()
+        address_book_settler = address_book.functions.batchSettler().call()
+    except Exception:
+        raise RuntimeError(
+            "Lazy oToken preflight could not read AddressBook configuration"
+        ) from None
+    expected_wiring = {
+        "OTOKEN_FACTORY_ADDRESS": (
+            address_book_factory,
+            addresses["OTOKEN_FACTORY_ADDRESS"],
+        ),
+        "WHITELIST_ADDRESS": (
+            address_book_whitelist,
+            addresses["WHITELIST_ADDRESS"],
+        ),
+        "BATCH_SETTLER_ADDRESS": (
+            address_book_settler,
+            addresses["BATCH_SETTLER_ADDRESS"],
+        ),
+    }
+    crossed = [
+        name
+        for name, (observed, expected) in expected_wiring.items()
+        if observed.lower() != expected.lower()
+    ]
+    if crossed:
+        raise RuntimeError(
+            "Lazy oToken crossed configuration in AddressBook: " + ", ".join(crossed)
+        )
 
 
 @asynccontextmanager
@@ -51,8 +329,6 @@ async def lifespan(app: FastAPI):
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
 
-    tasks = []
-
     if not settings.background_workers_enabled:
         logger.warning(
             "Background workers disabled by BACKGROUND_WORKERS_ENABLED=false; "
@@ -61,12 +337,130 @@ async def lifespan(app: FastAPI):
         yield
         return
 
+    validate_fund_runtime_cadences()
+    if settings.tokenized_fund_indexer_enabled and not get_tokenized_fund_rpc_url():
+        raise RuntimeError(
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
+            "TOKENIZED_FUND_INDEXER_ENABLED=true"
+        )
+    if settings.fund_nav_reporter_enabled and not get_tokenized_fund_rpc_url():
+        raise RuntimeError(
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
+            "FUND_NAV_REPORTER_ENABLED=true"
+        )
+    wheel_reporter_configured = bool(settings.meta_wheel_fund_key.strip())
+    standalone_reporter_configured = bool(
+        settings.fund_nav_reporter_private_keys.strip()
+        or settings.fund_nav_submitter_private_key.strip()
+    )
+    standalone_observations_enabled = bool(
+        settings.fund_csp_sepolia_fair_value_observations_enabled
+        or settings.fund_covered_call_sepolia_fair_value_observations_enabled
+    )
+    wheel_observations_enabled = bool(
+        settings.meta_wheel_csp_sepolia_fair_value_observations_enabled
+        or settings.meta_wheel_covered_call_sepolia_fair_value_observations_enabled
+    )
+    if settings.fund_nav_reporter_enabled and not (
+        wheel_reporter_configured or standalone_reporter_configured
+    ):
+        raise RuntimeError(
+            "FUND_NAV_REPORTER_PRIVATE_KEYS or Meta Wheel credentials are required when "
+            "FUND_NAV_REPORTER_ENABLED=true"
+        )
+    if settings.fund_nav_reporter_enabled:
+        if not 15 <= settings.fund_nav_reporter_lease_seconds <= 900:
+            raise RuntimeError(
+                "FUND_NAV_REPORTER_LEASE_SECONDS must be between 15 and 900"
+            )
+        from eth_account import Account
+
+        reporter_addresses = set()
+        submitter_address = None
+        if standalone_reporter_configured or standalone_observations_enabled:
+            try:
+                reporter_keys = get_fund_nav_reporter_private_keys()
+                submitter_key = get_fund_nav_submitter_private_key()
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            reporter_addresses = {
+                Account.from_key(key).address.lower() for key in reporter_keys
+            }
+            submitter_address = Account.from_key(submitter_key).address.lower()
+            if submitter_address in reporter_addresses:
+                raise RuntimeError(
+                    "NAV submitter key must be separate from NAV reporter keys"
+                )
+        fair_value_configs = (
+            (
+                "CSP",
+                settings.fund_csp_sepolia_fair_value_observations_enabled,
+                get_fund_csp_sepolia_observer_private_keys,
+                get_fund_csp_sepolia_fair_value_policy,
+            ),
+            (
+                "covered-call",
+                settings.fund_covered_call_sepolia_fair_value_observations_enabled,
+                get_fund_covered_call_sepolia_observer_private_keys,
+                get_fund_covered_call_sepolia_fair_value_policy,
+            ),
+        )
+        observer_sets = {}
+        for label, enabled, get_keys, get_policy in fair_value_configs:
+            if not enabled:
+                continue
+            if settings.chain_id != 84532:
+                raise RuntimeError(
+                    f"Fair-value {label} observations are restricted to Base Sepolia"
+                )
+            try:
+                observer_keys = get_keys()
+                get_policy()
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            observer_addresses = {
+                Account.from_key(key).address.lower() for key in observer_keys
+            }
+            if reporter_addresses & observer_addresses:
+                raise RuntimeError(
+                    f"Sepolia {label} observer keys must be separate from "
+                    "NAV reporter keys"
+                )
+            if (
+                submitter_address is not None
+                and submitter_address in observer_addresses
+            ):
+                raise RuntimeError(
+                    f"NAV submitter key must be separate from {label} observer keys"
+                )
+            observer_sets[label] = observer_addresses
+        if observer_sets.get("CSP", set()) & observer_sets.get("covered-call", set()):
+            raise RuntimeError("CSP and covered-call observer keys must be separate")
+        if wheel_reporter_configured:
+            try:
+                validate_meta_wheel_credential_topology()
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+    elif standalone_observations_enabled or wheel_observations_enabled:
+        raise RuntimeError(
+            "FUND_NAV_REPORTER_ENABLED is required for fair-value observations"
+        )
+
+    tasks = []
+
+    configured_series_mode = settings.otoken_series_mode.strip().lower()
+    validate_lazy_otoken_config(configured_series_mode)
+    validate_lazy_otoken_chain_config(configured_series_mode)
+
     has_on_chain_config = (
         settings.batch_settler_address
         and settings.operator_private_key
         and settings.otoken_factory_address
     )
     if has_on_chain_config:
+        from src.bots.otoken_manager import get_otoken_series_mode
+
+        get_otoken_series_mode()
         from src.bots import (
             otoken_manager,
             event_indexer,
@@ -84,6 +478,18 @@ async def lifespan(app: FastAPI):
             "On-chain bots not started: contract addresses or operator key not configured"
         )
 
+    if settings.tokenized_fund_indexer_enabled:
+        from src.fund_indexer import indexer as fund_indexer
+
+        tasks.append(asyncio.create_task(fund_indexer.run()))
+        logger.info("Tokenized fund indexer started")
+
+    if settings.fund_nav_reporter_enabled:
+        from src.bots import fund_nav_reporter
+
+        tasks.append(asyncio.create_task(fund_nav_reporter.run()))
+        logger.info("Fund NAV reporter started")
+
     # Yield indexer needs controller + margin pool addresses
     if settings.controller_address and settings.margin_pool_address:
         from src.bots import yield_indexer
@@ -91,11 +497,13 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(yield_indexer.run()))
         logger.info("Yield indexer started")
 
-    # Weekly aggregator only needs DB access, not on-chain config
-    from src.bots import weekly_aggregator
+    if settings.legacy_agora_v1_enabled:
+        # Import only inside the rollback gate. The default v2 process must not
+        # load or schedule the global legacy snapshot implementation.
+        from src.bots import weekly_aggregator
 
-    tasks.append(asyncio.create_task(weekly_aggregator.run()))
-    logger.info("Weekly aggregator started")
+        tasks.append(asyncio.create_task(weekly_aggregator.run()))
+        logger.info("Legacy Agora v1 weekly aggregator started")
 
     # ── Solana bots ──
     if has_solana_config() and has_enabled_solana_bots():
@@ -127,9 +535,7 @@ async def lifespan(app: FastAPI):
                 ", ".join(started_solana_bots),
             )
         else:
-            logger.info(
-                "Solana runtime enabled but no Solana bots selected by flags"
-            )
+            logger.info("Solana runtime enabled but no Solana bots selected by flags")
     elif has_solana_config():
         logger.info(
             "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true or enable an individual bot flag to opt in)",
@@ -250,19 +656,40 @@ app.add_middleware(
     allow_origins=[o.strip() for o in settings.allowed_origins.split(",")],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Portfolio-Bounded",
+        "X-Portfolio-Watermark",
+        "X-Active-Limit",
+        "X-Active-Has-More",
+        "X-Active-Next-Cursor",
+        "X-Settled-Limit",
+        "X-Settled-Has-More",
+        "X-Settled-Next-Cursor",
+    ],
 )
 
 app.include_router(router)
-app.include_router(results_router)
+app.include_router(series_router)
+app.include_router(fund_series_router)
 app.include_router(analytics_router)
 app.include_router(mm_router)
 app.include_router(mm_ws_router)
 app.include_router(activity_router)
-app.include_router(leaderboard_router)
 app.include_router(notifications_router)
 app.include_router(b1nary_accounts_router)
 app.include_router(yield_router)
+app.include_router(csp_vault_router)
 app.include_router(bridge_router)
+
+if settings.legacy_agora_v1_enabled:
+    # Keep the retired API available as an explicit, reversible rollback path
+    # without importing it into the default v2 process.
+    from src.api.leaderboard import router as leaderboard_router
+    from src.api.results import router as results_router
+
+    app.include_router(results_router)
+    app.include_router(leaderboard_router)
+    logger.warning("Legacy Agora v1 API routes enabled")
 
 if settings.beta_mode:
     from src.api.demo import router as demo_router

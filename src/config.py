@@ -10,7 +10,9 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
+    position_cursor_secret: str = ""
     rpc_url: str = ""
+    tokenized_fund_rpc_url: str = ""
     wss_rpc_url: str = ""  # WSS RPC — enables eth_subscribe when set
     chainlink_eth_usd_address: str = (
         "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
@@ -47,7 +49,64 @@ class Settings(BaseSettings):
 
     # Bot intervals
     otoken_publish_interval_seconds: int = 300  # 5 minutes
+    # oToken publication/materialization rollout.
+    # eager: current behavior; shadow: publish lifecycle metadata but still create;
+    # lazy: publish deterministic future addresses and create only on execution intent.
+    otoken_series_mode: str = "eager"
+    otoken_lazy_assets: str = "eth"
+    otoken_materialization_lease_seconds: int = 180
+    otoken_materialization_max_attempts: int = 3
+    otoken_ensure_deadline_buffer_seconds: int = 30
+    otoken_materialization_deadline_buffer_seconds: int = 150
+    otoken_ensure_retry_after_ms: int = 750
+    otoken_min_trade_amount_raw: int = 1_000_000  # 0.01 oToken (8 decimals)
+    otoken_capacity_stale_seconds: int = 120
+    otoken_materialization_hourly_limit: int = 6
+    otoken_materialization_daily_limit: int = 20
+    otoken_materialization_series_hourly_limit: int = 20
+    otoken_intent_hmac_secret: str = ""
+
+    # Privy end-user authentication for gas-spending endpoints.
+    privy_app_id: str = ""
+    privy_app_secret: str = ""
+    privy_jwt_verification_key: str = ""
+    privy_jwks_url: str = ""
+    privy_api_url: str = "https://api.privy.io"
+    privy_user_cache_seconds: int = 60
+
     event_poll_interval_seconds: int = 30
+    tokenized_fund_indexer_enabled: bool = False
+    tokenized_fund_indexer_poll_interval_seconds: int = 30
+    multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
+    fund_nav_reporter_enabled: bool = False
+    fund_nav_reporter_interval_seconds: int = 300
+    fund_nav_reporter_tx_timeout_seconds: int = 120
+    fund_nav_reporter_lease_seconds: int = 180
+    fund_nav_reporter_private_keys: str = ""
+    fund_nav_submitter_private_key: str = ""
+    fund_nav_inclusion_margin_blocks: int = 3
+    fund_nav_execution_buffer_blocks: int = 15
+    meta_wheel_fund_key: str = ""
+    meta_wheel_operator_private_key: str = ""
+    meta_wheel_nav_reporter_private_keys: str = ""
+    meta_wheel_csp_sepolia_fair_value_observations_enabled: bool = False
+    meta_wheel_csp_sepolia_observer_private_keys: str = ""
+    meta_wheel_covered_call_sepolia_fair_value_observations_enabled: bool = False
+    meta_wheel_covered_call_sepolia_observer_private_keys: str = ""
+    fund_csp_sepolia_fair_value_observations_enabled: bool = False
+    fund_csp_sepolia_observer_private_keys: str = ""
+    fund_csp_sepolia_fair_value_iv_bps: int = 0
+    fund_csp_sepolia_fair_value_iv_source: str = ""
+    fund_csp_sepolia_fair_value_risk_free_rate_bps: int = 0
+    fund_csp_sepolia_fair_value_settlement_cost_bps: int = 0
+    fund_covered_call_sepolia_fair_value_observations_enabled: bool = False
+    fund_covered_call_sepolia_observer_private_keys: str = ""
+    fund_covered_call_sepolia_fair_value_iv_bps: int = 0
+    fund_covered_call_sepolia_fair_value_iv_source: str = ""
+    fund_covered_call_sepolia_fair_value_risk_free_rate_bps: int = 0
+    fund_covered_call_sepolia_fair_value_settlement_cost_bps: int = 0
+    fund_state_freshness_seconds: int = 180
+    confirmed_head_freshness_seconds: int = 90
     circuit_breaker_poll_seconds: int = 10
 
     # Circuit breaker
@@ -55,6 +114,7 @@ class Settings(BaseSettings):
 
     # Protocol fee
     protocol_fee_bps: int = 400  # 4% — must match on-chain value
+    solana_protocol_fee_bps: int = 400
     treasury_address: str = "0x0744e5Abb82A0337B2F6ac65aC83D1e9861C9740"
 
     # Custom expiry timestamps override (comma-separated Unix timestamps at 08:00 UTC)
@@ -168,6 +228,8 @@ class Settings(BaseSettings):
     mock_chainlink_feed_address: str = ""  # MockSwapRouter's price feed (beta only)
 
     # Historical P&L / engagement
+    # Temporary rollback gate for the v1 results, leaderboard, and weekly snapshot.
+    legacy_agora_v1_enabled: bool = False
     coingecko_api_url: str = "https://api.coingecko.com/api/v3"
     weekly_aggregation_day: int = 4  # 0=Monday, 4=Friday
     weekly_aggregation_hour_utc: int = 12  # 12:00 UTC
@@ -184,6 +246,273 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_protocol_fee_bps(chain: str) -> int:
+    """Return the settlement fee for the requested chain boundary."""
+    if chain.strip().lower() == "solana":
+        return settings.solana_protocol_fee_bps
+    return settings.protocol_fee_bps
+
+
+def get_tokenized_fund_rpc_url() -> str:
+    """Return the isolated fund RPC when configured, otherwise the global RPC."""
+    return settings.tokenized_fund_rpc_url.strip() or settings.rpc_url.strip()
+
+
+def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
+    """Return validated, deduplicated reporter keys."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_nav_reporter_private_keys.split(",")
+        if key.strip()
+    )
+    if not keys:
+        raise ValueError("FUND_NAV_REPORTER_PRIVATE_KEYS contains no keys")
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError("Invalid FUND_NAV_REPORTER_PRIVATE_KEYS entry") from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError("FUND_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters")
+    return keys
+
+
+def get_fund_nav_submitter_private_key() -> str:
+    """Return the dedicated key used only to submit signed NAV reports."""
+    from eth_account import Account
+
+    key = settings.fund_nav_submitter_private_key.strip()
+    if not key:
+        raise ValueError("FUND_NAV_SUBMITTER_PRIVATE_KEY is required")
+    try:
+        Account.from_key(key)
+    except Exception as exc:
+        raise ValueError("Invalid FUND_NAV_SUBMITTER_PRIVATE_KEY") from exc
+    return key
+
+
+def get_meta_wheel_nav_reporter_private_keys() -> tuple[str, ...]:
+    """Return the dedicated two-key reporter quorum for the Meta Wheel."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.meta_wheel_nav_reporter_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "META_WHEEL_NAV_REPORTER_PRIVATE_KEYS must contain exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid META_WHEEL_NAV_REPORTER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "META_WHEEL_NAV_REPORTER_PRIVATE_KEYS contains duplicate reporters"
+        )
+    return keys
+
+
+def get_meta_wheel_observer_private_keys(strategy_kind: str) -> tuple[str, ...]:
+    """Return the Wheel-only observer quorum without replacing standalone keys."""
+    from eth_account import Account
+
+    if strategy_kind == "csp":
+        raw = settings.meta_wheel_csp_sepolia_observer_private_keys
+        variable = "META_WHEEL_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS"
+    elif strategy_kind == "covered_call":
+        raw = settings.meta_wheel_covered_call_sepolia_observer_private_keys
+        variable = "META_WHEEL_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS"
+    else:
+        raise ValueError("Unsupported Meta Wheel observer strategy")
+    keys = tuple(key.strip() for key in raw.split(",") if key.strip())
+    if len(keys) != 2:
+        raise ValueError(f"{variable} must contain exactly two keys")
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(f"Invalid {variable} entry") from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(f"{variable} contains duplicate observers")
+    return keys
+
+
+def validate_meta_wheel_credential_topology() -> None:
+    """Require every Wheel signing domain to be distinct from all others."""
+    from eth_account import Account
+
+    operator_key = settings.meta_wheel_operator_private_key.strip()
+    if not operator_key:
+        raise ValueError("META_WHEEL_OPERATOR_PRIVATE_KEY is required")
+    try:
+        operator = Account.from_key(operator_key).address.lower()
+    except Exception as exc:
+        raise ValueError("Invalid META_WHEEL_OPERATOR_PRIVATE_KEY") from exc
+
+    groups = {
+        "Meta Wheel operator": {operator},
+        "Meta Wheel NAV reporters": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_nav_reporter_private_keys()
+        },
+        "Meta Wheel CSP observers": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_observer_private_keys("csp")
+        },
+        "Meta Wheel covered-call observers": {
+            Account.from_key(key).address.lower()
+            for key in get_meta_wheel_observer_private_keys("covered_call")
+        },
+    }
+    optional = (
+        (
+            "standalone NAV reporters",
+            settings.fund_nav_reporter_private_keys,
+            get_fund_nav_reporter_private_keys,
+        ),
+        (
+            "standalone NAV submitter",
+            settings.fund_nav_submitter_private_key,
+            lambda: (get_fund_nav_submitter_private_key(),),
+        ),
+        (
+            "standalone CSP observers",
+            settings.fund_csp_sepolia_observer_private_keys,
+            get_fund_csp_sepolia_observer_private_keys,
+        ),
+        (
+            "standalone covered-call observers",
+            settings.fund_covered_call_sepolia_observer_private_keys,
+            get_fund_covered_call_sepolia_observer_private_keys,
+        ),
+    )
+    for label, configured, getter in optional:
+        if configured.strip():
+            groups[label] = {Account.from_key(key).address.lower() for key in getter()}
+
+    names = tuple(groups)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            if groups[left] & groups[right]:
+                raise ValueError(f"Credential overlap between {left} and {right}")
+
+
+def get_fund_csp_sepolia_observer_private_keys() -> tuple[str, ...]:
+    """Return the two dedicated keys for the Base Sepolia fair-value policy."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_csp_sepolia_observer_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS must contain exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "FUND_CSP_SEPOLIA_OBSERVER_PRIVATE_KEYS contains duplicate observers"
+        )
+    return keys
+
+
+def get_fund_csp_sepolia_fair_value_policy():
+    """Return the strict, explicitly versioned Base Sepolia fair-value policy."""
+    from src.fund_nav.fair_value import FairValuePolicy
+
+    return FairValuePolicy(
+        implied_volatility_bps=settings.fund_csp_sepolia_fair_value_iv_bps,
+        implied_volatility_source=settings.fund_csp_sepolia_fair_value_iv_source,
+        risk_free_rate_bps=(settings.fund_csp_sepolia_fair_value_risk_free_rate_bps),
+        settlement_cost_bps=(settings.fund_csp_sepolia_fair_value_settlement_cost_bps),
+    )
+
+
+def get_fund_covered_call_sepolia_observer_private_keys() -> tuple[str, ...]:
+    """Return dedicated keys for the versioned covered-call fair-value policy."""
+    from eth_account import Account
+
+    keys = tuple(
+        key.strip()
+        for key in settings.fund_covered_call_sepolia_observer_private_keys.split(",")
+        if key.strip()
+    )
+    if len(keys) != 2:
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS must contain "
+            "exactly two keys"
+        )
+    addresses = []
+    for key in keys:
+        try:
+            addresses.append(Account.from_key(key).address.lower())
+        except Exception as exc:
+            raise ValueError(
+                "Invalid FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS entry"
+            ) from exc
+    if len(addresses) != len(set(addresses)):
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA_OBSERVER_PRIVATE_KEYS contains "
+            "duplicate observers"
+        )
+    return keys
+
+
+def get_fund_covered_call_sepolia_fair_value_policy():
+    """Return the explicit Base Sepolia European-call fair-value policy."""
+    from src.fund_nav.fair_value import (
+        CALL_POLICY_IV_BPS,
+        CALL_POLICY_IV_SOURCE,
+        CALL_POLICY_RISK_FREE_RATE_BPS,
+        CALL_POLICY_SETTLEMENT_COST_BPS,
+        CoveredCallFairValuePolicy,
+    )
+
+    policy = CoveredCallFairValuePolicy(
+        implied_volatility_bps=(settings.fund_covered_call_sepolia_fair_value_iv_bps),
+        implied_volatility_source=(
+            settings.fund_covered_call_sepolia_fair_value_iv_source
+        ),
+        risk_free_rate_bps=(
+            settings.fund_covered_call_sepolia_fair_value_risk_free_rate_bps
+        ),
+        settlement_cost_bps=(
+            settings.fund_covered_call_sepolia_fair_value_settlement_cost_bps
+        ),
+    )
+    if (
+        policy.implied_volatility_bps != CALL_POLICY_IV_BPS
+        or policy.implied_volatility_source != CALL_POLICY_IV_SOURCE
+        or policy.risk_free_rate_bps != CALL_POLICY_RISK_FREE_RATE_BPS
+        or policy.settlement_cost_bps != CALL_POLICY_SETTLEMENT_COST_BPS
+    ):
+        raise ValueError(
+            "FUND_COVERED_CALL_SEPOLIA fair-value inputs must match the "
+            "approved B1N-358 policy"
+        )
+    return policy
 
 
 @functools.lru_cache(maxsize=None)
@@ -242,10 +571,7 @@ def has_bridge_config() -> bool:
         or settings.operator_private_key
         or settings.relayer_solana_keypair
     )
-    return bool(
-        has_base_message_transmitter
-        and has_relayer_key
-    )
+    return bool(has_base_message_transmitter and has_relayer_key)
 
 
 def has_solana_config() -> bool:
