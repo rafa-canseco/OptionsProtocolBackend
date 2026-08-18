@@ -73,6 +73,13 @@ def test_deterministic():
     assert a == b
 
 
+def test_always_includes_rolling_csp_expiry_between_36_and_60_hours():
+    for hour in (0, 7, 8, 12, 23):
+        now = datetime(2026, 3, 3, hour, 17, 0, tzinfo=timezone.utc)
+        delays = [ts - int(now.timestamp()) for ts in get_expiries(now=now)]
+        assert any(36 * 3600 <= delay <= 60 * 3600 for delay in delays)
+
+
 def test_sorted_ascending():
     result = get_expiries()
     assert result == sorted(result)

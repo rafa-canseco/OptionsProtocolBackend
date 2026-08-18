@@ -101,13 +101,72 @@ class _FakeSupabase:
             "order_events": [],
         }
         self.counts = {}
+        self.rpc_calls = []
 
     def table(self, table_name):
         return _TableQuery(self, table_name)
 
+    def rpc(self, name, params):
+        assert name == "b1nary_position_page"
+        self.rpc_calls.append((name, params))
+
+        account_id = params.get("p_account_id")
+        privy_user_id = params.get("p_privy_user_id")
+        if privy_user_id:
+            member = next(
+                (
+                    row
+                    for row in self.tables["b1nary_account_members"]
+                    if row.get("privy_user_id") == privy_user_id
+                ),
+                None,
+            )
+            account_id = member.get("account_id") if member else None
+            account_found = member is not None
+        else:
+            account_found = any(
+                row.get("id") == account_id for row in self.tables["b1nary_accounts"]
+            )
+
+        wallets = {
+            (row["chain"], row["address_normalized"])
+            for row in self.tables["b1nary_wallets"]
+            if row.get("account_id") == account_id
+            and row.get("role") == "trading"
+            and row.get("verified_at")
+        }
+        positions = [
+            {
+                **row,
+                "id": row.get("id") or f"00000000-0000-0000-0000-{index:012d}",
+                "indexed_at": row.get("indexed_at") or f"2026-08-03T00:00:{index:02d}Z",
+            }
+            for index, row in enumerate(self.tables["order_events"], start=1)
+            if (row.get("chain"), row.get("user_address")) in wallets
+        ]
+        active = [row for row in positions if not row.get("is_settled")]
+        settled = [row for row in positions if row.get("is_settled")]
+        payload = {
+            "account_found": account_found,
+            "wallet_fingerprint": "a" * 64,
+            "watermark": "2026-08-03T00:00:00Z",
+            "active": active,
+            "settled": settled,
+            "rows": active if params.get("p_stream") == "active" else settled,
+        }
+        return _ResultProxy(payload)
+
     def next_id(self, table_name):
         self.counts[table_name] = self.counts.get(table_name, 0) + 1
         return f"{table_name}-{self.counts[table_name]}"
+
+
+class _ResultProxy:
+    def __init__(self, data):
+        self.data = data
+
+    def execute(self):
+        return self
 
 
 @pytest.fixture(autouse=True)
@@ -209,7 +268,9 @@ def test_link_message_returns_409_when_wallet_belongs_to_another_account(fake_db
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Wallet already belongs to another b1nary account"
+    assert (
+        response.json()["detail"] == "Wallet already belongs to another b1nary account"
+    )
 
 
 def test_link_trusted_wallet_allows_smart_without_signature(fake_db):
@@ -298,3 +359,4 @@ def test_positions_by_privy_user_only_uses_verified_trading_wallets(fake_db):
     positions = response.json()["positions"]
     assert len(positions) == 1
     assert positions[0]["user_address"] == "0x1111111111111111111111111111111111111111"
+    assert len(fake_db.rpc_calls) == 1

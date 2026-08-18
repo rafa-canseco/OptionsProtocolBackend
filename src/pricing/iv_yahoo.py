@@ -90,9 +90,7 @@ def _fetch_tsla_iv_sync() -> float:
     atm_iv = float(calls_with_iv.loc[idx, "impliedVolatility"])
 
     if not (0.05 <= atm_iv <= 3.0):
-        raise RuntimeError(
-            f"TSLA IV {atm_iv:.4f} outside sane bounds [0.05, 3.0]"
-        )
+        raise RuntimeError(f"TSLA IV {atm_iv:.4f} outside sane bounds [0.05, 3.0]")
 
     logger.info(
         "Yahoo TSLA IV: %.4f (expiry=%s, spot=%.2f, ATM strike=%s)",

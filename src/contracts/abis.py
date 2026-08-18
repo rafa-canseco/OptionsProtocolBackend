@@ -7,6 +7,13 @@ update these ABIs to match.
 """
 
 BATCH_SETTLER_ABI = [
+    {
+        "inputs": [],
+        "name": "addressBook",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # OrderExecuted — emitted by executeOrder().
     # NOTE: if the contracts instance renames this event, update here.
     {
@@ -96,6 +103,28 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    # getQuoteState(address,bytes32) → (filledAmount,isCancelled)
+    {
+        "inputs": [
+            {"name": "mm", "type": "address"},
+            {"name": "quoteHash", "type": "bytes32"},
+        ],
+        "name": "getQuoteState",
+        "outputs": [
+            {"name": "filledAmount", "type": "uint256"},
+            {"name": "isCancelled", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # whitelistedMMs(address) → bool
+    {
+        "inputs": [{"name": "", "type": "address"}],
+        "name": "whitelistedMMs",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # incrementMakerNonce() — invalidates all outstanding quotes for msg.sender
     {
         "inputs": [],
@@ -107,6 +136,34 @@ BATCH_SETTLER_ABI = [
 ]
 
 OTOKEN_FACTORY_ABI = [
+    {
+        "inputs": [],
+        "name": "addressBook",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "operator",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "oToken", "type": "address"},
+            {"indexed": True, "name": "underlying", "type": "address"},
+            {"indexed": False, "name": "strikeAsset", "type": "address"},
+            {"indexed": False, "name": "collateralAsset", "type": "address"},
+            {"indexed": False, "name": "strikePrice", "type": "uint256"},
+            {"indexed": False, "name": "expiry", "type": "uint256"},
+            {"indexed": False, "name": "isPut", "type": "bool"},
+        ],
+        "name": "OTokenCreated",
+        "type": "event",
+    },
     {
         "inputs": [],
         "name": "getOTokensLength",
@@ -163,6 +220,30 @@ OTOKEN_FACTORY_ABI = [
             {"name": "_isPut", "type": "bool"},
         ],
         "name": "getTargetOTokenAddress",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+ADDRESS_BOOK_ABI = [
+    {
+        "inputs": [],
+        "name": "oTokenFactory",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "whitelist",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "batchSettler",
         "outputs": [{"name": "", "type": "address"}],
         "stateMutability": "view",
         "type": "function",

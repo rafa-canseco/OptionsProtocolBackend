@@ -10,26 +10,20 @@ Set EXECUTE=1 to apply; default is dry-run.
 """
 
 import json
+import logging
 import os
 from collections import defaultdict
-
-with open(os.path.join(os.environ["TMPDIR"], "railway_vars.json")) as f:
-    PROD = json.load(f)
-for k, v in PROD.items():
-    os.environ.setdefault(k, v)
-
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
 
 from eth_abi import decode
 from supabase import create_client
 from web3 import Web3
 
-EXECUTE = os.environ.get("EXECUTE") == "1"
-
-db = create_client(PROD["SUPABASE_URL"], PROD["SUPABASE_SERVICE_ROLE_KEY"])
-w3 = Web3(Web3.HTTPProvider(PROD["RPC_URL"]))
+EXECUTE = False
+db = None
+w3 = None
+BS = ""
+CTRL = ""
+ctrl = None
 
 PD_TOPIC = (
     "0x"
@@ -38,9 +32,6 @@ PD_TOPIC = (
     .lstrip("0x")
     .lower()
 )
-BS = Web3.to_checksum_address(PROD["BATCH_SETTLER_ADDRESS"])
-CTRL = Web3.to_checksum_address(PROD["CONTROLLER_ADDRESS"])
-
 CONTROLLER_ABI = [
     {
         "inputs": [
@@ -63,7 +54,24 @@ CONTROLLER_ABI = [
         "type": "function",
     },
 ]
-ctrl = w3.eth.contract(address=CTRL, abi=CONTROLLER_ABI)
+
+
+def _configure_runtime() -> None:
+    """Load production configuration only when the one-shot script executes."""
+    global BS, CTRL, EXECUTE, ctrl, db, w3
+
+    logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+    with open(os.path.join(os.environ["TMPDIR"], "railway_vars.json")) as f:
+        prod = json.load(f)
+    for key, value in prod.items():
+        os.environ.setdefault(key, value)
+
+    EXECUTE = os.environ.get("EXECUTE") == "1"
+    db = create_client(prod["SUPABASE_URL"], prod["SUPABASE_SERVICE_ROLE_KEY"])
+    w3 = Web3(Web3.HTTPProvider(prod["RPC_URL"]))
+    BS = Web3.to_checksum_address(prod["BATCH_SETTLER_ADDRESS"])
+    CTRL = Web3.to_checksum_address(prod["CONTROLLER_ADDRESS"])
+    ctrl = w3.eth.contract(address=CTRL, abi=CONTROLLER_ABI)
 
 
 def addr_topic(a: str) -> str:
@@ -144,9 +152,7 @@ def fetch_pair_events(user: str, otoken: str) -> list[dict]:
                 {
                     "tx": txh,
                     "block": (
-                        log["blockNumber"]
-                        if isinstance(log, dict)
-                        else log.blockNumber
+                        log["blockNumber"] if isinstance(log, dict) else log.blockNumber
                     ),
                     "contra": int(contra),
                     "collat": int(collat),
@@ -157,6 +163,7 @@ def fetch_pair_events(user: str, otoken: str) -> list[dict]:
 
 
 def main():
+    _configure_runtime()
     corrupted = find_corrupted_groups()
     print(
         f"Mode: {'EXECUTE' if EXECUTE else 'DRY-RUN'}\n"
@@ -167,14 +174,14 @@ def main():
     total_writes = 0
     total_skips = 0
     for (user, otoken), grp in sorted(corrupted, key=lambda x: -len(x[1])):
-        print(f"=== user={user[:10]}.. otoken={otoken[:10]}.. vaults={[r['vault_id'] for r in sorted(grp, key=lambda r: r['vault_id'])]}")
+        vault_ids = [r["vault_id"] for r in sorted(grp, key=lambda r: r["vault_id"])]
+        print(f"=== user={user[:10]}.. otoken={otoken[:10]}.. vaults={vault_ids}")
         events = fetch_pair_events(user, otoken)
         events.sort(key=lambda e: (e["block"], e["tx"]))
         print(f"  on-chain events: {len(events)}, db rows: {len(grp)}")
         if len(events) != len(grp):
             print(
-                f"  ! event count mismatch — skipping this group; "
-                f"manual review needed"
+                "  ! event count mismatch — skipping this group; manual review needed"
             )
             total_skips += len(grp)
             continue
@@ -219,15 +226,16 @@ def main():
             total_skips += len(grp)
             continue
 
-        events_by_vault = dict(zip([v["vault_id"] for v in ranked_vaults], ranked_events))
-        events_remaining = []  # unused now; kept only for compat below
+        events_by_vault = dict(
+            zip([v["vault_id"] for v in ranked_vaults], ranked_events)
+        )
         for r in sorted(grp, key=lambda r: r["vault_id"]):
             ev = events_by_vault.get(r["vault_id"])
             if ev is None:
                 print(f"  ! no event paired for vault {r['vault_id']}")
                 total_skips += 1
                 continue
-            cur_tx = (r["delivery_tx_hash"] or "")
+            cur_tx = r["delivery_tx_hash"] or ""
             cur_amt = r.get("delivered_amount")
             new_tx = ev["tx"]
             new_amt = str(ev["contra"])
@@ -250,7 +258,9 @@ def main():
                 total_writes += 1  # would-write count
         print()
 
-    print(f"\nTotals: writes={'(applied)' if EXECUTE else '(dry-run)'} {total_writes}  skipped={total_skips}")
+    print(
+        f"\nTotals: writes={'(applied)' if EXECUTE else '(dry-run)'} {total_writes}  skipped={total_skips}"
+    )
 
 
 if __name__ == "__main__":

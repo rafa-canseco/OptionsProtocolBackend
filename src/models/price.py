@@ -38,8 +38,14 @@ class PriceResponse(BaseModel):
     )
     otoken_address: str | None = Field(
         default=None,
-        description="On-chain oToken contract address (null if not yet created)",
+        description=(
+            "Deterministic oToken address; deployment_status indicates readiness"
+        ),
         examples=["0xAbC1230000000000000000000000000000000000"],
+    )
+    deployment_status: str = Field(
+        default="ready",
+        description="Series lifecycle: virtual, creating, ready, or failed",
     )
     # EIP-712 signed quote fields (needed by frontend for executeOrder)
     signature: str | None = Field(

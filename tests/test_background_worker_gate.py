@@ -42,6 +42,12 @@ def test_background_workers_disabled_starts_none_and_keeps_health_active(
     monkeypatch, caplog
 ) -> None:
     _configure_all_workers(monkeypatch, enabled=False)
+    # Staging has additional worker-only validators. Deliberately enable those
+    # workers without their RPC/credential prerequisites: the global gate must
+    # keep the API healthy before any worker validation runs.
+    monkeypatch.setattr(main_module.settings, "tokenized_fund_indexer_enabled", True)
+    monkeypatch.setattr(main_module.settings, "fund_nav_reporter_enabled", True)
+    monkeypatch.setattr(main_module.settings, "legacy_agora_v1_enabled", True)
     scheduled = []
 
     def capture_task(coroutine):
@@ -87,7 +93,6 @@ def test_background_workers_enabled_preserves_all_startup_selections(
         "src.bots.expiry_settler",
         "src.bots.circuit_breaker_bot",
         "src.bots.yield_indexer",
-        "src.bots.weekly_aggregator",
         "src.bots.solana_circuit_breaker_bot",
         "src.bots.solana_event_indexer",
         "src.bots.solana_expiry_settler",

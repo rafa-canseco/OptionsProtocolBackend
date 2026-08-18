@@ -2,9 +2,7 @@ from pathlib import Path
 import re
 
 
-MIGRATION = Path(
-    "supabase/migrations/202608030001_b1n423_mm_exposure.sql"
-).read_text()
+MIGRATION = Path("supabase/migrations/202608030001_b1n423_mm_exposure.sql").read_text()
 
 
 def test_exposure_rpc_returns_one_aggregate_row() -> None:

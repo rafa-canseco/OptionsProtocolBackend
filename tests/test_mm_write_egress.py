@@ -4,8 +4,13 @@ from unittest.mock import MagicMock, patch
 
 from postgrest.types import CountMethod, ReturnMethod
 
-from src.api.mm_routes import _prune_stale_quotes_for_mm, cancel_quotes, submit_quotes
-from src.models.mm import QuoteBatchRequest, QuoteSubmission
+from src.api.mm_routes import (
+    _prune_stale_quotes_for_mm,
+    cancel_quotes,
+    report_capacity,
+    submit_quotes,
+)
+from src.models.mm import CapacityUpdateRequest, QuoteBatchRequest, QuoteSubmission
 
 
 MM_ADDRESS = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -28,16 +33,18 @@ def _base_quote() -> QuoteSubmission:
     )
 
 
-def test_submit_quotes_discards_write_representations() -> None:
+def test_submit_quotes_discards_all_write_representations() -> None:
     db = MagicMock()
     body = QuoteBatchRequest(quotes=[_base_quote()])
 
     with (
         patch("src.api.mm_routes.time.time", return_value=1_000),
-        patch("src.api.mm_routes._resolve_nonce", return_value=(MM_ADDRESS, 3)),
+        patch(
+            "src.api.mm_routes._resolve_nonce",
+            return_value=(MM_ADDRESS, 3),
+        ),
         patch("src.api.mm_routes._verify_base_sig", return_value=True),
         patch("src.api.mm_routes.get_client", return_value=db),
-        patch("src.api.mm_routes._prune_stale_quotes_for_mm"),
     ):
         result = asyncio.run(submit_quotes(body=body, mm_address=MM_ADDRESS))
 
@@ -45,13 +52,15 @@ def test_submit_quotes_discards_write_representations() -> None:
     db.table.return_value.update.assert_called_once_with(
         {"is_active": False}, returning=ReturnMethod.minimal
     )
-    assert db.table.return_value.upsert.call_args.kwargs == {
+    upsert_kwargs = db.table.return_value.upsert.call_args.kwargs
+    assert upsert_kwargs == {
         "on_conflict": "mm_address,quote_id",
         "returning": ReturnMethod.minimal,
     }
+    db.table.return_value.delete.assert_called_once_with(returning=ReturnMethod.minimal)
 
 
-def test_existing_stale_quote_prune_uses_minimal_return() -> None:
+def test_prune_stale_quotes_uses_minimal_return() -> None:
     db = MagicMock()
 
     _prune_stale_quotes_for_mm(db, MM_ADDRESS, "base", 1_000)
@@ -73,3 +82,26 @@ def test_cancel_quotes_preserves_count_without_returning_rows() -> None:
         count=CountMethod.exact,
         returning=ReturnMethod.minimal,
     )
+
+
+def test_capacity_write_uses_minimal_return() -> None:
+    db = MagicMock()
+    body = CapacityUpdateRequest(
+        asset="eth",
+        capacity_eth=2,
+        capacity_usd=5_000,
+        status="active",
+    )
+
+    with (
+        patch("src.api.mm_routes.time.time", return_value=1_000),
+        patch("src.api.mm_routes.get_client", return_value=db),
+    ):
+        result = asyncio.run(report_capacity(body=body, mm_address=MM_ADDRESS))
+
+    assert result == {"status": "ok"}
+    kwargs = db.table.return_value.upsert.call_args.kwargs
+    assert kwargs == {
+        "on_conflict": "mm_address,asset",
+        "returning": ReturnMethod.minimal,
+    }

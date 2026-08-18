@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, HTTPException, Query
 
 from src.db.database import get_client
+from src.models.activity import ActivityResponse
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ def _compute_metrics(rows: list[dict]) -> dict:
     "/activity/{wallet_address}",
     tags=["Activity"],
     summary="Get per-wallet activity metrics",
+    response_model=ActivityResponse,
 )
 async def get_activity(
     wallet_address: str,
@@ -134,8 +136,8 @@ async def get_activity(
     """Return aggregated on-chain activity metrics for a wallet.
 
     Data is sourced from indexed OrderExecuted events. Returns zeroes for
-    wallets with no activity. Metrics are computed on-the-fly from the
-    order_events table — no pre-aggregation required.
+    wallets with no activity. The database returns one aggregate object,
+    independent of the wallet's lifetime position count.
 
     Use ?also=<address> to aggregate across two addresses (e.g. a wallet
     and its smart account). Duplicate rows (same id) are deduplicated.
@@ -156,19 +158,35 @@ async def get_activity(
 
     try:
         client = get_client()
-        result = (
-            client.table("order_events")
-            .select(
-                "id,collateral,collateral_usd,net_premium,premium,"
-                "is_put,strike_price,asset,indexed_at"
-            )
-            .in_("user_address", addresses)
-            .execute()
-        )
+        result = client.rpc(
+            "b1nary_activity_summary",
+            {"p_addresses": addresses},
+        ).execute()
     except Exception:
         logger.exception("Failed to fetch activity for %s", wallet_address)
         raise HTTPException(status_code=502, detail="Could not fetch activity data")
 
-    rows = _deduplicate(result.data or [])
-    metrics = _compute_metrics(rows)
+    payload = result.data
+    if isinstance(payload, list) and len(payload) == 1:
+        payload = payload[0]
+    if not isinstance(payload, dict):
+        logger.error("Activity aggregate returned an invalid payload")
+        raise HTTPException(status_code=502, detail="Could not fetch activity data")
+
+    # The RPC deliberately returns unrounded float8 aggregates. Final rounding
+    # stays in Python to preserve the endpoint's established float/tie behavior.
+    total_volume = round(float(payload.get("total_volume") or 0), 2)
+    total_premium = round(float(payload.get("total_premium") or 0), 2)
+    total_collateral = round(float(payload.get("total_collateral_usd") or 0), 2)
+    rate = round(total_premium / total_collateral, 6) if total_collateral > 0 else None
+    metrics = {
+        "totalVolume": total_volume,
+        "totalPremiumEarned": total_premium,
+        "positionCount": int(payload.get("position_count") or 0),
+        "activeDays": int(payload.get("active_days") or 0),
+        "daysSinceFirst": int(payload.get("days_since_first") or 0),
+        "total_collateral_usd": total_collateral,
+        "total_premium_usd": total_premium,
+        "earning_rate": rate,
+    }
     return {"wallet": wallet_address.lower(), **metrics}

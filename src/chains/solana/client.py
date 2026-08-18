@@ -216,11 +216,7 @@ def build_and_send_solana_tx(tx: VersionedTransaction, timeout: int = 60) -> str
                 "getSignatureStatuses",
                 [[sig], {"searchTransactionHistory": True}],
             )
-            value = (
-                status.get("value", [None])[0]
-                if isinstance(status, dict)
-                else None
-            )
+            value = status.get("value", [None])[0] if isinstance(status, dict) else None
             if value is not None:
                 if value.get("err"):
                     raise RuntimeError(

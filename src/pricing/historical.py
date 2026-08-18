@@ -46,13 +46,16 @@ async def get_eth_price_history(
     try:
         points = await _fetch_coingecko(start_ts, end_ts)
     except (httpx.HTTPError, ValueError) as cg_err:
-        logger.error("CoinGecko failed (%s), trying Deribit fallback", cg_err, exc_info=True)
+        logger.error(
+            "CoinGecko failed (%s), trying Deribit fallback", cg_err, exc_info=True
+        )
         try:
             points = await _fetch_deribit(start_ts, end_ts)
         except (httpx.HTTPError, ValueError) as db_err:
             logger.error(
                 "Both CoinGecko and Deribit failed. CoinGecko: %s, Deribit: %s",
-                cg_err, db_err,
+                cg_err,
+                db_err,
             )
             if use_cache and _cache is not None:
                 logger.warning("Serving stale cache (age: %.0fs)", now - _cache_ts)
@@ -62,7 +65,9 @@ async def get_eth_price_history(
             ) from db_err
 
     if len(points) < 2:
-        raise RuntimeError(f"Insufficient price data: got {len(points)} points, need at least 2")
+        raise RuntimeError(
+            f"Insufficient price data: got {len(points)} points, need at least 2"
+        )
 
     if use_cache:
         _cache = points
@@ -92,10 +97,7 @@ async def _fetch_coingecko(
     if not prices:
         raise ValueError("CoinGecko returned empty prices")
 
-    return [
-        PricePoint(timestamp=ts / 1000, price=p)
-        for ts, p in prices
-    ]
+    return [PricePoint(timestamp=ts / 1000, price=p) for ts, p in prices]
 
 
 async def _fetch_deribit(
@@ -128,7 +130,4 @@ async def _fetch_deribit(
     if not ticks or not closes or len(ticks) != len(closes):
         raise ValueError("Deribit returned incomplete OHLC data")
 
-    return [
-        PricePoint(timestamp=ts / 1000, price=c)
-        for ts, c in zip(ticks, closes)
-    ]
+    return [PricePoint(timestamp=ts / 1000, price=c) for ts, c in zip(ticks, closes)]
