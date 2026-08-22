@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     event_poll_interval_seconds: int = 30
     tokenized_fund_indexer_enabled: bool = False
     tokenized_fund_indexer_poll_interval_seconds: int = 30
+    rpc_snapshot_collector_enabled: bool = False
     multicall3_address: str = "0xcA11bde05977b3631167028862bE2a173976CA11"
     fund_nav_reporter_enabled: bool = False
     fund_nav_reporter_interval_seconds: int = 300

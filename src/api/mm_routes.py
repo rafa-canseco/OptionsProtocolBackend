@@ -20,7 +20,6 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from postgrest.types import CountMethod, ReturnMethod
-from web3 import Web3
 
 from solders.pubkey import Pubkey as SolPubkey  # type: ignore[import-untyped]
 from solders.signature import Signature as SolSignature  # type: ignore[import-untyped]
@@ -29,7 +28,7 @@ from src.api.deps import require_mm_api_key
 from src.chains.explorer import tx_explorer_url
 from src.chains.solana.client import get_solana_maker_nonce
 from src.config import get_protocol_fee_bps, settings
-from src.contracts.web3_client import get_batch_settler, get_w3
+from src.contracts.web3_client import get_w3
 from src.crypto.ed25519 import build_solana_quote_message, verify_solana_quote
 from src.crypto.eip712 import recover_quote_signer
 from src.db.database import get_client
@@ -46,6 +45,7 @@ from src.models.mm import (
     QuoteResponse,
     QuoteSubmission,
 )
+from src.models.snapshot import SnapshotEnvelope
 from src.pricing.assets import Asset, get_chain_for_asset
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
@@ -70,6 +70,46 @@ _MM_FILL_SELECT = (
 _MM_POSITION_SELECT = (
     "otoken_address,strike_price,expiry,is_put,amount,gross_premium,premium"
 )
+
+
+def _current_snapshot(environment: str, chain_id: int) -> SnapshotEnvelope:
+    """Load one database-computed snapshot generation with one atomic RPC."""
+    try:
+        result = (
+            get_client()
+            .rpc(
+                "v2_get_current_snapshot",
+                {"p_environment": environment, "p_chain_id": chain_id},
+            )
+            .execute()
+        )
+        payload = result.data
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        if not payload:
+            raise HTTPException(status_code=503, detail="Snapshot unavailable")
+        envelope = SnapshotEnvelope.model_validate(payload)
+        if envelope.environment != environment or envelope.chain_id != chain_id:
+            raise ValueError("Snapshot scope mismatch")
+        return envelope
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Snapshot database read failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Snapshot unavailable") from exc
+
+
+@router.get("/snapshot", response_model=SnapshotEnvelope)
+async def get_snapshot(
+    environment: str = Query(min_length=1),
+    chain_id: int = Query(gt=0),
+    mm_address: str = Depends(require_mm_api_key),
+) -> SnapshotEnvelope:
+    """Return one immutable, database-computed snapshot generation."""
+    envelope = _current_snapshot(environment, chain_id)
+    if envelope.common.market_maker.mm_address.lower() != mm_address.lower():
+        raise HTTPException(status_code=403, detail="Snapshot signer mismatch")
+    return envelope
 
 
 def _normalize_mm_address(addr: str) -> str:
@@ -122,10 +162,10 @@ def _fetch_quote_lifecycle_statuses(client, quote_rows: list[dict]) -> dict[str,
 def _resolve_nonce(
     chain: str, body: QuoteBatchRequest, mm_address: str
 ) -> tuple[str, int]:
-    """Return (mm_id, on_chain_nonce) for the chain.
+    """Return (mm_id, current_nonce) for the chain.
 
     For Solana: mm_id is the maker pubkey, nonce from MakerState PDA.
-    For Base: mm_id is the lowercased EVM address, nonce from BatchSettler.
+    For Base: mm_id and nonce come from the current atomic Postgres snapshot.
     """
     if chain == "solana":
         maker = body.quotes[0].maker
@@ -138,15 +178,13 @@ def _resolve_nonce(
             raise HTTPException(502, "Could not read Solana makerNonce")
         return maker, nonce
     else:
-        try:
-            settler = get_batch_settler()
-            nonce = settler.functions.makerNonce(
-                Web3.to_checksum_address(mm_address)
-            ).call()
-        except Exception:
-            logger.exception("Failed to read makerNonce for %s", mm_address)
-            raise HTTPException(502, "Could not read on-chain makerNonce")
-        return mm_address.lower(), nonce
+        snapshot = _current_snapshot(settings.app_env, settings.chain_id)
+        market_maker = snapshot.common.market_maker
+        if snapshot.stale or not snapshot.reconciled:
+            raise HTTPException(503, "Current snapshot is stale")
+        if market_maker.mm_address.lower() != mm_address.lower():
+            raise HTTPException(403, "Snapshot signer mismatch")
+        return mm_address.lower(), market_maker.maker_nonce
 
 
 def _prune_stale_quotes_for_mm(db, mm_id: str, chain: str, now_ts: int) -> None:
@@ -189,7 +227,7 @@ async def submit_quotes(
         )
     chain = chains_in_batch.pop()
 
-    mm_id, on_chain_nonce = _resolve_nonce(chain, body, mm_address)
+    mm_id, current_nonce = _resolve_nonce(chain, body, mm_address)
 
     rows_to_upsert = []
 
@@ -200,10 +238,11 @@ async def submit_quotes(
             errors.append(f"{label}: deadline {q.deadline} already passed")
             continue
 
-        if q.maker_nonce != on_chain_nonce:
+        if q.maker_nonce != current_nonce:
+            nonce_source = "on-chain" if chain == "solana" else "current snapshot"
             errors.append(
                 f"{label}: makerNonce mismatch (got {q.maker_nonce}, "
-                f"on-chain is {on_chain_nonce})"
+                f"{nonce_source} is {current_nonce})"
             )
             continue
 

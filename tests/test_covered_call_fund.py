@@ -28,6 +28,7 @@ SHARE = "0xf100000000000000000000000000000000000002"
 WETH = "0xf100000000000000000000000000000000000003"
 USDC = "0xf100000000000000000000000000000000000004"
 ADAPTER = "0xf100000000000000000000000000000000000005"
+BLOCK_HASH = "0x" + "01" * 32
 VALUATOR = "0xf100000000000000000000000000000000000006"
 OTOKEN = "0xf100000000000000000000000000000000000007"
 MM = "0xf100000000000000000000000000000000000008"
@@ -71,8 +72,10 @@ class CoveredCallRepository:
             "redemptions_paused": False,
             "execution_lock_owner": None,
             "has_active_processing": False,
+            "snapshot_generation": 1,
+            "snapshot_published_at": "2099-07-21T00:00:00Z",
             "as_of_block": 100,
-            "as_of_block_hash": "0x01",
+            "as_of_block_hash": BLOCK_HASH,
             "indexed_at": "2099-07-21T00:00:00Z",
             "last_report_nonce": 2,
             "nav_valid_after_block": 90,
@@ -141,7 +144,7 @@ class CoveredCallRepository:
         ]
         self.head = {
             "block_number": 100,
-            "block_hash": "0x01",
+            "block_hash": BLOCK_HASH,
             "observed_at": "2099-07-21T00:00:00Z",
         }
 
@@ -577,6 +580,7 @@ def test_covered_call_snapshot_decodes_weth_usdc_config_and_series() -> None:
         (True, encode(["bool"], [False])),
         (True, encode(["address"], [zero])),
         (True, encode(["bool"], [False])),
+        (True, encode(["uint256"], [1])),
         (
             True,
             encode(

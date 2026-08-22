@@ -1,5 +1,7 @@
 from eth_abi import encode
 import pytest
+from web3 import Web3
+from web3.providers.base import BaseProvider
 
 from src.fund_indexer.projector import FundProjection
 from src.fund_indexer.snapshot import (
@@ -7,6 +9,7 @@ from src.fund_indexer.snapshot import (
     _call,
     _decode_results,
     read_onchain_snapshot,
+    read_onchain_snapshot_eip1898,
 )
 
 
@@ -110,6 +113,7 @@ def test_multicall_result_decodes_adapter_and_v1_ledgers() -> None:
         (True, encode(["bool"], [True])),
         (True, encode(["address"], ["0x0000000000000000000000000000000000000000"])),
         (True, encode(["bool"], [False])),
+        (True, encode(["uint256"], [2])),
         (True, encode(["uint64"], [7])),
         (
             True,
@@ -186,6 +190,39 @@ def target_address() -> str:
     return "0xf000000000000000000000000000000000000001"
 
 
+def test_eip1898_snapshot_uses_one_hash_pinned_eth_call(monkeypatch) -> None:
+    provider = EIP1898Provider()
+    w3 = Web3(provider)
+    monkeypatch.setattr(
+        "src.fund_indexer.snapshot.settings.multicall3_address", target_address()
+    )
+    projection = FundProjection(
+        fund={
+            "accounting_asset": target_address(),
+            "active_reporter_count": 2,
+        },
+        adapters=set(),
+    )
+
+    snapshot = read_onchain_snapshot_eip1898(
+        w3,
+        projection,
+        _snapshot_contracts(),
+        84532,
+        100,
+        "0x" + "aa" * 32,
+    )
+
+    assert snapshot.block_number == 100
+    assert len(provider.requests) == 1
+    method, params = provider.requests[0]
+    assert method == "eth_call"
+    assert params[1] == {
+        "blockHash": "0x" + "aa" * 32,
+        "requireCanonical": True,
+    }
+
+
 def test_snapshot_rejects_fork_change_after_multicall(monkeypatch) -> None:
     w3 = FakeSnapshotWeb3(change_hash=True)
     monkeypatch.setattr(
@@ -239,6 +276,17 @@ def _snapshot_contracts() -> SnapshotContracts:
         strategy_manager=target_address(),
         fund_accounting=target_address(),
     )
+
+
+class EIP1898Provider(BaseProvider):
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+
+    def make_request(self, method, params):
+        self.requests.append((method, params))
+        payload = encode(["(bool,bytes)[]"], [_base_snapshot_results()])
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x" + payload.hex()}
 
 
 class FakeSnapshotWeb3:
@@ -364,6 +412,7 @@ def _base_snapshot_results() -> list[tuple[bool, bytes]]:
         (True, encode(["bool"], [False])),
         (True, encode(["address"], ["0x0000000000000000000000000000000000000000"])),
         (True, encode(["bool"], [False])),
+        (True, encode(["uint256"], [2])),
         (True, encode(["address"], [target_address()])),
         (
             True,

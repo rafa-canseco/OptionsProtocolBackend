@@ -213,9 +213,6 @@ class TestSolanaQuoteSubmission:
 
     def test_base_quotes_still_work(self, mock_deps):
         """Regression: EVM/Base quotes still flow through unchanged."""
-        mock_settler = MagicMock()
-        mock_settler.functions.makerNonce.return_value.call.return_value = 0
-
         app.dependency_overrides[require_mm_api_key] = lambda: BASE_MM_ADDRESS
 
         deadline = int(time.time()) + 300
@@ -236,7 +233,10 @@ class TestSolanaQuoteSubmission:
         }
 
         with (
-            patch("src.api.mm_routes.get_batch_settler", return_value=mock_settler),
+            patch(
+                "src.api.mm_routes._resolve_nonce",
+                return_value=(BASE_MM_ADDRESS, 0),
+            ),
             patch(
                 "src.api.mm_routes.recover_quote_signer",
                 return_value=BASE_MM_ADDRESS,

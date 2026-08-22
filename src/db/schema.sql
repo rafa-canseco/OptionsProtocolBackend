@@ -249,6 +249,7 @@ create table if not exists mm_quotes (
   max_amount numeric not null,
   maker_nonce bigint not null,
   signature text not null,
+  chain text not null default 'base',
   -- Denormalized oToken metadata (for display / filtering)
   strike_price numeric,
   expiry bigint,
