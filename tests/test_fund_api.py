@@ -18,6 +18,7 @@ SHARE = "0xf000000000000000000000000000000000000002"
 USDC = "0xf000000000000000000000000000000000000003"
 WETH = "0xf000000000000000000000000000000000000004"
 USER = "0xf000000000000000000000000000000000000005"
+BLOCK_HASH = "0x" + "01" * 32
 
 
 class FakeRepository:
@@ -48,8 +49,10 @@ class FakeRepository:
             "redemptions_paused": False,
             "execution_lock_owner": None,
             "has_active_processing": False,
+            "snapshot_generation": 1,
+            "snapshot_published_at": "2099-07-21T00:00:00Z",
             "as_of_block": 100,
-            "as_of_block_hash": "0x01",
+            "as_of_block_hash": BLOCK_HASH,
             "indexed_at": "2099-07-21T00:00:00Z",
             "last_report_nonce": 2,
             "nav_valid_after_block": 90,
@@ -63,7 +66,7 @@ class FakeRepository:
         self.rows: list[dict[str, Any]] = []
         self.head = {
             "block_number": 100,
-            "block_hash": "0x01",
+            "block_hash": BLOCK_HASH,
             "observed_at": "2099-07-21T00:00:00Z",
         }
         self.bindings = [
@@ -460,6 +463,37 @@ def test_every_write_requires_trusted_fresh_state(mutation, reason) -> None:
     assert reasons == {reason}
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("snapshot_generation", None),
+        ("snapshot_generation", 0),
+        ("as_of_block", None),
+        ("as_of_block", 0),
+        ("as_of_block", "bad"),
+        ("as_of_block_hash", None),
+        ("as_of_block_hash", "0x01"),
+        ("snapshot_published_at", None),
+        ("snapshot_published_at", "not-a-timestamp"),
+    ],
+)
+def test_summary_and_position_fail_closed_for_invalid_snapshot_metadata(
+    field, value
+) -> None:
+    repository = FakeRepository()
+    repository.fund_state[field] = value
+    service = FundService(repository)
+
+    summary = service.summary("base-sepolia:csp")
+    position = service.position("base-sepolia:csp", USER)
+
+    assert summary.stale is True
+    assert summary.nav.stale is True
+    assert position.stale is True
+    assert summary.actions.deposit.available is False
+    assert position.actions.request_redemption.available is False
+
+
 def test_activity_cursor_is_stable_and_payload_is_allowlisted() -> None:
     repository = FakeRepository()
     repository.rows = [
@@ -496,10 +530,156 @@ def test_compact_routes_validate_addresses_and_cache(monkeypatch) -> None:
     invalid_key = client.get("/v2/vaults/INVALID!")
 
     assert first.status_code == 200 and cached.status_code == 304
-    assert first.headers["cache-control"] == "public, no-cache"
-    assert position.headers["cache-control"] == "private, no-cache"
+    assert (
+        first.headers["cache-control"]
+        == "public, max-age=60, stale-while-revalidate=300"
+    )
+    assert (
+        position.headers["cache-control"]
+        == "private, max-age=60, stale-while-revalidate=300"
+    )
     assert invalid.status_code == 400
     assert invalid_key.status_code == 400
+
+
+def test_collector_disabled_null_metadata_is_stale_and_never_304(monkeypatch) -> None:
+    repository = FakeRepository()
+    repository.fund_state.update(
+        snapshot_generation=None,
+        snapshot_published_at=None,
+        as_of_block=None,
+        as_of_block_hash=None,
+    )
+    monkeypatch.setattr(fund_api, "_service", FundService(repository))
+    client = TestClient(app)
+
+    summary = client.get("/v2/vaults/base-sepolia:csp")
+    cached = client.get(
+        "/v2/vaults/base-sepolia:csp",
+        headers={"If-None-Match": summary.headers["etag"]},
+    )
+    position = client.get(f"/v2/vaults/base-sepolia:csp/positions/{USER}")
+
+    assert settings.rpc_snapshot_collector_enabled is False
+    assert summary.json()["stale"] is cached.json()["stale"] is True
+    assert position.json()["stale"] is True
+    assert summary.headers["cache-control"] == "private, no-store"
+    assert cached.status_code == 200
+    assert position.headers["cache-control"] == "private, no-store"
+
+
+def test_malformed_metadata_routes_return_stale_nullable_metadata(monkeypatch) -> None:
+    repository = FakeRepository()
+    repository.fund_state["as_of_block"] = "bad"
+    monkeypatch.setattr(fund_api, "_service", FundService(repository))
+    client = TestClient(app)
+
+    summary = client.get("/v2/vaults/base-sepolia:csp")
+    position = client.get(f"/v2/vaults/base-sepolia:csp/positions/{USER}")
+
+    assert summary.status_code == position.status_code == 200
+    for response in (summary, position):
+        assert response.json()["stale"] is True
+        assert response.json()["generation"] is None
+        assert response.json()["asOfBlock"] is None
+        assert response.json()["asOfBlockHash"] is None
+        assert response.json()["publishedAt"] is None
+        assert response.headers["cache-control"] == "private, no-store"
+
+
+def test_minimum_generation_and_block_bypass_etag_and_swr(monkeypatch) -> None:
+    repository = FakeRepository()
+    block_hash = "0x" + "ab" * 32
+    repository.fund_state.update(
+        snapshot_generation=12,
+        snapshot_published_at="2099-07-21T00:00:00Z",
+        as_of_block=101,
+        as_of_block_hash=block_hash,
+    )
+    monkeypatch.setattr(fund_api, "_service", FundService(repository))
+    client = TestClient(app)
+    ordinary = client.get("/v2/vaults/base-sepolia:csp")
+    bounded = client.get(
+        "/v2/vaults/base-sepolia:csp",
+        params={
+            "min_generation": 12,
+            "min_block": 101,
+            "min_block_hash": block_hash,
+        },
+        headers={"If-None-Match": ordinary.headers["etag"]},
+    )
+
+    assert bounded.status_code == 200
+    assert bounded.headers["cache-control"] == "private, no-store"
+    assert bounded.json()["generation"] == 12
+    assert bounded.json()["asOfBlockHash"] == block_hash
+    assert bounded.json()["publishedAt"] == "2099-07-21T00:00:00Z"
+
+
+def test_position_and_redemption_minimums_bypass_private_cache(monkeypatch) -> None:
+    repository = FakeRepository()
+    block_hash = "0x" + "ab" * 32
+    repository.fund_state.update(
+        snapshot_generation=12,
+        snapshot_published_at="2099-07-21T00:00:00Z",
+        as_of_block=101,
+        as_of_block_hash=block_hash,
+    )
+    monkeypatch.setattr(fund_api, "_service", FundService(repository))
+    client = TestClient(app)
+    params = {
+        "min_generation": 12,
+        "min_block": 101,
+        "min_block_hash": block_hash,
+    }
+    position = client.get(
+        f"/v2/vaults/base-sepolia:csp/positions/{USER}", params=params
+    )
+    redemption = client.get(
+        f"/v2/vaults/base-sepolia:csp/redemptions/{USER}", params=params
+    )
+
+    assert position.status_code == redemption.status_code == 200
+    assert position.headers["cache-control"] == "private, no-store"
+    assert redemption.headers["cache-control"] == "private, no-store"
+    assert position.json()["generation"] == redemption.json()["generation"] == 12
+
+
+def test_equal_height_hash_is_checked_only_when_supplied() -> None:
+    repository = FakeRepository()
+    block_hash = "0x" + "ab" * 32
+    repository.fund_state.update(
+        snapshot_generation=2,
+        as_of_block=101,
+        as_of_block_hash=block_hash,
+    )
+    model = FundService(repository).summary("base-sepolia:csp")
+
+    assert fund_api._meets_minimum(model, 2, 101, None) is True
+    assert fund_api._meets_minimum(model, 2, 101, block_hash) is True
+    assert fund_api._meets_minimum(model, 2, 101, "0x" + "cd" * 32) is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v2/vaults/base-sepolia:csp",
+        f"/v2/vaults/base-sepolia:csp/positions/{USER}",
+    ],
+)
+def test_minimum_initial_read_obeys_deadline(monkeypatch, path) -> None:
+    repository = FakeRepository()
+    monkeypatch.setattr(fund_api, "_service", FundService(repository))
+    monkeypatch.setattr(fund_api, "FRESHNESS_WAIT_TIMEOUT_SECONDS", 0)
+
+    response = TestClient(app).get(
+        path,
+        params={"min_generation": 2, "min_block": 101},
+    )
+
+    assert response.status_code == 504
+    assert response.headers["cache-control"] == "private, no-store"
+    assert repository.fund_state.get("nav_stale") is False
 
 
 def test_transport_failure_returns_cors_safe_service_unavailable(

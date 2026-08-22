@@ -25,17 +25,17 @@ class IVResult(NamedTuple):
 
 
 async def get_iv(asset: Asset) -> IVResult:
-    """Fetch implied volatility from Deribit for any supported asset.
+    """Fetch implied volatility with the process-wide API client."""
+    return await get_iv_with_client(asset, _client)
 
-    Uses the book summary to get mark_iv from the nearest ATM option.
-    Returns an IVResult with value (annualized decimal, e.g. 0.80) and
-    source ("deribit" for live data, "proxy" for the AssetConfig fallback).
-    """
+
+async def get_iv_with_client(asset: Asset, client: httpx.AsyncClient) -> IVResult:
+    """Fetch implied volatility with a caller-owned bounded client."""
     cfg = get_asset_config(asset)
     if not cfg.has_deribit:
         return IVResult(await get_proxy_iv(asset), "proxy")
 
-    index_resp = await _client.get(
+    index_resp = await client.get(
         f"{DERIBIT_BASE_URL}/public/get_index_price",
         params={"index_name": cfg.deribit_index},
     )
@@ -43,7 +43,7 @@ async def get_iv(asset: Asset) -> IVResult:
     index_data = index_resp.json()
     spot_price = index_data["result"]["index_price"]
 
-    book_resp = await _client.get(
+    book_resp = await client.get(
         f"{DERIBIT_BASE_URL}/public/get_book_summary_by_currency",
         params={"currency": cfg.deribit_currency, "kind": "option"},
     )

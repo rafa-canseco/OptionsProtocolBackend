@@ -11,6 +11,7 @@ FUND = "0xf000000000000000000000000000000000000001"
 SHARE = "0xf000000000000000000000000000000000000002"
 USDC = "0xf000000000000000000000000000000000000003"
 WETH = "0xf000000000000000000000000000000000000004"
+BLOCK_HASH = "0x" + "01" * 32
 
 
 class WheelRepository:
@@ -43,8 +44,10 @@ class WheelRepository:
             "redemptions_paused": False,
             "execution_lock_owner": None,
             "has_active_processing": False,
+            "snapshot_generation": 1,
+            "snapshot_published_at": "2099-07-31T00:00:00Z",
             "as_of_block": 100,
-            "as_of_block_hash": "0x01",
+            "as_of_block_hash": BLOCK_HASH,
             "indexed_at": "2099-07-31T00:00:00Z",
             "last_report_nonce": 7,
             "nav_valid_after_block": 95,
@@ -163,7 +166,7 @@ class WheelRepository:
     def confirmed_head(self, _chain):
         return {
             "block_number": 100,
-            "block_hash": "0x01",
+            "block_hash": BLOCK_HASH,
             "observed_at": "2099-07-31T00:00:00Z",
         }
 
