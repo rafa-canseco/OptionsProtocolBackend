@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.api.routes import router
 from src.api.analytics import router as analytics_router
@@ -338,10 +339,22 @@ async def lifespan(app: FastAPI):
         return
 
     validate_fund_runtime_cadences()
+    if (
+        settings.rpc_snapshot_collector_enabled
+        and settings.tokenized_fund_indexer_enabled
+    ):
+        raise RuntimeError(
+            "RPC snapshot collector and legacy tokenized fund indexer cannot run together"
+        )
     if settings.tokenized_fund_indexer_enabled and not get_tokenized_fund_rpc_url():
         raise RuntimeError(
             "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
             "TOKENIZED_FUND_INDEXER_ENABLED=true"
+        )
+    if settings.rpc_snapshot_collector_enabled and not get_tokenized_fund_rpc_url():
+        raise RuntimeError(
+            "TOKENIZED_FUND_RPC_URL or RPC_URL is required when "
+            "RPC_SNAPSHOT_COLLECTOR_ENABLED=true"
         )
     if settings.fund_nav_reporter_enabled and not get_tokenized_fund_rpc_url():
         raise RuntimeError(
@@ -483,6 +496,17 @@ async def lifespan(app: FastAPI):
 
         tasks.append(asyncio.create_task(fund_indexer.run()))
         logger.info("Tokenized fund indexer started")
+
+    if settings.rpc_snapshot_collector_enabled:
+        from src.fund_indexer import collector as snapshot_collector
+
+        snapshot_rpc = await asyncio.to_thread(
+            snapshot_collector.create_validated_rpc,
+            settings.app_env,
+            settings.chain_id,
+        )
+        tasks.append(asyncio.create_task(snapshot_collector.run(snapshot_rpc)))
+        logger.info("RPC snapshot collector started")
 
     if settings.fund_nav_reporter_enabled:
         from src.bots import fund_nav_reporter
@@ -722,3 +746,39 @@ if settings.beta_mode:
 async def health():
     """Returns `{\"status\": \"ok\"}` when the API is running."""
     return {"status": "ok"}
+
+
+@app.get(
+    "/health/snapshot-collector",
+    tags=["System"],
+    summary="Snapshot collector health",
+)
+async def snapshot_collector_health():
+    if not settings.rpc_snapshot_collector_enabled:
+        return {"status": "disabled"}
+    try:
+        from src.db.database import get_client
+        from src.fund_indexer.collector import snapshot_collector_startup_healthy
+
+        if not snapshot_collector_startup_healthy(settings.app_env, settings.chain_id):
+            raise RuntimeError("Snapshot collector startup validation unavailable")
+        result = (
+            get_client()
+            .rpc(
+                "v2_get_current_snapshot",
+                {"p_environment": settings.app_env, "p_chain_id": settings.chain_id},
+            )
+            .execute()
+        )
+        payload = result.data
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        healthy = bool(
+            payload and payload.get("reconciled") and not payload.get("stale", True)
+        )
+    except Exception:
+        healthy = False
+    return JSONResponse(
+        status_code=200 if healthy else 503,
+        content={"status": "ok" if healthy else "unhealthy"},
+    )

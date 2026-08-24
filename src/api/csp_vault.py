@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+import time
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -29,6 +30,8 @@ router = APIRouter(prefix="/v2/vaults", tags=["Tokenized Funds"])
 _service: FundService | None = None
 _lock = threading.Lock()
 logger = logging.getLogger(__name__)
+FRESHNESS_WAIT_TIMEOUT_SECONDS = 120.0
+FRESHNESS_POLL_SECONDS = 0.5
 
 
 def get_fund_service() -> FundService:
@@ -60,9 +63,13 @@ def _respond(
     response: Response,
     private: bool = False,
     revalidate: bool = False,
+    bypass_cache: bool = False,
 ):
     headers = _headers(model, private, revalidate)
-    if request.headers.get("if-none-match") == headers["ETag"]:
+    no_store = bypass_cache or getattr(model, "stale", False)
+    if no_store:
+        headers["Cache-Control"] = "private, no-store"
+    elif request.headers.get("if-none-match") == headers["ETag"]:
         return Response(status_code=304, headers=headers)
     for name, value in headers.items():
         response.headers[name] = value
@@ -92,27 +99,166 @@ async def list_funds(request: Request, response: Response):
     return _respond(model, request, response)
 
 
+async def _bounded_call(method, args: tuple, deadline: float):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    return await asyncio.wait_for(_call(method, *args), timeout=remaining)
+
+
+def _meets_minimum(model, generation: int, block: int, block_hash: str | None) -> bool:
+    if model.generation is None or model.generation < generation:
+        return False
+    if model.as_of_block is None or model.as_of_block < block:
+        return False
+    if model.as_of_block == block and block_hash is not None:
+        return model.as_of_block_hash == block_hash.lower()
+    return True
+
+
 @router.get("/{fund_key}", response_model=FundSummaryResponse)
-async def get_fund(fund_key: str, request: Request, response: Response):
-    model = await _call(get_fund_service().summary, fund_key)
-    return _respond(model, request, response, revalidate=True)
+async def get_fund(
+    fund_key: str,
+    request: Request,
+    response: Response,
+    min_generation: int | None = Query(default=None, ge=1),
+    min_block: int | None = Query(default=None, ge=1),
+    min_block_hash: str | None = Query(default=None, pattern=r"^0x[0-9a-fA-F]{64}$"),
+):
+    bounds = (
+        min_generation is not None
+        or min_block is not None
+        or min_block_hash is not None
+    )
+    if bounds and (min_generation is None or min_block is None):
+        raise HTTPException(
+            status_code=400,
+            detail="min_generation and min_block must be supplied together",
+        )
+    if bounds:
+        deadline = time.monotonic() + FRESHNESS_WAIT_TIMEOUT_SECONDS
+        try:
+            model = await _bounded_call(
+                get_fund_service().summary, (fund_key,), deadline
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="Fresh snapshot wait timed out",
+                headers={"Cache-Control": "private, no-store"},
+            ) from exc
+        while not _meets_minimum(model, min_generation, min_block, min_block_hash):
+            if time.monotonic() >= deadline:
+                model = model.model_copy(
+                    update={
+                        "stale": True,
+                        "nav": model.nav.model_copy(update={"stale": True}),
+                    }
+                )
+                break
+            await asyncio.sleep(
+                min(FRESHNESS_POLL_SECONDS, max(0, deadline - time.monotonic()))
+            )
+            try:
+                model = await _bounded_call(
+                    get_fund_service().summary, (fund_key,), deadline
+                )
+            except TimeoutError:
+                model = model.model_copy(
+                    update={
+                        "stale": True,
+                        "nav": model.nav.model_copy(update={"stale": True}),
+                    }
+                )
+                break
+    else:
+        model = await _call(get_fund_service().summary, fund_key)
+    return _respond(model, request, response, revalidate=bounds, bypass_cache=bounds)
 
 
 @router.get("/{fund_key}/positions/{address}", response_model=FundPositionResponse)
 async def get_position(
-    fund_key: str, address: str, request: Request, response: Response
+    fund_key: str,
+    address: str,
+    request: Request,
+    response: Response,
+    min_generation: int | None = Query(default=None, ge=1),
+    min_block: int | None = Query(default=None, ge=1),
+    min_block_hash: str | None = Query(default=None, pattern=r"^0x[0-9a-fA-F]{64}$"),
 ):
     if not Web3.is_address(address):
         raise HTTPException(status_code=400, detail="Invalid Ethereum address")
-    model = await _call(get_fund_service().position, fund_key, address.lower())
-    return _respond(model, request, response, private=True, revalidate=True)
+    bounds = (
+        min_generation is not None
+        or min_block is not None
+        or min_block_hash is not None
+    )
+    if bounds and (min_generation is None or min_block is None):
+        raise HTTPException(
+            status_code=400,
+            detail="min_generation and min_block must be supplied together",
+        )
+    if bounds:
+        deadline = time.monotonic() + FRESHNESS_WAIT_TIMEOUT_SECONDS
+        try:
+            model = await _bounded_call(
+                get_fund_service().position,
+                (fund_key, address.lower()),
+                deadline,
+            )
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="Fresh snapshot wait timed out",
+                headers={"Cache-Control": "private, no-store"},
+            ) from exc
+        while not _meets_minimum(model, min_generation, min_block, min_block_hash):
+            if time.monotonic() >= deadline:
+                model = model.model_copy(update={"stale": True})
+                break
+            await asyncio.sleep(
+                min(FRESHNESS_POLL_SECONDS, max(0, deadline - time.monotonic()))
+            )
+            try:
+                model = await _bounded_call(
+                    get_fund_service().position,
+                    (fund_key, address.lower()),
+                    deadline,
+                )
+            except TimeoutError:
+                model = model.model_copy(update={"stale": True})
+                break
+    else:
+        model = await _call(get_fund_service().position, fund_key, address.lower())
+    return _respond(
+        model,
+        request,
+        response,
+        private=True,
+        revalidate=bounds,
+        bypass_cache=bounds,
+    )
 
 
 @router.get("/{fund_key}/redemptions/{address}", response_model=FundPositionResponse)
 async def get_redemptions(
-    fund_key: str, address: str, request: Request, response: Response
+    fund_key: str,
+    address: str,
+    request: Request,
+    response: Response,
+    min_generation: int | None = Query(default=None, ge=1),
+    min_block: int | None = Query(default=None, ge=1),
+    min_block_hash: str | None = Query(default=None, pattern=r"^0x[0-9a-fA-F]{64}$"),
 ):
-    return await get_position(fund_key, address, request, response)
+    return await get_position(
+        fund_key,
+        address,
+        request,
+        response,
+        min_generation,
+        min_block,
+        min_block_hash,
+    )
 
 
 @router.get("/{fund_key}/config", response_model=FundConfigResponse)

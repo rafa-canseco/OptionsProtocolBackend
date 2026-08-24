@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from eth_abi import decode, encode
+from hexbytes import HexBytes
 from web3 import Web3
 
 from src.config import settings
@@ -151,6 +152,101 @@ def read_onchain_snapshot(
     )
 
 
+def read_onchain_snapshot_eip1898(
+    w3: Web3,
+    projection: FundProjection,
+    contracts: SnapshotContracts,
+    chain_id: int,
+    block_number: int,
+    block_hash: str,
+) -> OnchainFundSnapshot:
+    """Read one fund with exactly one EIP-1898 Multicall3 eth_call."""
+    accounting = Web3.to_checksum_address(contracts.fund_accounting)
+    del accounting  # reporter count is supplied by the durable projection
+    active_positions = [
+        (key, position)
+        for key, position in sorted(projection.positions.items())
+        if position["lifecycle"] in {"open", "awaiting_physical_delivery"}
+    ]
+    missing_metadata = [
+        (key, position)
+        for key, position in sorted(projection.positions.items())
+        if position.get("strike_price_8") is None
+        or position.get("expiry_timestamp") is None
+        or position.get("is_put") is None
+    ]
+    adapters = sorted(projection.adapters)
+    reporter_count = int(projection.fund.get("active_reporter_count", 0))
+    calls = _snapshot_calls(
+        projection,
+        contracts,
+        active_positions,
+        missing_metadata,
+        adapters,
+        reporter_count,
+    )
+    multicall = w3.eth.contract(
+        address=Web3.to_checksum_address(settings.multicall3_address),
+        abi=MULTICALL3_ABI,
+    )
+    data = multicall.functions.aggregate3(calls)._encode_transaction_data()
+    response = w3.provider.make_request(
+        "eth_call",
+        [
+            {"to": settings.multicall3_address, "data": data},
+            {"blockHash": block_hash, "requireCanonical": True},
+        ],
+    )
+    if "error" in response or not response.get("result"):
+        raise RuntimeError("Snapshot Multicall RPC failed")
+    decoded = w3.codec.decode(["(bool,bytes)[]"], HexBytes(response["result"]))[0]
+    results = [(bool(success), bytes(return_data)) for success, return_data in decoded]
+    values = _decode_results(
+        results,
+        active_positions,
+        adapters,
+        reporter_count,
+        missing_metadata=missing_metadata,
+        strategy_kind=contracts.strategy_kind,
+    )
+    return OnchainFundSnapshot(
+        chain_id=chain_id,
+        fund_address=contracts.fund_vault.lower(),
+        block_number=block_number,
+        block_hash=block_hash.lower(),
+        share_supply=values["share_supply"],
+        reserved_claim_assets=values["reserved_claim_assets"],
+        flow_reserved_assets=values["flow_reserved_assets"],
+        claim_escrow_balance=values["claim_escrow_balance"],
+        adapter_usdc=values["adapter_usdc"],
+        adapter_weth=values["adapter_weth"],
+        strategy_kind=contracts.strategy_kind,
+        normalization_slippage_bps=values["normalization_slippage_bps"],
+        nav_positions_hash=values["nav_positions_hash"],
+        strategy_positions_hash=values["strategy_positions_hash"],
+        adapter_nonces=tuple(values["adapter_nonces"]),
+        reporter_set_version=values["reporter_set_version"],
+        reporter_threshold=values["reporter_threshold"],
+        active_reporter_count=values["active_reporter_count"],
+        active_reporters=tuple(values["active_reporters"]),
+        fee_recipient=values["fee_recipient"],
+        management_fee_wad=values["management_fee_wad"],
+        performance_fee_bps=values["performance_fee_bps"],
+        high_water_mark=values["high_water_mark"],
+        last_report_nonce=values["last_report_nonce"],
+        accounted_idle_assets=values["accounted_idle_assets"],
+        virtual_shares=values["virtual_shares"],
+        deposits_paused=values["deposits_paused"],
+        redemptions_paused=values["redemptions_paused"],
+        execution_lock_owner=values["execution_lock_owner"],
+        has_active_processing=values["has_active_processing"],
+        fund_flow_nonce=values["fund_flow_nonce"],
+        idle_state_hash=values["idle_state_hash"],
+        position_ledgers=tuple(values["position_ledgers"]),
+        position_metadata=tuple(values["position_metadata"]),
+    )
+
+
 def _snapshot_calls(
     projection: FundProjection,
     contracts: SnapshotContracts,
@@ -224,6 +320,7 @@ def _base_calls(
         _call(addresses["fund_vault"], "redemptionsPaused()"),
         _call(addresses["fund_vault"], "executionLockOwner()"),
         _call(addresses["fund_flow_manager"], "hasActiveProcessing()"),
+        _call(addresses["fund_accounting"], "activeReporterCount()"),
     ]
     if strategy_kind == "covered_call":
         calls.append(_call(addresses["strategy_adapter"], "adapterConfig()"))
@@ -295,7 +392,7 @@ def _decode_results(
     strategy_kind: str = "csp",
 ) -> dict[str, Any]:
     missing_metadata = missing_metadata or []
-    base_count = 19 if strategy_kind == "covered_call" else 18
+    base_count = 20 if strategy_kind == "covered_call" else 19
     expected_count = (
         base_count
         + len(adapters)
@@ -399,12 +496,15 @@ def _decode_results(
         execution_lock_owner=decode(["address"], results[16][1])[0].lower(),
         has_active_processing=decode(["bool"], results[17][1])[0],
     )
+    observed_reporter_count = decode(["uint256"], results[18][1])[0]
+    if observed_reporter_count != reporter_count:
+        raise RuntimeError("FundAccounting reporter set changed during snapshot")
     if strategy_kind == "covered_call":
         adapter_config = decode(
             [
                 "((uint64,uint64,uint64,uint16,uint16,uint16,uint16,uint256,uint256,uint256,uint256),address,uint24)"
             ],
-            results[18][1],
+            results[19][1],
         )[0]
         output["normalization_slippage_bps"] = adapter_config[0][4]
     else:

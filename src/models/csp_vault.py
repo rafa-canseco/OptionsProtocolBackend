@@ -206,8 +206,10 @@ class FundSummaryResponse(FundModel):
     strategy: FundStrategySnapshot
     status: FundStatus
     actions: FundActions
+    generation: int | None = None
     as_of_block: int | None
     as_of_block_hash: str | None
+    published_at: str | None = None
     indexed_at: str | None
     stale: bool
     wheel: MetaWheelSnapshot | None = None
@@ -240,7 +242,10 @@ class FundPositionResponse(FundModel):
     accounting_value: str
     redemption: RedemptionView
     actions: FundActions
+    generation: int | None = None
     as_of_block: int | None
+    as_of_block_hash: str | None = None
+    published_at: str | None = None
     indexed_at: str | None
     stale: bool
 

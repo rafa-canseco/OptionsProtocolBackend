@@ -1,0 +1,26 @@
+# Inactive Solana/v1 paths
+/docs/superpowers/plans/2026-04-08-solana-circuit-breaker.md
+/docs/superpowers/plans/2026-04-08-solana-quote-acceptance.md
+/docs/superpowers/specs/2026-04-08-solana-circuit-breaker-design.md
+/docs/superpowers/specs/2026-04-08-solana-price-publisher-design.md
+/src/api/solana_faucet.py
+/src/bots/solana_circuit_breaker_bot.py
+/src/bots/solana_event_indexer.py
+/src/bots/solana_expiry_settler.py
+/src/bots/solana_otoken_manager.py
+/src/bridge/solana_trade.py
+/src/chains/solana/
+/supabase/migrations/20260412_solana_indexer_state.sql
+/tests/test_legacy_agora_v1_gate.py
+/tests/test_solana_*.py
+
+# Generated, build, and vendor paths
+graphify-out/
+.pi/
+generated/
+build/
+dist/
+vendor/
+node_modules/
+.venv/
+__pycache__/

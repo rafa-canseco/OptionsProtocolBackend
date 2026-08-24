@@ -427,6 +427,7 @@ class FundService:
             wheel_nav=wheel_nav,
         )
         stale = context["stale"]
+        snapshot = self._response_snapshot_metadata(state)
         actions = self._actions(row, state, common=context["reason"])
         net_assets = int(state.get("net_assets", 0))
         supply = int(state.get("share_supply", 0))
@@ -574,8 +575,10 @@ class FundService:
             ),
             status=self._status(state),
             actions=actions,
-            as_of_block=state.get("as_of_block"),
-            as_of_block_hash=state.get("as_of_block_hash"),
+            generation=snapshot["generation"],
+            as_of_block=snapshot["block"],
+            as_of_block_hash=snapshot["block_hash"],
+            published_at=snapshot["published_at"],
             indexed_at=state.get("indexed_at"),
             stale=stale,
             wheel=wheel_view,
@@ -1453,6 +1456,7 @@ class FundService:
         redemption = self._redemption(position.get("redemption", {}))
         context = self._write_context(row, state)
         stale = context["stale"]
+        snapshot = self._response_snapshot_metadata(state)
         return FundPositionResponse(
             fund_key=fund_key,
             address=wallet,
@@ -1466,7 +1470,10 @@ class FundService:
                 shares=shares,
                 redemption=redemption,
             ),
-            as_of_block=state.get("as_of_block"),
+            generation=snapshot["generation"],
+            as_of_block=snapshot["block"],
+            as_of_block_hash=snapshot["block_hash"],
+            published_at=snapshot["published_at"],
             indexed_at=state.get("indexed_at"),
             stale=stale,
         )
@@ -1687,9 +1694,9 @@ class FundService:
 
     @staticmethod
     def _active_contracts(contracts, as_of_block) -> list[dict[str, Any]]:
-        if as_of_block is None:
+        if isinstance(as_of_block, bool) or not isinstance(as_of_block, int):
             return []
-        block = int(as_of_block)
+        block = as_of_block
         return [
             row
             for row in contracts
@@ -1732,6 +1739,8 @@ class FundService:
         return None
 
     def _freshness_reason(self, state, head) -> str | None:
+        if not self._has_valid_snapshot_metadata(state):
+            return "INVALID_SNAPSHOT_METADATA"
         if not head:
             return "UNKNOWN_CONFIRMED_HEAD"
         if (
@@ -1755,6 +1764,48 @@ class FundService:
         if valid_until is None or block > int(valid_until):
             return "STALE_NAV_WINDOW"
         return None
+
+    @staticmethod
+    def _has_valid_snapshot_metadata(state: dict[str, Any]) -> bool:
+        generation = state.get("snapshot_generation")
+        block = state.get("as_of_block")
+        block_hash = state.get("as_of_block_hash")
+        published_at = state.get("snapshot_published_at")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or isinstance(block, bool)
+            or not isinstance(block, int)
+            or block < 1
+            or not isinstance(block_hash, str)
+            or re.fullmatch(r"0x[0-9a-fA-F]{64}", block_hash) is None
+            or not isinstance(published_at, str)
+        ):
+            return False
+        try:
+            return (
+                datetime.fromisoformat(published_at.replace("Z", "+00:00")).tzinfo
+                is not None
+            )
+        except ValueError:
+            return False
+
+    @classmethod
+    def _response_snapshot_metadata(cls, state: dict[str, Any]) -> dict[str, Any]:
+        if not cls._has_valid_snapshot_metadata(state):
+            return {
+                "generation": None,
+                "block": None,
+                "block_hash": None,
+                "published_at": None,
+            }
+        return {
+            "generation": state["snapshot_generation"],
+            "block": state["as_of_block"],
+            "block_hash": state["as_of_block_hash"].lower(),
+            "published_at": state["snapshot_published_at"],
+        }
 
     def _age(self, value: str | None) -> float:
         if not value:

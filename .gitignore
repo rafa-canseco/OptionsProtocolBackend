@@ -27,6 +27,7 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+graphify-out/
 
 # uv
 .python-version
