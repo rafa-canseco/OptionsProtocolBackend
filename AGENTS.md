@@ -35,18 +35,26 @@ Never hide a red baseline.
 - One agent owns one worktree at a time. Never assign overlapping files or the same
   branch to concurrent implementers.
 - Stabilize schemas, APIs, and contract interfaces before downstream work begins.
-- Implementers do not approve their own work. Independent review uses the ticket
-  packet, diff, durable decisions, and verification evidence.
+- Classify changes as low, standard, or high risk. Legacy or unspecified work is
+  high risk, and only the user or Linear may approve a lower classification.
+- Low-risk work needs targeted checks and the fast gate, with no fresh reviewer.
+  Standard-risk work also needs an independent reviewer. High-risk work needs the
+  full gate and a defensive independent reviewer. Authentication, custody,
+  settlement, production-data, and other high-risk changes remain high risk.
+- Reviewers use the ticket packet, diff, durable decisions, and verification
+  evidence; implementers do not perform required independent review themselves.
 - Keep durable memory concise in the workspace `harness/runs/<ISSUE-ID>/` directory
   when available. Never store raw logs, full source files, or secrets there.
 
 ## Verification
 
 - Install the locked development environment with `uv sync --frozen --dev`.
-- Run `./scripts/harness-check.sh fast` during implementation.
-- Run `./scripts/harness-check.sh full` before requesting review.
-- Use `./scripts/harness-check.sh targeted <pytest-path ...>` for reproducible
-  focused tests under the same isolated environment.
+- During editing, run targeted pytest paths with
+  `./scripts/harness-check.sh targeted <pytest-path ...>` and run Ruff only on
+  changed Python paths.
+- Run the deterministic `./scripts/harness-check.sh fast` gate once before handoff.
+- Run `./scripts/harness-check.sh full` only when acceptance criteria require
+  network or integration checks, or when the change is high risk.
 - Checks run with a synthetic allowlisted environment, without project `.env`
   files, network credentials, or inherited service configuration.
 - `fast` is deterministic and offline. `full` always runs unit tests under that
