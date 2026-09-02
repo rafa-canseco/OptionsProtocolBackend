@@ -96,7 +96,7 @@ def check_once() -> None:
         if not email:
             continue
 
-        asset = (pos.get("asset") or "eth").upper()
+        asset = str(pos.get("asset") or "UNKNOWN").upper()
         strike_usd = _format_strike(pos["strike_price"])
         option_type = "put" if pos.get("is_put") else "call"
         expiry_ts = pos.get("expiry", 0)

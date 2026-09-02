@@ -20,12 +20,36 @@ class Settings(BaseSettings):
     chainlink_btc_usd_address: str = (
         "0x07DA0E54543a844a80ABE69c8A12F22B3aA59f9D"  # Base mainnet cbBTC/USD
     )
+    chainlink_nvdac_usd_address: str = "0x04689a41629776563E6822F76f2e57D148d28513"
+    chainlink_nvdac_usd_description: str = "Coinbase NVDA"
+    chainlink_vvv_usd_address: str = "0xaABc55Ca55D70B034e4daA2551A224239890282F"
+    chainlink_vvv_usd_description: str = "VVV / USD"
+    chainlink_hype_usd_arbitrum_address: str = (
+        "0xf9ce4fE2F0EcE0362cb416844AE179a49591D567"
+    )
+    chainlink_zec_usd_arbitrum_address: str = (
+        "0x21082CA28570f0ccfb089465bFaEfDc77b00D367"
+    )
+    chainlink_oracle_max_age_seconds: int = 3600
+    base_sequencer_uptime_feed_address: str = (
+        "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
+    )
+    arbitrum_rpc_url: str = ""
+    arbitrum_chain_id: int = 42161
+    arbitrum_sequencer_uptime_feed_address: str = (
+        "0xFdB631F5EE196F0ed6FAa767959853A9F217697D"
+    )
+    arbitrum_sequencer_grace_period_seconds: int = 3600
 
-    # Asset addresses (Base mainnet)
+    # Asset addresses (Base mainnet). Registry membership does not enable markets.
     weth_address: str = "0x4200000000000000000000000000000000000006"
     wbtc_address: str = (
         "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"  # Base mainnet cbBTC
     )
+    nvdac_address: str = "0xb20000000000000000000078ee7ce2fE4908108C"
+    cbzec_address: str = "0xB2000000000000000000008501b13360000cb2EC"
+    cbhype_address: str = "0xB200000000000000000000451d033a5000cb479e"
+    vvv_address: str = "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf"
     usdc_address: str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
     # Contract addresses (set after deployment)
@@ -145,6 +169,31 @@ class Settings(BaseSettings):
     uniswap_fee_tier: int = 3000  # 0.3% — most liquid ETH/USDC pool on Base
     swap_slippage_tolerance: float = 0.01  # 1% slippage default
     flash_loan_redeem_delay_seconds: int = 300  # wait 5 min post-settle before delivery
+
+    # New Base settlement routes are fail-closed until explicitly configured/deployed.
+    routed_settlement_enabled: bool = False
+    routed_settlement_assets: str = ""
+    pair_routing_swap_router_address: str = ""
+    nvdac_settlement_adapter_address: str = ""
+    cbzec_settlement_adapter_address: str = ""
+    cbhype_settlement_adapter_address: str = ""
+    vvv_settlement_adapter_address: str = ""
+    aerodrome_slipstream_factory_address: str = (
+        "0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef"
+    )
+    aerodrome_slipstream_router_address: str = (
+        "0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F"
+    )
+    aerodrome_slipstream_quoter_address: str = (
+        "0x514c8B5f54112481E28028F1166Bd78501089259"
+    )
+    nvdac_pool_address: str = "0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9"
+    cbzec_pool_address: str = "0x0Fc47C17AF86078d809358db1b4db2DeBC988566"
+    cbhype_pool_address: str = "0xD5Eaea9da564217EA101D1E369fDA168A3025686"
+    vvv_pool_address: str = "0x67A11022B7B6ed66f81233F6C8Ed6e48F7826530"
+    uniswap_v3_factory_address: str = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+    b20_oracle_registry_address: str = "0x3f3E8cf41cdd3b1D118c16471aB0113DfDDd5CaD"
+    b20_policy_registry_address: str = "0x8453000000000000000000000000000000000002"
 
     # Oracle (for reading expiry prices)
     oracle_address: str = ""

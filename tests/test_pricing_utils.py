@@ -44,11 +44,11 @@ class TestCollateralToUsd:
             _row(raw, False, "btc"), ETH_SPOT, BTC_SPOT
         ) == pytest.approx(90000.0)
 
-    def test_eth_call_unknown_asset_falls_back_to_eth(self):
-        """Unknown asset string defaults to ETH path (1e18 decimals)."""
-        raw = str(10**18)
-        row = {"collateral": raw, "is_put": False, "asset": "unknown"}
-        assert collateral_to_usd(row, ETH_SPOT, BTC_SPOT) == pytest.approx(ETH_SPOT)
+    @pytest.mark.parametrize("asset", [None, "unknown", "nvdac"])
+    def test_call_unknown_or_unpriced_asset_fails_closed(self, asset):
+        row = {"collateral": str(10**18), "is_put": False, "asset": asset}
+        with pytest.raises(ValueError, match="Unsupported CALL collateral asset"):
+            collateral_to_usd(row, ETH_SPOT, BTC_SPOT)
 
     def test_zero_collateral_returns_zero(self):
         """Zero collateral produces 0.0 for all option types."""

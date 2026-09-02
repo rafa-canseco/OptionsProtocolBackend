@@ -99,10 +99,12 @@ def collateral_to_usd(row: dict, eth_spot: float, btc_spot: float) -> float:
     """Convert collateral to USD based on option type and asset."""
     collateral = int(row.get("collateral") or 0)
     is_put = row.get("is_put")
-    asset = row.get("asset") or "eth"
+    asset = row.get("asset")
 
     if is_put is True or is_put is None:
         return collateral / 1_000_000
     if asset == "btc":
         return (collateral / 1e8) * btc_spot
-    return (collateral / 1e18) * eth_spot
+    if asset == "eth":
+        return (collateral / 1e18) * eth_spot
+    raise ValueError(f"Unsupported CALL collateral asset: {asset!r}")

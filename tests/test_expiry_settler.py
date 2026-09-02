@@ -37,6 +37,7 @@ def _call_position(
         "strike_price": str(strike),
         "is_put": False,
         "otoken_address": "0xCALL",
+        "asset": "eth",
     }
 
 
@@ -47,6 +48,7 @@ def _put_position(amount_raw: int = 100_000_000, strike: int = 250_000_000_000) 
         "strike_price": str(strike),
         "is_put": True,
         "otoken_address": "0xPUT",
+        "asset": "eth",
     }
 
 
@@ -143,6 +145,10 @@ class TestBaseSettlementQueries:
             patch(
                 "src.bots.expiry_settler.get_pending_phase2", return_value=[recovered]
             ),
+            patch(
+                "src.bots.expiry_settler._preflight_positions",
+                side_effect=lambda positions: positions,
+            ),
             patch("src.bots.expiry_settler._ensure_expiry_prices_set"),
             patch("src.bots.expiry_settler.get_batch_settler"),
             patch("src.bots.expiry_settler.get_operator_account"),
@@ -161,6 +167,43 @@ class TestBaseSettlementQueries:
 # ---------------------------------------------------------------------------
 # _compute_contra_amount
 # ---------------------------------------------------------------------------
+
+
+class TestStrictAssetBoundary:
+    def test_position_asset_must_match_live_otoken_underlying(self):
+        position = {
+            "asset": "eth",
+            "otoken_address": "0x0000000000000000000000000000000000000011",
+        }
+        otoken = MagicMock()
+        otoken.functions.underlying.return_value.call.return_value = (
+            settler_module.settings.wbtc_address
+        )
+        with patch("src.bots.expiry_settler.get_otoken", return_value=otoken):
+            with pytest.raises(ValueError, match="Stored/on-chain asset mismatch"):
+                settler_module._validate_position_asset(position)
+
+    def test_unknown_asset_never_uses_eth_decimals(self):
+        with pytest.raises(ValueError, match="Unsupported Base settlement asset"):
+            _compute_contra_amount(100_000_000, 250_000_000_000, True, "unknown")
+
+    def test_unknown_asset_skips_itm_without_oracle_read(self):
+        position = {
+            "user_address": "0xuser",
+            "vault_id": 7,
+            "expiry": 1777017600,
+            "strike_price": "100000000",
+            "is_put": True,
+            "asset": "unknown",
+            "otoken_address": "0xunknown",
+        }
+        oracle = MagicMock()
+        with patch("src.bots.expiry_settler.get_oracle", return_value=oracle):
+            itm, prices, skipped = settler_module.identify_itm_positions([position])
+        assert itm == []
+        assert prices == {}
+        assert skipped == {("0xuser", 7)}
+        oracle.functions.getExpiryPrice.assert_not_called()
 
 
 class TestComputeContraAmount:
@@ -794,26 +837,16 @@ class TestReconcileSettledOnChain:
         assert already_settled[0]["user_address"] == "0xsettled"
 
 
-class TestEnsureExpiryPricesSetSkipsNonEvmAssets:
-    """Solana assets must be skipped: the EVM Oracle has no price feed for
-    them and Web3.to_checksum_address rejects their base58 mint addresses."""
-
-    def test_skips_solana_assets_without_calling_to_checksum(self):
-        from src.chains import Chain
-        from src.pricing.assets import Asset
-
-        seen_assets: list[Asset] = []
+class TestEnsureExpiryPricesSetIsPositionScoped:
+    def test_reads_only_requested_asset_expiry_pairs(self):
+        seen_assets = []
 
         def fake_price_raw(asset):
-            seen_assets.append(asset)
-            return 230000000000, 8, 1777017500
+            seen_assets.append(asset.value)
+            return 230000000000, 8, 1777017600
 
         mock_oracle = MagicMock()
-        finalized_call = MagicMock()
-        finalized_call.call.return_value = (0, False)
-        mock_oracle.functions.getExpiryPrice.return_value = finalized_call
-        set_call = MagicMock()
-        mock_oracle.functions.setExpiryPrice.return_value = set_call
+        mock_oracle.functions.getExpiryPrice.return_value.call.return_value = (0, False)
 
         with (
             patch("src.bots.expiry_settler.get_oracle", return_value=mock_oracle),
@@ -826,10 +859,7 @@ class TestEnsureExpiryPricesSetSkipsNonEvmAssets:
                 "src.bots.expiry_settler.build_and_send_tx", return_value="0xdeadbeef"
             ),
         ):
-            _ensure_expiry_prices_set({1777017600})
+            _ensure_expiry_prices_set({("eth", 1777017600)})
 
-        assert seen_assets, "expected at least one EVM asset iteration"
-        for a in seen_assets:
-            from src.pricing.assets import get_asset_config
-
-            assert get_asset_config(a).chain == Chain.BASE
+        assert seen_assets == ["eth"]
+        mock_oracle.functions.setExpiryPrice.assert_called_once()

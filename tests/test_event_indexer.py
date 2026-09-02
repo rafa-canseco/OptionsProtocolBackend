@@ -40,6 +40,7 @@ def test_enrich_with_otoken_metadata_uses_available_otokens_cache():
             "strike_price": "2000.0",
             "expiry": 1773993600,
             "is_put": True,
+            "underlying": event_indexer.settings.weth_address,
         }
     ]
 
@@ -48,6 +49,7 @@ def test_enrich_with_otoken_metadata_uses_available_otokens_cache():
         patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
     ):
         mock_db.return_value.table.return_value = table
+        mock_get_otoken.return_value.functions.underlying.return_value.call.return_value = event_indexer.settings.weth_address
         first = event_indexer._enrich_with_otoken_metadata(
             {"otoken_address": "0x1111111111111111111111111111111111111111"}
         )
@@ -59,7 +61,32 @@ def test_enrich_with_otoken_metadata_uses_available_otokens_cache():
     assert first["expiry"] == 1773993600
     assert first["is_put"] is True
     assert second == first
-    mock_get_otoken.assert_not_called()
+    mock_get_otoken.assert_called_once()
+
+
+def test_db_metadata_rejects_live_underlying_mismatch():
+    table = MagicMock()
+    table.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
+        {
+            "strike_price": "2000.0",
+            "expiry": 1773993600,
+            "is_put": False,
+            "underlying": event_indexer.settings.weth_address,
+        }
+    ]
+    otoken = MagicMock()
+    otoken.functions.underlying.return_value.call.return_value = (
+        event_indexer.settings.wbtc_address
+    )
+    with (
+        patch("src.bots.event_indexer.get_client") as mock_db,
+        patch("src.bots.event_indexer.get_otoken", return_value=otoken),
+    ):
+        mock_db.return_value.table.return_value = table
+        with pytest.raises(ValueError, match="DB/on-chain underlying mismatch"):
+            event_indexer._load_otoken_metadata_from_db(
+                "0x0000000000000000000000000000000000000011"
+            )
 
 
 def test_enrich_with_otoken_metadata_falls_back_to_chain():
@@ -70,6 +97,9 @@ def test_enrich_with_otoken_metadata_falls_back_to_chain():
     otoken.functions.strikePrice.return_value.call.return_value = 200_000_000_000
     otoken.functions.expiry.return_value.call.return_value = 1773993600
     otoken.functions.isPut.return_value.call.return_value = False
+    otoken.functions.underlying.return_value.call.return_value = (
+        event_indexer.settings.weth_address
+    )
 
     with (
         patch("src.bots.event_indexer.get_client") as mock_db,
@@ -128,6 +158,8 @@ def test_build_delivery_event_data_uses_cached_metadata():
         "strike_price": 200_000_000_000,
         "expiry": 1773993600,
         "is_put": True,
+        "asset": "eth",
+        "underlying": event_indexer.settings.weth_address.lower(),
     }
     ev = MagicMock()
     ev.args.oToken = addr
@@ -142,6 +174,28 @@ def test_build_delivery_event_data_uses_cached_metadata():
     assert row["otoken_address"] == addr
     assert row["delivered_amount"] == "123"
     mock_get_otoken.assert_not_called()
+
+
+def test_unknown_underlying_never_becomes_eth_or_reaches_storage():
+    unknown = "0x9999999999999999999999999999999999999999"
+    assert event_indexer._underlying_to_asset(unknown) == "unknown"
+    assert event_indexer._underlying_to_asset(None) == "unknown"  # type: ignore[arg-type]
+    with patch(
+        "src.bots.event_indexer._load_otoken_metadata",
+        return_value={
+            "strike_price": 1,
+            "expiry": 2,
+            "is_put": True,
+            "underlying": unknown,
+            "asset": "unknown",
+        },
+    ):
+        assert (
+            event_indexer._enrich_with_otoken_metadata(
+                {"otoken_address": "0x1111111111111111111111111111111111111111"}
+            )
+            is None
+        )
 
 
 def test_enrich_returns_none_when_metadata_unavailable():
@@ -507,11 +561,20 @@ def test_otoken_metadata_cache_is_bounded():
 
     table = MagicMock()
     table.select.return_value.eq.return_value.limit.return_value.execute.return_value.data = [
-        {"strike_price": "2000.0", "expiry": 1773993600, "is_put": False}
+        {
+            "strike_price": "2000.0",
+            "expiry": 1773993600,
+            "is_put": False,
+            "underlying": event_indexer.settings.weth_address,
+        }
     ]
     try:
-        with patch("src.bots.event_indexer.get_client") as mock_db:
+        with (
+            patch("src.bots.event_indexer.get_client") as mock_db,
+            patch("src.bots.event_indexer.get_otoken") as mock_get_otoken,
+        ):
             mock_db.return_value.table.return_value = table
+            mock_get_otoken.return_value.functions.underlying.return_value.call.return_value = event_indexer.settings.weth_address
             for i in range(5):
                 event_indexer._load_otoken_metadata(f"0x{i:040x}")
         assert len(event_indexer._otoken_metadata_cache) == 3

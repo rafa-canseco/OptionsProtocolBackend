@@ -18,11 +18,19 @@ from src.contracts.abis import (
     CONTROLLER_YIELD_EVENTS_ABI,
     MARGIN_POOL_YIELD_ABI,
     ERC20_TRANSFER_ABI,
+    PAIR_ROUTING_SWAP_ROUTER_ABI,
+    SETTLEMENT_ADAPTER_ABI,
+    SETTLEMENT_POOL_ABI,
+    AERODROME_QUOTER_ABI,
+    B20_ABI,
+    B20_ORACLE_REGISTRY_ABI,
+    B20_POLICY_REGISTRY_ABI,
 )
 
 logger = logging.getLogger(__name__)
 
 _w3: Web3 | None = None
+_read_w3: dict[tuple[str, int], Web3] = {}
 _nonce_lock = threading.Lock()
 _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
 
@@ -45,6 +53,22 @@ def get_w3() -> Web3:
             )
         _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
     return _w3
+
+
+def get_read_w3(rpc_url: str, expected_chain_id: int) -> Web3:
+    if not rpc_url:
+        raise ValueError(
+            f"Read-only RPC URL is not configured for chain {expected_chain_id}"
+        )
+    key = (rpc_url, expected_chain_id)
+    if key not in _read_w3:
+        _read_w3[key] = Web3(Web3.HTTPProvider(rpc_url))
+    w3 = _read_w3[key]
+    if w3.eth.chain_id != expected_chain_id:
+        raise ValueError(
+            f"Read-only RPC chain mismatch: expected {expected_chain_id}, got {w3.eth.chain_id}"
+        )
+    return w3
 
 
 def get_operator_account() -> Account:
@@ -159,6 +183,52 @@ def get_uniswap_quoter() -> Contract:
     return w3.eth.contract(
         address=Web3.to_checksum_address(settings.uniswap_v3_quoter_address),
         abi=UNISWAP_V3_QUOTER_ABI,
+    )
+
+
+def get_pair_routing_swap_router() -> Contract:
+    if not settings.pair_routing_swap_router_address:
+        raise ValueError("pair_routing_swap_router_address is not configured")
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(settings.pair_routing_swap_router_address),
+        abi=PAIR_ROUTING_SWAP_ROUTER_ABI,
+    )
+
+
+def get_settlement_adapter(address: str) -> Contract:
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(address), abi=SETTLEMENT_ADAPTER_ABI
+    )
+
+
+def get_settlement_pool(address: str) -> Contract:
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(address), abi=SETTLEMENT_POOL_ABI
+    )
+
+
+def get_aerodrome_quoter() -> Contract:
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(settings.aerodrome_slipstream_quoter_address),
+        abi=AERODROME_QUOTER_ABI,
+    )
+
+
+def get_b20_contract(address: str) -> Contract:
+    return get_w3().eth.contract(address=Web3.to_checksum_address(address), abi=B20_ABI)
+
+
+def get_b20_oracle_registry() -> Contract:
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(settings.b20_oracle_registry_address),
+        abi=B20_ORACLE_REGISTRY_ABI,
+    )
+
+
+def get_b20_policy_registry() -> Contract:
+    return get_w3().eth.contract(
+        address=Web3.to_checksum_address(settings.b20_policy_registry_address),
+        abi=B20_POLICY_REGISTRY_ABI,
     )
 
 
