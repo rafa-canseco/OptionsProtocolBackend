@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from src.db.database import get_client
 from src.models.activity import ActivityResponse
+from src.pricing.assets import get_base_settlement_asset
 
 logger = logging.getLogger(__name__)
 
@@ -14,11 +15,7 @@ router = APIRouter()
 ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 _USDC_DECIMALS = 1_000_000  # 1e6
-_WETH_DECIMALS = 10**18  # 1e18
-_CBBTC_DECIMALS = 10**8  # 1e8
 _STRIKE_DECIMALS = 10**8  # oToken strike uses 8 decimals
-
-_CALL_DECIMALS = {"eth": _WETH_DECIMALS, "btc": _CBBTC_DECIMALS}
 
 
 def _collateral_usd(row: dict) -> float:
@@ -32,8 +29,8 @@ def _collateral_usd(row: dict) -> float:
     is_put = row.get("is_put")
     if is_put is None or is_put:
         return raw / _USDC_DECIMALS
-    asset = row.get("asset") or "eth"
-    decimals = _CALL_DECIMALS.get(asset, _WETH_DECIMALS)
+    asset = row.get("asset")
+    decimals = 10 ** get_base_settlement_asset(asset).decimals
     strike = int(row.get("strike_price") or 0)
     native_amount = raw / decimals
     strike_usd = strike / _STRIKE_DECIMALS

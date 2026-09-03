@@ -7,8 +7,25 @@ oracle source, strike generation params, and token addresses.
 from dataclasses import dataclass
 from enum import Enum
 
+from web3 import Web3
+
 from src.chains import Chain
 from src.config import settings
+
+
+@dataclass(frozen=True)
+class BaseSettlementAssetConfig:
+    """Canonical settlement identity, separate from public pricing/tradability."""
+
+    asset: str
+    symbol: str
+    decimals: int
+    address_setting: str
+    b20: bool = False
+
+    @property
+    def underlying_address(self) -> str:
+        return getattr(settings, self.address_setting)
 
 
 class Asset(str, Enum):
@@ -88,6 +105,34 @@ _PYTH_FEED_IDS: dict[str, str] = {
     "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
     "TSLAX": "47a156470288850a440df3a6ce85a55917b813a19bb5b31128a33a986566a362",
 }
+
+
+BASE_SETTLEMENT_ASSETS: dict[str, BaseSettlementAssetConfig] = {
+    "eth": BaseSettlementAssetConfig("eth", "ETH", 18, "weth_address"),
+    "btc": BaseSettlementAssetConfig("btc", "BTC", 8, "wbtc_address"),
+    "nvdac": BaseSettlementAssetConfig("nvdac", "NVDAc", 8, "nvdac_address", True),
+    "cbzec": BaseSettlementAssetConfig("cbzec", "cbZEC", 8, "cbzec_address", True),
+    "cbhype": BaseSettlementAssetConfig("cbhype", "cbHYPE", 18, "cbhype_address", True),
+    "vvv": BaseSettlementAssetConfig("vvv", "VVV", 18, "vvv_address"),
+}
+
+
+def get_base_settlement_asset(asset: str) -> BaseSettlementAssetConfig:
+    try:
+        return BASE_SETTLEMENT_ASSETS[asset]
+    except (KeyError, TypeError):
+        raise ValueError(f"Unsupported Base settlement asset: {asset!r}") from None
+
+
+def resolve_base_underlying(address: str) -> BaseSettlementAssetConfig:
+    if not isinstance(address, str) or not Web3.is_address(address):
+        raise ValueError(f"Malformed Base underlying address: {address!r}")
+    normalized = address.lower()
+    for config in BASE_SETTLEMENT_ASSETS.values():
+        configured = config.underlying_address
+        if Web3.is_address(configured) and configured.lower() == normalized:
+            return config
+    raise ValueError(f"Unknown Base underlying address: {address}")
 
 
 ASSET_CONFIGS: dict[Asset, AssetConfig] = {

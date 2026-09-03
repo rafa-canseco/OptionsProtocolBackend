@@ -20,14 +20,27 @@ from src.db.database import get_client
 from src.contracts.web3_client import (
     get_batch_settler,
     get_controller,
+    get_otoken,
     get_oracle,
     get_uniswap_quoter,
     get_operator_account,
     build_and_send_tx,
 )
 from src.chains import Chain
-from src.pricing.assets import Asset, get_asset_config
+from src.pricing.assets import (
+    Asset,
+    get_base_settlement_asset,
+    resolve_base_underlying,
+)
 from src.pricing.chainlink import get_asset_price_raw
+from src.settlement_routing import (
+    MAX_ORACLE_AGE_SECONDS,
+    NEW_SETTLEMENT_ASSETS,
+    assert_route_unchanged,
+    build_route_quote,
+    read_new_asset_price_8,
+    validate_new_asset_participants,
+)
 from src.notifications.email import (
     build_consolidated_result_email,
     send_batch,
@@ -37,6 +50,37 @@ logger = logging.getLogger(__name__)
 
 MAX_BATCH_SIZE = 50  # max vaults per tx to avoid gas limit
 BETA_SLIPPAGE_BPS = 1_000  # 10% buffer used in beta mode (no live DEX quote available)
+
+
+def _position_asset_config(position_or_asset):
+    asset = (
+        position_or_asset.get("asset")
+        if isinstance(position_or_asset, dict)
+        else position_or_asset
+    )
+    if not isinstance(asset, str):
+        raise ValueError(f"Missing Base settlement asset: {asset!r}")
+    return get_base_settlement_asset(asset)
+
+
+def _validate_position_asset(position: dict):
+    """Bind stored asset metadata to the oToken's immutable underlying."""
+    cfg = _position_asset_config(position)
+    expected = cfg.underlying_address.lower()
+    if position.get("_validated_underlying") == expected:
+        return cfg
+    otoken_address = position.get("otoken_address")
+    if not isinstance(otoken_address, str) or not Web3.is_address(otoken_address):
+        raise ValueError(f"Invalid oToken address: {otoken_address!r}")
+    underlying = get_otoken(otoken_address).functions.underlying().call()
+    resolved = resolve_base_underlying(underlying)
+    if resolved.asset != cfg.asset or resolved.underlying_address.lower() != expected:
+        raise ValueError(
+            f"Stored/on-chain asset mismatch for {otoken_address}: "
+            f"stored={cfg.asset} chain={resolved.asset}"
+        )
+    position["_validated_underlying"] = expected
+    return cfg
 
 
 _SETTLE_FIELDS = (
@@ -122,11 +166,22 @@ def identify_itm_positions(
 
     for pos in positions:
         expiry = pos["expiry"]
-        asset_str = pos.get("asset", "eth")
+        asset_str = pos.get("asset")
         try:
-            cfg = get_asset_config(Asset(asset_str))
-        except (ValueError, KeyError):
-            cfg = get_asset_config(Asset.ETH)
+            cfg = _validate_position_asset(pos)
+        except (ValueError, TypeError) as exc:
+            logger.error(
+                "Unknown settlement asset; skipping oracle/physical delivery "
+                "id=%s oToken=%s user=%s vault=%s asset=%r error=%s",
+                pos.get("id"),
+                pos.get("otoken_address"),
+                pos.get("user_address"),
+                pos.get("vault_id"),
+                asset_str,
+                exc,
+            )
+            skipped.add((pos["user_address"], pos["vault_id"]))
+            continue
         underlying = Web3.to_checksum_address(cfg.underlying_address)
 
         cache_key = (underlying, expiry)
@@ -168,7 +223,7 @@ def identify_itm_positions(
 
 
 def _compute_contra_amount(
-    amount_raw: int, strike: int, is_put: bool, asset: str = "eth"
+    amount_raw: int, strike: int, is_put: bool, asset: str
 ) -> tuple[int, str, str]:
     """Determine contra-asset amount and token direction.
 
@@ -182,10 +237,7 @@ def _compute_contra_amount(
     PUT ITM:  user gets underlying. contra = amount * scale
     CALL ITM: user gets USDC.      contra = amount * strike / 10^10
     """
-    try:
-        cfg = get_asset_config(Asset(asset))
-    except (ValueError, KeyError):
-        cfg = get_asset_config(Asset.ETH)
+    cfg = _position_asset_config(asset)
     underlying = Web3.to_checksum_address(cfg.underlying_address)
     usdc = Web3.to_checksum_address(settings.usdc_address)
 
@@ -294,7 +346,7 @@ def compute_slippage_param(
             f"for oToken {position.get('otoken_address')}"
         )
 
-    asset_str = position.get("asset", "eth")
+    asset_str = position.get("asset")
     contra_amount, token_in, token_out = _compute_contra_amount(
         amount_raw, strike, is_put, asset_str
     )
@@ -310,10 +362,7 @@ def compute_slippage_param(
             raise ValueError(
                 "oracle_price_8dec is required in beta mode (no Uniswap Quoter available)"
             )
-        try:
-            cfg = get_asset_config(Asset(asset_str))
-        except (ValueError, KeyError):
-            cfg = get_asset_config(Asset.ETH)
+        cfg = _position_asset_config(asset_str)
         max_collateral = _beta_compute_max_collateral_put(
             contra_amount, oracle_price_8dec, cfg.decimals
         )
@@ -392,81 +441,60 @@ def _db_update_by_id(order_event_id: str, fields: dict, context: str) -> None:
         )
 
 
-def _ensure_expiry_prices_set(expiries: set[int]) -> None:
-    """Set Oracle expiry prices from Chainlink for all needed expiries.
-
-    Reads the current Chainlink price for each supported asset and
-    calls setExpiryPrice for each (asset, expiry) that isn't finalized.
-    """
-    if not expiries:
+def _ensure_expiry_prices_set(required: set[tuple[str, int]]) -> None:
+    """Submit only required asset/expiry prices to the Base Oracle."""
+    if not required:
         return
-
     oracle = get_oracle()
     account = get_operator_account()
-
-    for asset in Asset:
-        cfg = get_asset_config(asset)
-        if cfg.chain != Chain.BASE:
-            continue
-        underlying = Web3.to_checksum_address(cfg.underlying_address)
-
+    for asset_name, expiry in sorted(required):
         try:
-            chainlink_price, decimals, _ = get_asset_price_raw(asset)
-            if decimals != 8:
-                chainlink_price = int(chainlink_price * (10**8) / (10**decimals))
-        except Exception:
-            logger.exception(
-                "Failed to read %s Chainlink price, skipping expiry price set",
-                asset.value,
-            )
-            continue
-
-        for expiry in expiries:
-            try:
-                price_raw, is_finalized = oracle.functions.getExpiryPrice(
-                    underlying, expiry
-                ).call()
-                if is_finalized:
-                    logger.info(
-                        "Expiry price already set for %s at %d: %d",
-                        asset.value,
-                        expiry,
-                        price_raw,
-                    )
-                    continue
-            except Exception:
-                logger.exception(
-                    "Failed to read expiry price for %s at %d",
-                    asset.value,
+            cfg = _position_asset_config(asset_name)
+            underlying = Web3.to_checksum_address(cfg.underlying_address)
+            price_raw, is_finalized = oracle.functions.getExpiryPrice(
+                underlying, expiry
+            ).call()
+            if is_finalized:
+                logger.info(
+                    "Expiry price already set for %s at %d: %d",
+                    asset_name,
                     expiry,
+                    price_raw,
                 )
                 continue
-
-            try:
-                tx_fn = oracle.functions.setExpiryPrice(
-                    underlying, expiry, chainlink_price
+            if asset_name in NEW_SETTLEMENT_ASSETS:
+                chainlink_price = read_new_asset_price_8(
+                    asset_name,
+                    not_before=expiry,
+                    not_after=expiry + MAX_ORACLE_AGE_SECONDS,
                 )
-                tx_hash = build_and_send_tx(tx_fn, account)
+            else:
+                legacy_asset = Asset(asset_name)
+                chainlink_price, decimals, _ = get_asset_price_raw(legacy_asset)
+                if decimals != 8:
+                    chainlink_price = chainlink_price * (10**8) // (10**decimals)
+            tx_fn = oracle.functions.setExpiryPrice(underlying, expiry, chainlink_price)
+            tx_hash = build_and_send_tx(tx_fn, account)
+            logger.info(
+                "Set %s expiry price %d for expiry %d, tx: %s",
+                asset_name,
+                chainlink_price,
+                expiry,
+                tx_hash,
+            )
+        except Exception as exc:
+            if "PriceAlreadySet" in str(exc):
                 logger.info(
-                    "Set %s expiry price %d for expiry %d, tx: %s",
-                    asset.value,
-                    chainlink_price,
+                    "Expiry price already set for %s at %d (race)",
+                    asset_name,
                     expiry,
-                    tx_hash,
                 )
-            except Exception as e:
-                if "PriceAlreadySet" in str(e):
-                    logger.info(
-                        "Expiry price already set for %s at %d (race)",
-                        asset.value,
-                        expiry,
-                    )
-                else:
-                    logger.exception(
-                        "Failed to set %s expiry price for %d",
-                        asset.value,
-                        expiry,
-                    )
+            else:
+                logger.exception(
+                    "Failed closed setting expiry price for %s at %d",
+                    asset_name,
+                    expiry,
+                )
 
 
 _RETRY_BACKOFF_SECONDS = [60, 300, 900, 1800, 3600]  # 1m, 5m, 15m, 30m, 60m
@@ -494,11 +522,26 @@ async def _physical_redeem_with_retry(
 
     for attempt in range(1, max_retries + 1):
         try:
-            slippage_param, contra_amount = await asyncio.to_thread(
-                compute_slippage_param,
-                pos,
-                expiry_price_raw,
-            )
+            asset = pos.get("asset")
+            if asset in NEW_SETTLEMENT_ASSETS:
+                amount_raw = int(pos["amount"])
+                strike = int(pos["strike_price"])
+                contra_amount, _, _ = _compute_contra_amount(
+                    amount_raw, strike, bool(pos["is_put"]), asset
+                )
+                route_quote = await asyncio.to_thread(
+                    build_route_quote, pos, contra_amount
+                )
+                slippage_param = route_quote.slippage_param
+                await asyncio.to_thread(
+                    assert_route_unchanged, pos, route_quote.fingerprint
+                )
+            else:
+                slippage_param, contra_amount = await asyncio.to_thread(
+                    compute_slippage_param,
+                    pos,
+                    expiry_price_raw,
+                )
             if slippage_param <= 0:
                 raise ValueError(f"slippage_param={slippage_param} for {otoken_addr}")
 
@@ -548,7 +591,7 @@ async def _physical_redeem_with_retry(
 
 
 def _reconcile_settled_on_chain(
-    positions: list[dict],
+    positions: list[dict], *, update_db: bool = True
 ) -> tuple[list[dict], list[dict]]:
     """Check on-chain settlement state and reconcile DB for any mismatches.
 
@@ -580,27 +623,28 @@ def _reconcile_settled_on_chain(
             continue
 
         if settled:
-            now = datetime.now(timezone.utc).isoformat()
-            try:
-                _db_update(
-                    pos["user_address"],
-                    vault_id,
-                    {"is_settled": True, "settled_at": now},
-                    "Reconcile on-chain settled",
-                )
-            except Exception:
-                logger.exception(
-                    "ALERT: Reconcile DB write failed for user=%s "
-                    "vault=%d (settled on-chain)",
-                    pos["user_address"],
-                    vault_id,
-                )
-                db_failures += 1
+            if update_db:
+                now = datetime.now(timezone.utc).isoformat()
+                try:
+                    _db_update(
+                        pos["user_address"],
+                        vault_id,
+                        {"is_settled": True, "settled_at": now},
+                        "Reconcile on-chain settled",
+                    )
+                except Exception:
+                    logger.exception(
+                        "ALERT: Reconcile DB write failed for user=%s "
+                        "vault=%d (settled on-chain)",
+                        pos["user_address"],
+                        vault_id,
+                    )
+                    db_failures += 1
             already_settled.append(pos)
         else:
             unsettled.append(pos)
 
-    if already_settled:
+    if already_settled and update_db:
         msg = "Reconciled %d positions (settled on-chain but not in DB)"
         if db_failures:
             msg += " — %d DB writes failed, will retry next cycle"
@@ -617,7 +661,7 @@ def _format_position_for_email(
 ) -> dict:
     """Format a settled position into a dict for render_result_email_consolidated."""
     vault_id = pos["vault_id"]
-    asset = (pos.get("asset") or "eth").upper()
+    asset = str(pos.get("asset") or "UNKNOWN").upper()
     strike_raw = int(pos.get("strike_price", 0))
     strike_usd = f"{strike_raw / 1e8:,.0f}"
     amount_raw = int(pos.get("amount", 0))
@@ -791,12 +835,39 @@ def _send_settlement_emails(
             )
 
 
+def _preflight_positions(positions: list[dict]) -> list[dict]:
+    """Exclude positions whose live identity or B20 actors cannot be proven."""
+    valid: list[dict] = []
+    for pos in positions:
+        try:
+            cfg = _validate_position_asset(pos)
+            if cfg.asset in NEW_SETTLEMENT_ASSETS and not bool(pos["is_put"]):
+                validate_new_asset_participants(
+                    cfg.asset, (Web3.to_checksum_address(pos["user_address"]),)
+                )
+            valid.append(pos)
+        except Exception:
+            logger.exception(
+                "Fail-closed settlement preflight id=%s oToken=%r asset=%r",
+                pos.get("id"),
+                pos.get("otoken_address"),
+                pos.get("asset"),
+            )
+    return valid
+
+
 async def settle_once():
     """Single settlement cycle: 2-phase (batch settle + physical delivery for ITM)."""
     positions = get_expired_unsettled()
     phase2_recovery = get_pending_phase2()
     if not positions and not phase2_recovery:
         logger.info("No expired positions to settle")
+        return
+
+    positions = await asyncio.to_thread(_preflight_positions, positions)
+    phase2_recovery = await asyncio.to_thread(_preflight_positions, phase2_recovery)
+    if not positions and not phase2_recovery:
+        logger.error("No positions passed settlement identity/policy preflight")
         return
 
     # --- Reconcile: check on-chain state for DB/chain mismatches ---
@@ -833,9 +904,22 @@ async def settle_once():
 
     # --- Phase 0: set expiry prices on Oracle from Chainlink ---
     # Include phase2-only positions: identify_itm needs their oracle prices too.
-    expiries = {pos["expiry"] for pos in positions}
-    expiries.update(pos["expiry"] for pos in phase2_only_seed)
-    await asyncio.to_thread(_ensure_expiry_prices_set, expiries)
+    required_expiry_prices: set[tuple[str, int]] = set()
+    for pos in [*positions, *phase2_only_seed]:
+        try:
+            cfg = _validate_position_asset(pos)
+            required_expiry_prices.add((cfg.asset, int(pos["expiry"])))
+        except (ValueError, TypeError):
+            logger.exception(
+                "Unknown settlement asset before expiry-price work "
+                "id=%s oToken=%s user=%s vault=%s asset=%r",
+                pos.get("id"),
+                pos.get("otoken_address"),
+                pos.get("user_address"),
+                pos.get("vault_id"),
+                pos.get("asset"),
+            )
+    await asyncio.to_thread(_ensure_expiry_prices_set, required_expiry_prices)
 
     # --- Phase 1: batchSettleVaults (settles all expired vaults on-chain) ---
     settler = get_batch_settler()
@@ -881,22 +965,36 @@ async def settle_once():
             )
             continue
 
-        # On-chain succeeded — these vaults ARE settled regardless of DB outcome
-        settled_positions.extend(batch)
+        # BatchSettler catches individual vault failures, so confirm each result.
+        unsettled, confirmed = _reconcile_settled_on_chain(batch, update_db=False)
+        if unsettled:
+            logger.error(
+                "Phase 1: %d/%d vaults emitted/retained an individual failure",
+                len(unsettled),
+                len(batch),
+            )
+            phase1_failed = True
+        if not confirmed:
+            continue
+        settled_positions.extend(confirmed)
 
-        # Step 2: mark in DB (separate try so on-chain success is never misattributed)
+        # Step 2: mark confirmed vaults in DB.
+        confirmed_owners = [
+            Web3.to_checksum_address(p["user_address"]) for p in confirmed
+        ]
+        confirmed_vault_ids = [p["vault_id"] for p in confirmed]
         now = datetime.now(timezone.utc).isoformat()
         try:
-            _mark_batch_settled(owners, vault_ids, tx_hash, now)
-            for pos in batch:
+            _mark_batch_settled(confirmed_owners, confirmed_vault_ids, tx_hash, now)
+            for pos in confirmed:
                 pos["is_settled"] = True
                 pos["settled_at"] = now
                 pos["settlement_tx_hash"] = tx_hash
-            email_eligible_positions.extend(batch)
+            email_eligible_positions.extend(confirmed)
         except Exception:
             logger.exception(
                 f"Phase 1: DB write failed after on-chain success (tx: {tx_hash}). "
-                f"{len(batch)} vaults settled on-chain but not marked in DB."
+                f"{len(confirmed)} vaults settled on-chain but not marked in DB."
             )
             # Continue — vaults are in settled_positions so Phase 2 can still run
 
@@ -999,11 +1097,7 @@ async def settle_once():
             continue
 
         # DB mark (separate from on-chain to prevent misattribution)
-        pos_asset = pos.get("asset", "eth")
-        try:
-            pos_cfg = get_asset_config(Asset(pos_asset))
-        except (ValueError, KeyError):
-            pos_cfg = get_asset_config(Asset.ETH)
+        pos_cfg = _position_asset_config(pos)
         delivered_asset = pos_cfg.underlying_address.lower() if pos["is_put"] else usdc
         try:
             _db_update(
@@ -1043,11 +1137,16 @@ async def settle_once():
         otm_failures = 0
         for pos in otm_positions:
             expiry = pos["expiry"]
-            pos_asset = pos.get("asset", "eth")
             try:
-                pos_cfg = get_asset_config(Asset(pos_asset))
-            except (ValueError, KeyError):
-                pos_cfg = get_asset_config(Asset.ETH)
+                pos_cfg = _position_asset_config(pos)
+            except ValueError:
+                logger.exception(
+                    "Unknown settlement asset during OTM marking id=%s asset=%r",
+                    pos.get("id"),
+                    pos.get("asset"),
+                )
+                otm_failures += 1
+                continue
             cache_key = (Web3.to_checksum_address(pos_cfg.underlying_address), expiry)
             cached_price = expiry_cache.get(cache_key)
             expiry_price_str = str(cached_price) if cached_price is not None else None
