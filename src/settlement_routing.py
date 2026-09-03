@@ -104,10 +104,10 @@ def _route_config(asset: str) -> dict[str, Any]:
             "spacing": 200,
             "fee": 2000,
             "impact_bps": 50,
-            "feed": settings.chainlink_hype_usd_arbitrum_address,
+            "feed": settings.chainlink_hype_usd_hyperevm_address,
             "feed_decimals": 8,
             "feed_description": "HYPE / USD",
-            "source_chain": settings.arbitrum_chain_id,
+            "source_chain": settings.hyperevm_chain_id,
             "expected_policy": 119,
         },
         "vvv": {
@@ -168,12 +168,15 @@ def _require_enabled(asset: str) -> tuple[BaseSettlementAssetConfig, dict[str, A
 def _source_w3(route: dict[str, Any]):
     chain_id = route["source_chain"]
     if chain_id == settings.chain_id:
-        w3 = get_w3()
-        sequencer = settings.base_sequencer_uptime_feed_address
-    else:
-        w3 = get_read_w3(settings.arbitrum_rpc_url, settings.arbitrum_chain_id)
-        sequencer = settings.arbitrum_sequencer_uptime_feed_address
-    return w3, sequencer
+        return get_w3(), settings.base_sequencer_uptime_feed_address
+    if chain_id == settings.arbitrum_chain_id:
+        return (
+            get_read_w3(settings.arbitrum_rpc_url, settings.arbitrum_chain_id),
+            settings.arbitrum_sequencer_uptime_feed_address,
+        )
+    if chain_id == settings.hyperevm_chain_id:
+        return get_read_w3(settings.hyperevm_rpc_url, settings.hyperevm_chain_id), ""
+    raise ValueError(f"Unsupported oracle source chain: {chain_id}")
 
 
 def _validate_b20(
