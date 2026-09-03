@@ -34,6 +34,7 @@ from src.pricing.assets import (
 )
 from src.pricing.chainlink import get_asset_price_raw
 from src.settlement_routing import (
+    MAX_ORACLE_AGE_SECONDS,
     NEW_SETTLEMENT_ASSETS,
     assert_route_unchanged,
     build_route_quote,
@@ -222,7 +223,7 @@ def identify_itm_positions(
 
 
 def _compute_contra_amount(
-    amount_raw: int, strike: int, is_put: bool, asset: str = "eth"
+    amount_raw: int, strike: int, is_put: bool, asset: str
 ) -> tuple[int, str, str]:
     """Determine contra-asset amount and token direction.
 
@@ -465,7 +466,7 @@ def _ensure_expiry_prices_set(required: set[tuple[str, int]]) -> None:
                 chainlink_price = read_new_asset_price_8(
                     asset_name,
                     not_before=expiry,
-                    not_after=expiry + settings.chainlink_oracle_max_age_seconds,
+                    not_after=expiry + MAX_ORACLE_AGE_SECONDS,
                 )
             else:
                 legacy_asset = Asset(asset_name)

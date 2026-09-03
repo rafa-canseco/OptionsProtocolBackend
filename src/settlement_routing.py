@@ -31,6 +31,7 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 NEW_SETTLEMENT_ASSETS = frozenset({"nvdac", "cbzec", "cbhype", "vvv"})
 ORACLE_DEVIATION_BPS = 100
 EXECUTION_SLIPPAGE_BPS = 30
+MAX_ORACLE_AGE_SECONDS = 3600
 _FACTORY_GETTER_ABI = [
     {
         "inputs": [],
@@ -255,13 +256,21 @@ def read_new_asset_price_8(
     cfg, route = _require_enabled(asset)
     multiplier = _validate_b20(cfg, route, participants)
     w3, sequencer = _source_w3(route)
+    max_age_seconds = min(
+        settings.chainlink_oracle_max_age_seconds, MAX_ORACLE_AGE_SECONDS
+    )
+    if not_before:
+        expiry_window_end = not_before + MAX_ORACLE_AGE_SECONDS
+        not_after = (
+            min(not_after, expiry_window_end) if not_after else expiry_window_end
+        )
     result = read_validated_chainlink_round(
         w3,
         route["feed"],
         expected_chain_id=route["source_chain"],
         expected_decimals=route["feed_decimals"],
         expected_description=route["feed_description"],
-        max_age_seconds=settings.chainlink_oracle_max_age_seconds,
+        max_age_seconds=max_age_seconds,
         not_before=not_before,
         not_after=not_after,
         now=now,

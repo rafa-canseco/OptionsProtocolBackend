@@ -1,6 +1,7 @@
 import functools
 from typing import Optional
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     chainlink_zec_usd_arbitrum_address: str = (
         "0x21082CA28570f0ccfb089465bFaEfDc77b00D367"
     )
-    chainlink_oracle_max_age_seconds: int = 3600
+    chainlink_oracle_max_age_seconds: int = Field(default=3600, gt=0, le=3600)
     base_sequencer_uptime_feed_address: str = (
         "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
     )

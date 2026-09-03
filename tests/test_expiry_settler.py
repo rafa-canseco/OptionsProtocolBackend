@@ -216,7 +216,7 @@ class TestComputeContraAmount:
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
             contra, token_in, token_out = _compute_contra_amount(
-                100_000_000, 250_000_000_000, is_put=True
+                100_000_000, 250_000_000_000, is_put=True, asset="eth"
             )
         assert contra == 100_000_000 * (10**10)  # 1e18
         assert token_in == "0xUSDC"
@@ -231,7 +231,7 @@ class TestComputeContraAmount:
         ):
             mock_web3.to_checksum_address.side_effect = lambda x: x
             contra, token_in, token_out = _compute_contra_amount(
-                100_000_000, 250_000_000_000, is_put=False
+                100_000_000, 250_000_000_000, is_put=False, asset="eth"
             )
         assert contra == 2_500_000_000  # 2500 USDC in 6-dec (2500 * 1e6)
         assert token_in == "0xWETH"
@@ -248,7 +248,9 @@ class TestComputeContraAmount:
             import logging
 
             with caplog.at_level(logging.WARNING, logger="src.bots.expiry_settler"):
-                contra, _, _ = _compute_contra_amount(1, 5_000_000_000, is_put=False)
+                contra, _, _ = _compute_contra_amount(
+                    1, 5_000_000_000, is_put=False, asset="eth"
+                )
         assert contra == 0
         assert "truncated to 0" in caplog.text
 
@@ -487,6 +489,53 @@ class TestPhysicalRedeemWithRetry:
 
         assert tx_hash == "0xTXHASH"
         assert contra == 500
+
+    def test_route_change_requotes_before_single_broadcast(self):
+        pos = {**_itm_position(), "asset": "nvdac"}
+        first_quote = MagicMock(
+            slippage_param=1000,
+            contra_amount=500,
+            fingerprint=("0xold", "0x0", 0),
+        )
+        second_quote = MagicMock(
+            slippage_param=1100,
+            contra_amount=500,
+            fingerprint=("0xnew", "0x0", 0),
+        )
+
+        with (
+            patch.object(settler_module.settings, "settlement_max_retries", 2),
+            patch(
+                "src.bots.expiry_settler._compute_contra_amount",
+                return_value=(500, "0xin", "0xout"),
+            ),
+            patch(
+                "src.bots.expiry_settler.build_route_quote",
+                side_effect=[first_quote, second_quote],
+            ) as quote,
+            patch(
+                "src.bots.expiry_settler.assert_route_unchanged",
+                side_effect=[ValueError("route changed"), None],
+            ) as unchanged,
+            patch(
+                "src.bots.expiry_settler.build_and_send_tx",
+                return_value="0xTXHASH",
+            ) as send,
+            patch("src.bots.expiry_settler.Web3") as mock_web3,
+            patch("src.bots.expiry_settler.asyncio.sleep", return_value=None),
+        ):
+            mock_web3.to_checksum_address.side_effect = lambda value: value
+            result = asyncio.run(
+                _physical_redeem_with_retry(pos, MagicMock(), MagicMock(), None)
+            )
+
+        assert result == ("0xTXHASH", 500)
+        assert quote.call_count == 2
+        assert [call.args[1] for call in unchanged.call_args_list] == [
+            first_quote.fingerprint,
+            second_quote.fingerprint,
+        ]
+        send.assert_called_once()
 
     def test_succeeds_on_second_attempt(self):
         """First attempt fails, second succeeds."""

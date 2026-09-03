@@ -1,8 +1,12 @@
-from unittest.mock import MagicMock, patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
-from src.config import settings
+import src.api.demo as demo_module
+from src.config import Settings, settings
 from src.pricing.assets import get_base_settlement_asset, resolve_base_underlying
 from src.pricing.chainlink import (
     ValidatedChainlinkRound,
@@ -58,6 +62,17 @@ def test_base_underlying_resolution_is_address_based(setting, asset):
 def test_base_underlying_resolution_fails_closed(address):
     with pytest.raises(ValueError):
         resolve_base_underlying(address)  # type: ignore[arg-type]
+
+
+def test_oracle_max_age_configuration_cannot_exceed_one_hour():
+    with pytest.raises(ValidationError, match="chainlink_oracle_max_age_seconds"):
+        Settings(
+            _env_file=None,
+            supabase_url="https://example.invalid",
+            supabase_anon_key="test-anon",
+            supabase_service_role_key="test-service",
+            chainlink_oracle_max_age_seconds=3601,
+        )
 
 
 def test_new_assets_default_off_and_use_explicit_allowlist():
@@ -315,6 +330,32 @@ def test_b20_gates_fail_closed(kwargs, message):
             _validate_b20(cfg, _nvdac_route())
 
 
+def test_routed_oracle_caps_age_and_expiry_window_if_runtime_setting_is_widened():
+    cfg = get_base_settlement_asset("cbzec")
+    route = {
+        **_nvdac_route(),
+        "feed": settings.chainlink_zec_usd_arbitrum_address,
+        "source_chain": 42161,
+        "feed_decimals": 18,
+        "feed_description": "ZEC / USD",
+    }
+    result = ValidatedChainlinkRound(1, 10_000, 18, 10**18)
+    with (
+        patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
+        patch("src.settlement_routing._validate_b20", return_value=10**18),
+        patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
+        patch.object(settings, "chainlink_oracle_max_age_seconds", 7200),
+        patch(
+            "src.settlement_routing.read_validated_chainlink_round",
+            return_value=result,
+        ) as read_round,
+    ):
+        read_new_asset_price_8("cbzec", not_before=8_000, not_after=15_200, now=10_000)
+
+    assert read_round.call_args.kwargs["max_age_seconds"] == 3600
+    assert read_round.call_args.kwargs["not_after"] == 11_600
+
+
 def test_multiplier_applies_before_18_to_8_normalization():
     cfg = get_base_settlement_asset("cbzec")
     route = {
@@ -491,6 +532,70 @@ def test_route_change_is_observational_and_requires_requote():
                 {"asset": "nvdac", "is_put": True},
                 ("0xoriginal", "0x0", 0),
             )
+
+
+def test_demo_eth_settlement_passes_validated_canonical_asset_to_slippage():
+    user = "0x" + "11" * 20
+    otoken_address = "0x" + "22" * 20
+    settler_address = "0x" + "33" * 20
+    strike = 250_000_000_000
+    forced_price = strike * 9 // 10
+
+    controller = MagicMock()
+    controller.functions.getVault.return_value.call.return_value = (
+        otoken_address,
+        settings.usdc_address,
+        100_000_000,
+        1,
+    )
+    controller.functions.vaultSettled.return_value.call.return_value = False
+    otoken = MagicMock()
+    otoken.functions.strikePrice.return_value.call.return_value = strike
+    otoken.functions.expiry.return_value.call.return_value = 2_000_000_000
+    otoken.functions.isPut.return_value.call.return_value = True
+    otoken.functions.underlying.return_value.call.return_value = settings.weth_address
+    oracle = MagicMock()
+    oracle.functions.getExpiryPrice.return_value.call.return_value = (
+        forced_price,
+        True,
+    )
+    settler = MagicMock()
+    account = MagicMock(address="0x" + "44" * 20)
+    w3 = MagicMock()
+    w3.eth.contract.return_value.functions.allowance.return_value.call.return_value = (
+        100_000_000
+    )
+    db = MagicMock()
+    db.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value.data = [
+        {"id": "row"}
+    ]
+    body = SimpleNamespace(
+        user_address=user,
+        vault_id=7,
+        otoken_address=otoken_address,
+        force_itm=True,
+    )
+
+    with (
+        patch("src.api.demo.get_controller", return_value=controller),
+        patch("src.api.demo.get_otoken", return_value=otoken),
+        patch("src.api.demo.get_oracle", return_value=oracle),
+        patch("src.api.demo.get_operator_account", return_value=account),
+        patch("src.api.demo.get_batch_settler", return_value=settler),
+        patch("src.api.demo.get_w3", return_value=w3),
+        patch("src.api.demo.get_client", return_value=db),
+        patch("src.api.demo._wait_for_rpc", new_callable=AsyncMock),
+        patch("src.api.demo.build_and_send_tx", return_value="0xtx"),
+        patch(
+            "src.api.demo.compute_slippage_param", return_value=(1000, 10**18)
+        ) as compute,
+        patch.object(settings, "batch_settler_address", settler_address),
+        patch.object(settings, "mock_chainlink_feed_address", ""),
+    ):
+        response = asyncio.run(demo_module._do_settle(body))
+
+    assert response.settlement_type == "physical"
+    assert compute.call_args.args[0]["asset"] == "eth"
 
 
 def test_impact_and_slippage_integer_boundaries():
