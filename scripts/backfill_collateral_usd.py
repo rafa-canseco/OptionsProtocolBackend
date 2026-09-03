@@ -37,7 +37,10 @@ def _compute_collateral_usd(
 ) -> float:
     """Return collateral_usd for a single row, fetching Chainlink price if needed."""
     is_put = row.get("is_put")
-    asset_str = (row.get("asset") or "eth").lower()
+    asset = row.get("asset")
+    if not isinstance(asset, str):
+        raise ValueError(f"Missing asset for row id={row['id']}")
+    asset_str = asset.lower()
 
     # PUT options are collateralized in USDC — no spot price needed
     if is_put is True or is_put is None:

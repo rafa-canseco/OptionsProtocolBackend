@@ -14,6 +14,13 @@ BATCH_SETTLER_ABI = [
         "stateMutability": "view",
         "type": "function",
     },
+    {
+        "inputs": [],
+        "name": "swapRouter",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # OrderExecuted — emitted by executeOrder().
     # NOTE: if the contracts instance renames this event, update here.
     {
@@ -411,6 +418,37 @@ MOCK_ERC20_MINT_ABI = [
 ]
 
 UNISWAP_V3_QUOTER_ABI = [
+    {
+        "inputs": [],
+        "name": "factory",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "amountIn", "type": "uint256"},
+                    {"name": "fee", "type": "uint24"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            },
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"name": "amountOut", "type": "uint256"},
+            {"name": "sqrtPriceX96After", "type": "uint160"},
+            {"name": "initializedTicksCrossed", "type": "uint32"},
+            {"name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
     # quoteExactOutputSingle — estimate how much input is needed for exact output
     {
         "inputs": [
@@ -434,6 +472,210 @@ UNISWAP_V3_QUOTER_ABI = [
             {"name": "gasEstimate", "type": "uint256"},
         ],
         "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+PAIR_ROUTING_SWAP_ROUTER_ABI = [
+    {
+        "inputs": [
+            {"name": "tokenIn", "type": "address"},
+            {"name": "tokenOut", "type": "address"},
+            {"name": "kind", "type": "uint8"},
+        ],
+        "name": "routeKey",
+        "outputs": [{"name": "", "type": "bytes32"}],
+        "stateMutability": "pure",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "", "type": "bytes32"}],
+        "name": "routes",
+        "outputs": [
+            {"name": "adapter", "type": "address"},
+            {"name": "pendingAdapter", "type": "address"},
+            {"name": "activateAfter", "type": "uint48"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [],
+        "name": "settler",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+SETTLEMENT_ADAPTER_ABI = [
+    *[
+        {
+            "inputs": [],
+            "name": name,
+            "outputs": [{"name": "", "type": output}],
+            "stateMutability": "view",
+            "type": "function",
+        }
+        for name, output in (
+            ("facade", "address"),
+            ("settler", "address"),
+            ("venueRouter", "address"),
+            ("factory", "address"),
+            ("pool", "address"),
+            ("tokenA", "address"),
+            ("tokenB", "address"),
+            ("tickSpacing", "int24"),
+            ("effectiveFee", "uint24"),
+            ("SWAP_ROUTER", "address"),
+            ("USDC", "address"),
+            ("VVV", "address"),
+            ("VVV_FEE", "uint24"),
+        )
+    ]
+]
+
+SETTLEMENT_POOL_ABI = [
+    *[
+        {
+            "inputs": [],
+            "name": name,
+            "outputs": [{"name": "", "type": output}],
+            "stateMutability": "view",
+            "type": "function",
+        }
+        for name, output in (
+            ("token0", "address"),
+            ("token1", "address"),
+            ("factory", "address"),
+            ("tickSpacing", "int24"),
+            ("fee", "uint24"),
+            ("liquidity", "uint128"),
+        )
+    ]
+]
+
+AERODROME_QUOTER_ABI = [
+    {
+        "inputs": [],
+        "name": "factory",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "amountIn", "type": "uint256"},
+                    {"name": "tickSpacing", "type": "int24"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            }
+        ],
+        "name": "quoteExactInputSingle",
+        "outputs": [
+            {"name": "amountOut", "type": "uint256"},
+            {"name": "sqrtPriceX96After", "type": "uint160"},
+            {"name": "initializedTicksCrossed", "type": "uint32"},
+            {"name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {
+                "components": [
+                    {"name": "tokenIn", "type": "address"},
+                    {"name": "tokenOut", "type": "address"},
+                    {"name": "amount", "type": "uint256"},
+                    {"name": "tickSpacing", "type": "int24"},
+                    {"name": "sqrtPriceLimitX96", "type": "uint160"},
+                ],
+                "name": "params",
+                "type": "tuple",
+            }
+        ],
+        "name": "quoteExactOutputSingle",
+        "outputs": [
+            {"name": "amountIn", "type": "uint256"},
+            {"name": "sqrtPriceX96After", "type": "uint160"},
+            {"name": "initializedTicksCrossed", "type": "uint32"},
+            {"name": "gasEstimate", "type": "uint256"},
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+B20_ABI = [
+    *[
+        {
+            "inputs": [],
+            "name": name,
+            "outputs": [{"name": "", "type": output}],
+            "stateMutability": "view",
+            "type": "function",
+        }
+        for name, output in (
+            ("decimals", "uint8"),
+            ("multiplier", "uint256"),
+            ("pausedFeatures", "uint8[]"),
+            ("TRANSFER_SENDER_POLICY", "bytes32"),
+            ("TRANSFER_RECEIVER_POLICY", "bytes32"),
+            ("TRANSFER_EXECUTOR_POLICY", "bytes32"),
+        )
+    ],
+    {
+        "inputs": [{"name": "feature", "type": "uint8"}],
+        "name": "isPaused",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "scope", "type": "bytes32"}],
+        "name": "policyId",
+        "outputs": [{"name": "", "type": "uint64"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+B20_ORACLE_REGISTRY_ABI = [
+    {
+        "inputs": [{"name": "token", "type": "address"}],
+        "name": "getOracleParams",
+        "outputs": [
+            {"name": "multiplier", "type": "uint256"},
+            {"name": "paused", "type": "bool"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    }
+]
+
+B20_POLICY_REGISTRY_ABI = [
+    {
+        "inputs": [{"name": "policyId", "type": "uint64"}],
+        "name": "policyExists",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"name": "policyId", "type": "uint64"},
+            {"name": "account", "type": "address"},
+        ],
+        "name": "isAuthorized",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
         "type": "function",
     },
 ]

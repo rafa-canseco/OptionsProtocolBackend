@@ -58,7 +58,7 @@ def backfill(apply: bool = False) -> None:
     # Group candidates by (user, expiry, asset)
     buckets: dict[tuple, list[dict]] = {}
     for r in rows:
-        key = (r["user_address"], r["expiry"], r.get("asset") or "eth")
+        key = (r["user_address"], r["expiry"], r.get("asset") or "unknown")
         buckets.setdefault(key, []).append(r)
 
     paired = 0

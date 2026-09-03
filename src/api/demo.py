@@ -23,6 +23,7 @@ from web3 import Web3
 
 from src.config import settings
 from src.db.database import get_client
+from src.pricing.assets import resolve_base_underlying
 from src.pricing.chainlink import get_eth_price_raw
 from src.contracts.web3_client import (
     get_oracle,
@@ -231,11 +232,15 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
 
     try:
         otoken = get_otoken(otoken_addr)
-        strike_price, expiry, is_put = await asyncio.gather(
+        strike_price, expiry, is_put, underlying = await asyncio.gather(
             asyncio.to_thread(otoken.functions.strikePrice().call),
             asyncio.to_thread(otoken.functions.expiry().call),
             asyncio.to_thread(otoken.functions.isPut().call),
+            asyncio.to_thread(otoken.functions.underlying().call),
         )
+        asset = resolve_base_underlying(underlying).asset
+        if asset != "eth":
+            raise ValueError(f"Demo settlement only supports ETH, got {asset}")
     except Exception:
         logger.exception(f"Failed to read oToken details for {otoken_addr}")
         raise HTTPException(500, "Failed to read oToken details from chain")
@@ -379,6 +384,7 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
             "strike_price": str(strike_price),
             "is_put": is_put,
             "otoken_address": otoken_addr,
+            "asset": asset,
         }
         try:
             # Approve oToken to BatchSettler if needed (operator must allow pull)
