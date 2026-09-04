@@ -4,8 +4,10 @@ from datetime import datetime, timezone
 
 from web3 import Web3
 
+from src.config import settings
 from src.contracts.web3_client import get_w3
 from src.pricing.assets import Asset, get_asset_config
+from src.pricing.nvdac import is_us_regular_session
 
 logger = logging.getLogger(__name__)
 
@@ -177,11 +179,31 @@ def _get_decimals(asset: Asset) -> int:
     return _decimals_cache[feed_address]
 
 
-def get_asset_price_raw(asset: Asset) -> tuple[int, int, int]:
+def get_asset_price_raw(
+    asset: Asset, *, now: int | None = None
+) -> tuple[int, int, int]:
     """Read raw price from Chainlink for any supported asset.
 
-    Returns (raw_answer, decimals, updated_at_timestamp).
+    Returns (raw_answer, decimals, updated_at_timestamp). NVDAc is available
+    only during the US regular session and must be at most one hour old.
     """
+    if asset == Asset.NVDAC:
+        now = now or int(datetime.now(timezone.utc).timestamp())
+        at = datetime.fromtimestamp(now, timezone.utc)
+        if not is_us_regular_session(at):
+            raise ValueError("NVDAc live Chainlink price unavailable outside session")
+        result = read_validated_chainlink_round(
+            get_w3(),
+            get_asset_config(asset).chainlink_feed_address,
+            expected_chain_id=settings.chain_id,
+            expected_decimals=8,
+            expected_description=settings.chainlink_nvdac_usd_description,
+            max_age_seconds=3600,
+            now=now,
+            sequencer_feed_address=settings.base_sequencer_uptime_feed_address,
+        )
+        return result.raw_answer, result.source_decimals, result.updated_at
+
     feed = _get_feed(asset)
     decimals = _get_decimals(asset)
     (_, answer, _, updated_at, _) = feed.functions.latestRoundData().call()

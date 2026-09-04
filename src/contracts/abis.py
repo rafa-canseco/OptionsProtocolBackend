@@ -322,6 +322,39 @@ ORACLE_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # Tokenized-equity close path; Oracle revalidates the exact latest feed answer.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+            {"name": "_closeAt", "type": "uint256"},
+            {"name": "_nextSessionOpenAt", "type": "uint256"},
+        ],
+        "name": "setExpiryPriceFromClose",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # setMarketHoursAsset(address asset, bool enabled) — owner-only activation.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_enabled", "type": "bool"},
+        ],
+        "name": "setMarketHoursAsset",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # marketHoursAsset(address asset) — read activation state.
+    {
+        "inputs": [{"name": "_asset", "type": "address"}],
+        "name": "marketHoursAsset",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # transferOwnership(address newOwner) — 2-step, step 1
     {
         "inputs": [{"name": "newOwner", "type": "address"}],

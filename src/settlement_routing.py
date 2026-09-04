@@ -1,6 +1,7 @@
 """Fail-closed oracle and route checks for opt-in Base settlement assets."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from web3 import Web3
@@ -20,6 +21,7 @@ from src.contracts.web3_client import (
     get_w3,
 )
 from src.pricing.assets import BaseSettlementAssetConfig, get_base_settlement_asset
+from src.pricing.nvdac import get_finalized_close_window, is_us_regular_session
 from src.pricing.chainlink import (
     normalize_to_8_decimals,
     read_validated_chainlink_round,
@@ -61,6 +63,14 @@ class RouteQuote:
     slippage_param: int
     contra_amount: int
     fingerprint: tuple[str, str, int]
+
+
+@dataclass(frozen=True)
+class NvdacClosePrice:
+    price_8: int
+    adjusted_price_8: int
+    close_at: int
+    next_session_open_at: int
 
 
 def _route_config(asset: str) -> dict[str, Any]:
@@ -247,6 +257,45 @@ def validate_new_asset_participants(
     _validate_b20(cfg, route, participants)
 
 
+def read_nvdac_close_price_8(
+    expiry: int,
+    *,
+    participants: tuple[str, ...] = (),
+    now: int | None = None,
+) -> NvdacClosePrice:
+    """Read the exact Chainlink close answer and its exchange-calendar window."""
+    cfg, route = _require_enabled("nvdac")
+    multiplier = _validate_b20(cfg, route, participants)
+    now = now or int(datetime.now(timezone.utc).timestamp())
+    window = get_finalized_close_window(expiry, now=now)
+    w3, sequencer = _source_w3(route)
+    result = read_validated_chainlink_round(
+        w3,
+        route["feed"],
+        expected_chain_id=route["source_chain"],
+        expected_decimals=route["feed_decimals"],
+        expected_description=route["feed_description"],
+        max_age_seconds=96 * 3600,
+        not_before=window.close_at - MAX_ORACLE_AGE_SECONDS,
+        not_after=window.close_at + MAX_ORACLE_AGE_SECONDS,
+        now=now,
+        sequencer_feed_address=sequencer,
+        sequencer_grace_seconds=settings.arbitrum_sequencer_grace_period_seconds,
+    )
+    price_8 = normalize_to_8_decimals(result.raw_answer, result.source_decimals)
+    if (
+        abs(price_8 - window.reference_price_8) * 10_000
+        > window.reference_price_8 * ORACLE_DEVIATION_BPS
+    ):
+        raise ValueError("NVDA Yahoo-vs-Chainlink close deviation exceeds 100 bps")
+    adjusted = price_8 * multiplier // WAD
+    if price_8 <= 0 or adjusted <= 0:
+        raise ValueError("nvdac Chainlink close or multiplier-adjusted price is zero")
+    return NvdacClosePrice(
+        price_8, adjusted, window.close_at, window.next_session_open_at
+    )
+
+
 def read_new_asset_price_8(
     asset: str,
     *,
@@ -254,8 +303,20 @@ def read_new_asset_price_8(
     not_after: int | None = None,
     participants: tuple[str, ...] = (),
     now: int | None = None,
+    apply_multiplier: bool = True,
 ) -> int:
-    """Read the configured official source and apply the Base token multiplier."""
+    """Read the approved live source for a routed asset.
+
+    NVDAc's finalized close is settlement-only and must be read through
+    ``read_nvdac_close_price_8`` by the expiry setter, never through this
+    live-quote path.
+    """
+    now = now or int(datetime.now(timezone.utc).timestamp())
+    if asset == "nvdac" and not is_us_regular_session(
+        datetime.fromtimestamp(now, timezone.utc)
+    ):
+        raise ValueError("NVDAc live Chainlink price unavailable outside session")
+
     cfg, route = _require_enabled(asset)
     multiplier = _validate_b20(cfg, route, participants)
     w3, sequencer = _source_w3(route)
@@ -280,7 +341,9 @@ def read_new_asset_price_8(
         sequencer_feed_address=sequencer,
         sequencer_grace_seconds=settings.arbitrum_sequencer_grace_period_seconds,
     )
-    adjusted_raw = result.raw_answer * multiplier // WAD
+    adjusted_raw = (
+        result.raw_answer * multiplier // WAD if apply_multiplier else result.raw_answer
+    )
     adjusted = normalize_to_8_decimals(adjusted_raw, result.source_decimals)
     if adjusted <= 0:
         raise ValueError(f"{asset} multiplier-adjusted oracle price is zero")

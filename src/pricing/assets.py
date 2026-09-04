@@ -72,6 +72,8 @@ class AssetConfig:
             return settings.chainlink_eth_usd_address
         if self.symbol == "BTC":
             return settings.chainlink_btc_usd_address
+        if self.symbol == "NVDAc":
+            return settings.chainlink_nvdac_usd_address
         raise ValueError(f"No Chainlink feed for {self.symbol}")
 
     @property

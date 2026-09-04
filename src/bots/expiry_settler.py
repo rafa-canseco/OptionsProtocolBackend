@@ -33,12 +33,14 @@ from src.pricing.assets import (
     resolve_base_underlying,
 )
 from src.pricing.chainlink import get_asset_price_raw
+from src.pricing.nvdac import is_us_regular_session
 from src.settlement_routing import (
     MAX_ORACLE_AGE_SECONDS,
     NEW_SETTLEMENT_ASSETS,
     assert_route_unchanged,
     build_route_quote,
     read_new_asset_price_8,
+    read_nvdac_close_price_8,
     validate_new_asset_participants,
 )
 from src.notifications.email import (
@@ -441,12 +443,15 @@ def _db_update_by_id(order_event_id: str, fields: dict, context: str) -> None:
         )
 
 
-def _ensure_expiry_prices_set(required: set[tuple[str, int]]) -> None:
+def _ensure_expiry_prices_set(
+    required: set[tuple[str, int]], *, now: int | None = None
+) -> None:
     """Submit only required asset/expiry prices to the Base Oracle."""
     if not required:
         return
     oracle = get_oracle()
     account = get_operator_account()
+    now = now or int(datetime.now(timezone.utc).timestamp())
     for asset_name, expiry in sorted(required):
         try:
             cfg = _position_asset_config(asset_name)
@@ -462,18 +467,36 @@ def _ensure_expiry_prices_set(required: set[tuple[str, int]]) -> None:
                     price_raw,
                 )
                 continue
-            if asset_name in NEW_SETTLEMENT_ASSETS:
+            close_price = None
+            expiry_at = datetime.fromtimestamp(expiry, timezone.utc)
+            if asset_name == "nvdac" and not is_us_regular_session(expiry_at):
+                close_price = read_nvdac_close_price_8(expiry, now=now)
+                chainlink_price = close_price.price_8
+            elif asset_name in NEW_SETTLEMENT_ASSETS:
                 chainlink_price = read_new_asset_price_8(
                     asset_name,
                     not_before=expiry,
                     not_after=expiry + MAX_ORACLE_AGE_SECONDS,
+                    now=now if asset_name == "nvdac" else None,
+                    apply_multiplier=asset_name != "nvdac",
                 )
             else:
                 legacy_asset = Asset(asset_name)
                 chainlink_price, decimals, _ = get_asset_price_raw(legacy_asset)
                 if decimals != 8:
                     chainlink_price = chainlink_price * (10**8) // (10**decimals)
-            tx_fn = oracle.functions.setExpiryPrice(underlying, expiry, chainlink_price)
+            if close_price is not None:
+                tx_fn = oracle.functions.setExpiryPriceFromClose(
+                    underlying,
+                    expiry,
+                    chainlink_price,
+                    close_price.close_at,
+                    close_price.next_session_open_at,
+                )
+            else:
+                tx_fn = oracle.functions.setExpiryPrice(
+                    underlying, expiry, chainlink_price
+                )
             tx_hash = build_and_send_tx(tx_fn, account)
             logger.info(
                 "Set %s expiry price %d for expiry %d, tx: %s",
