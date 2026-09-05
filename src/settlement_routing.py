@@ -21,8 +21,14 @@ from src.contracts.web3_client import (
     get_w3,
 )
 from src.pricing.assets import BaseSettlementAssetConfig, get_base_settlement_asset
-from src.pricing.nvdac import get_finalized_close_window, is_us_regular_session
+from src.pricing.nvdac import (
+    CloseWindow,
+    get_finalized_close_window,
+    is_us_regular_session,
+)
 from src.pricing.chainlink import (
+    AGGREGATOR_V3_ABI,
+    ValidatedChainlinkRound,
     normalize_to_8_decimals,
     read_validated_chainlink_round,
 )
@@ -34,6 +40,9 @@ NEW_SETTLEMENT_ASSETS = frozenset({"nvdac", "cbzec", "cbhype", "vvv"})
 ORACLE_DEVIATION_BPS = 100
 EXECUTION_SLIPPAGE_BPS = 30
 MAX_ORACLE_AGE_SECONDS = 3600
+# ponytail: bounded historical scan; replace with a feed-specific round index if a feed can exceed this window.
+_MAX_CLOSE_ROUND_SEARCH = 256
+_CHAINLINK_LOCAL_ROUND_MASK = (1 << 64) - 1
 _FACTORY_GETTER_ABI = [
     {
         "inputs": [],
@@ -71,6 +80,7 @@ class NvdacClosePrice:
     adjusted_price_8: int
     close_at: int
     next_session_open_at: int
+    round_id: int = 0
 
 
 def _route_config(asset: str) -> dict[str, Any]:
@@ -257,6 +267,93 @@ def validate_new_asset_participants(
     _validate_b20(cfg, route, participants)
 
 
+def _iter_prior_chainlink_round_ids(
+    w3: Web3, feed_address: str, latest_round_id: int, limit: int
+):
+    """Yield bounded predecessor IDs, crossing proxy phases without arithmetic gaps."""
+    phase_id, local_round_id = divmod(int(latest_round_id), 1 << 64)
+    remaining = limit
+    while local_round_id > 1 and remaining:
+        local_round_id -= 1
+        yield (phase_id << 64) | local_round_id
+        remaining -= 1
+
+    while phase_id > 0 and remaining:
+        proxy = w3.eth.contract(
+            address=Web3.to_checksum_address(feed_address), abi=AGGREGATOR_V3_ABI
+        )
+        try:
+            previous_aggregator = proxy.functions.phaseAggregators(phase_id - 1).call()
+            previous = w3.eth.contract(
+                address=Web3.to_checksum_address(previous_aggregator),
+                abi=AGGREGATOR_V3_ABI,
+            )
+            previous_local_round_id = int(
+                previous.functions.latestRoundData().call()[0]
+            )
+        except Exception:
+            return
+        if not 0 < previous_local_round_id <= _CHAINLINK_LOCAL_ROUND_MASK:
+            return
+        phase_id -= 1
+        local_round_id = previous_local_round_id
+        while local_round_id and remaining:
+            yield (phase_id << 64) | local_round_id
+            local_round_id -= 1
+            remaining -= 1
+
+
+def _read_nvdac_close_round(
+    route: dict[str, Any],
+    window: CloseWindow,
+    *,
+    w3: Web3,
+    sequencer: str,
+    now: int,
+) -> ValidatedChainlinkRound:
+    """Find the close round even when a later round is now latest."""
+    common = {
+        "expected_chain_id": route["source_chain"],
+        "expected_decimals": route["feed_decimals"],
+        "expected_description": route["feed_description"],
+        "max_age_seconds": 96 * 3600,
+        "now": now,
+        "sequencer_feed_address": sequencer,
+        "sequencer_grace_seconds": settings.arbitrum_sequencer_grace_period_seconds,
+    }
+    latest = read_validated_chainlink_round(w3, route["feed"], **common)
+    candidate = (
+        latest
+        if window.close_at
+        <= latest.updated_at
+        <= window.close_at + MAX_ORACLE_AGE_SECONDS
+        else None
+    )
+    if latest.updated_at < window.close_at:
+        raise ValueError("NVDA official close Chainlink round is not available")
+
+    for round_id in _iter_prior_chainlink_round_ids(
+        w3, route["feed"], latest.round_id, _MAX_CLOSE_ROUND_SEARCH
+    ):
+        try:
+            round_data = read_validated_chainlink_round(
+                w3,
+                route["feed"],
+                **common,
+                round_id=round_id,
+            )
+        except Exception:
+            continue
+        if round_data.updated_at < window.close_at:
+            if candidate is not None:
+                return candidate
+            raise ValueError("NVDA official close Chainlink round is not available")
+        if round_data.updated_at <= window.close_at + MAX_ORACLE_AGE_SECONDS:
+            candidate = round_data
+
+    raise ValueError("NVDA official close Chainlink round is not available")
+
+
 def read_nvdac_close_price_8(
     expiry: int,
     *,
@@ -269,19 +366,7 @@ def read_nvdac_close_price_8(
     now = now or int(datetime.now(timezone.utc).timestamp())
     window = get_finalized_close_window(expiry, now=now)
     w3, sequencer = _source_w3(route)
-    result = read_validated_chainlink_round(
-        w3,
-        route["feed"],
-        expected_chain_id=route["source_chain"],
-        expected_decimals=route["feed_decimals"],
-        expected_description=route["feed_description"],
-        max_age_seconds=96 * 3600,
-        not_before=window.close_at - MAX_ORACLE_AGE_SECONDS,
-        not_after=window.close_at + MAX_ORACLE_AGE_SECONDS,
-        now=now,
-        sequencer_feed_address=sequencer,
-        sequencer_grace_seconds=settings.arbitrum_sequencer_grace_period_seconds,
-    )
+    result = _read_nvdac_close_round(route, window, w3=w3, sequencer=sequencer, now=now)
     price_8 = normalize_to_8_decimals(result.raw_answer, result.source_decimals)
     if (
         abs(price_8 - window.reference_price_8) * 10_000
@@ -292,7 +377,11 @@ def read_nvdac_close_price_8(
     if price_8 <= 0 or adjusted <= 0:
         raise ValueError("nvdac Chainlink close or multiplier-adjusted price is zero")
     return NvdacClosePrice(
-        price_8, adjusted, window.close_at, window.next_session_open_at
+        price_8,
+        adjusted,
+        window.close_at,
+        window.next_session_open_at,
+        result.round_id,
     )
 
 

@@ -17,6 +17,7 @@ from src.pricing.nvdac import (
 )
 from src.settlement_routing import (
     NvdacClosePrice,
+    _iter_prior_chainlink_round_ids,
     read_new_asset_price_8,
     read_nvdac_close_price_8,
 )
@@ -211,7 +212,8 @@ def test_close_price_uses_exact_chainlink_answer_and_one_hour_close_window():
     }
     expiry = _ts(2026, 1, 11, 12)
     window = CloseWindow(_ts(2026, 1, 9, 16), _ts(2026, 1, 12, 9, 30), 123)
-    round_data = ValidatedChainlinkRound(999, window.close_at, 8, 123)
+    round_data = ValidatedChainlinkRound(999, window.close_at, 8, 123, 321)
+    previous_round = ValidatedChainlinkRound(998, window.close_at - 1, 8, 123, 320)
     with (
         patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
         patch("src.settlement_routing._validate_b20", return_value=2 * 10**18),
@@ -219,16 +221,101 @@ def test_close_price_uses_exact_chainlink_answer_and_one_hour_close_window():
         patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
         patch(
             "src.settlement_routing.read_validated_chainlink_round",
-            return_value=round_data,
+            side_effect=[round_data, previous_round],
         ) as read,
     ):
         result = read_nvdac_close_price_8(expiry, now=_ts(2026, 1, 11, 13))
     assert result == NvdacClosePrice(
-        123, 246, window.close_at, window.next_session_open_at
+        123, 246, window.close_at, window.next_session_open_at, 321
     )
-    assert read.call_args.kwargs["not_before"] == window.close_at - 3600
-    assert read.call_args.kwargs["not_after"] == window.close_at + 3600
-    assert read.call_args.kwargs["max_age_seconds"] == 96 * 3600
+    assert "not_before" not in read.call_args_list[0].kwargs
+    assert "not_after" not in read.call_args_list[0].kwargs
+    assert read.call_args_list[0].kwargs["max_age_seconds"] == 96 * 3600
+    assert read.call_args_list[1].kwargs["round_id"] == 320
+
+
+def test_round_scan_crosses_chainlink_phase_boundary():
+    w3 = MagicMock()
+    proxy = MagicMock()
+    previous_aggregator = MagicMock()
+    proxy.functions.phaseAggregators.return_value.call.return_value = "0x" + "11" * 20
+    previous_aggregator.functions.latestRoundData.return_value.call.return_value = (
+        3,
+        1,
+        1,
+        1,
+        3,
+    )
+    w3.eth.contract.side_effect = [proxy, previous_aggregator]
+
+    latest_round_id = (2 << 64) | 1
+    assert list(
+        _iter_prior_chainlink_round_ids(w3, "0x" + "22" * 20, latest_round_id, 3)
+    ) == [
+        (1 << 64) | 3,
+        (1 << 64) | 2,
+        (1 << 64) | 1,
+    ]
+
+
+def test_close_price_reads_historical_round_after_latest_round_moves():
+    cfg = get_base_settlement_asset("nvdac")
+    route = {
+        "source_chain": settings.chain_id,
+        "feed": settings.chainlink_nvdac_usd_address,
+        "feed_decimals": 8,
+        "feed_description": settings.chainlink_nvdac_usd_description,
+    }
+    window = CloseWindow(10_000, 20_000, 1_000)
+    latest = ValidatedChainlinkRound(5_000, 15_000, 8, 5_000, 4)
+    close_round = ValidatedChainlinkRound(1_000, 10_000, 8, 1_000, 2)
+    with (
+        patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
+        patch("src.settlement_routing._validate_b20", return_value=10**18),
+        patch("src.settlement_routing.get_finalized_close_window", return_value=window),
+        patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
+        patch(
+            "src.settlement_routing.read_validated_chainlink_round",
+            side_effect=[
+                latest,
+                ValueError("round unavailable"),
+                close_round,
+                ValidatedChainlinkRound(999, window.close_at - 1, 8, 1_000, 1),
+            ],
+        ) as read,
+    ):
+        result = read_nvdac_close_price_8(5_000, now=6_000)
+    assert result.round_id == 2
+    assert read.call_args_list[1].kwargs["round_id"] == 3
+    assert read.call_args_list[2].kwargs["round_id"] == 2
+    assert read.call_args_list[3].kwargs["round_id"] == 1
+
+
+def test_close_price_uses_first_round_in_close_window():
+    cfg = get_base_settlement_asset("nvdac")
+    route = {
+        "source_chain": settings.chain_id,
+        "feed": settings.chainlink_nvdac_usd_address,
+        "feed_decimals": 8,
+        "feed_description": settings.chainlink_nvdac_usd_description,
+    }
+    window = CloseWindow(10_000, 20_000, 1_200)
+    latest = ValidatedChainlinkRound(1_300, 11_800, 8, 1_300, 4)
+    first_close_round = ValidatedChainlinkRound(1_200, 11_200, 8, 1_200, 3)
+    previous_round = ValidatedChainlinkRound(1_100, 9_999, 8, 1_100, 2)
+    with (
+        patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
+        patch("src.settlement_routing._validate_b20", return_value=10**18),
+        patch("src.settlement_routing.get_finalized_close_window", return_value=window),
+        patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
+        patch(
+            "src.settlement_routing.read_validated_chainlink_round",
+            side_effect=[latest, first_close_round, previous_round],
+        ),
+    ):
+        result = read_nvdac_close_price_8(5_000, now=6_000)
+    assert result.round_id == 3
+    assert result.price_8 == 1_200
 
 
 def test_close_price_rejects_yahoo_chainlink_deviation_over_100_bps():
@@ -247,7 +334,10 @@ def test_close_price_rejects_yahoo_chainlink_deviation_over_100_bps():
         patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
         patch(
             "src.settlement_routing.read_validated_chainlink_round",
-            return_value=ValidatedChainlinkRound(0, 1_000, 8, 10_101),
+            side_effect=[
+                ValidatedChainlinkRound(0, 1_000, 8, 10_101, 321),
+                ValidatedChainlinkRound(0, 999, 8, 10_101, 320),
+            ],
         ),
         pytest.raises(ValueError, match="deviation exceeds 100 bps"),
     ):
@@ -261,11 +351,41 @@ def test_outside_session_close_is_settlement_only():
             read_new_asset_price_8("nvdac", now=now)
 
 
+def test_expiry_setter_requires_legacy_allowlist_for_generic_assets():
+    cfg = get_base_settlement_asset("cbzec")
+    oracle = MagicMock()
+    oracle.functions.getExpiryPrice.return_value.call.return_value = (0, False)
+    oracle.functions.legacyPostExpiryAsset.return_value.call.return_value = True
+    expiry = _ts(2026, 1, 11, 12)
+    with (
+        patch("src.bots.expiry_settler._position_asset_config", return_value=cfg),
+        patch("src.bots.expiry_settler.get_oracle", return_value=oracle),
+        patch(
+            "src.bots.expiry_settler.get_operator_account",
+            return_value=SimpleNamespace(),
+        ),
+        patch(
+            "src.bots.expiry_settler.read_new_asset_price_8",
+            return_value=123,
+        ),
+        patch("src.bots.expiry_settler.build_and_send_tx", return_value="0xtx"),
+    ):
+        _ensure_expiry_prices_set({("cbzec", expiry)}, now=expiry + 1)
+    oracle.functions.setExpiryPrice.assert_called_once_with(
+        cfg.underlying_address, expiry, 123
+    )
+    oracle.functions.setExpiryPriceFromCloseAtRound.assert_not_called()
+
+
 def test_expiry_setter_passes_nvdac_expiry_to_close_policy():
     cfg = get_base_settlement_asset("nvdac")
     oracle = MagicMock()
     oracle.functions.getExpiryPrice.return_value.call.return_value = (0, False)
     expiry = _ts(2026, 1, 11, 12)
+    oracle.functions.closeWindow.return_value.call.return_value = (
+        expiry - 3600,
+        expiry + 3600,
+    )
     with (
         patch("src.bots.expiry_settler._position_asset_config", return_value=cfg),
         patch("src.bots.expiry_settler.get_oracle", return_value=oracle),
@@ -276,17 +396,20 @@ def test_expiry_setter_passes_nvdac_expiry_to_close_policy():
         patch("src.bots.expiry_settler.is_us_regular_session", return_value=False),
         patch(
             "src.bots.expiry_settler.read_nvdac_close_price_8",
-            return_value=NvdacClosePrice(123, 246, expiry - 3600, expiry + 3600),
+            return_value=NvdacClosePrice(123, 246, expiry - 3600, expiry + 3600, 321),
         ) as read_close,
         patch("src.bots.expiry_settler.build_and_send_tx", return_value="0xtx"),
     ):
         _ensure_expiry_prices_set({("nvdac", expiry)}, now=expiry + 1)
-    oracle.functions.setExpiryPriceFromClose.assert_called_once_with(
+    oracle.functions.setExpiryPriceFromCloseAtRound.assert_called_once_with(
         cfg.underlying_address,
         expiry,
         123,
         expiry - 3600,
         expiry + 3600,
+        321,
     )
+    oracle.functions.setExpiryPriceFromClose.assert_not_called()
     oracle.functions.setExpiryPrice.assert_not_called()
     assert read_close.call_args.kwargs["now"] == expiry + 1
+    oracle.functions.closeWindow.assert_called_once_with(cfg.underlying_address, expiry)

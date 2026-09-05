@@ -228,6 +228,53 @@ def test_chainlink_exactly_normalizes_18_to_8_and_accepts_age_boundary():
     assert normalize_to_8_decimals(123456789, 6) == 12345678900
 
 
+def test_chainlink_rejects_different_returned_round_id():
+    w3, feed = _chainlink_w3(updated=6_400)
+    feed.functions.getRoundData.return_value.call.return_value = (
+        7,
+        123 * 10**18,
+        6_399,
+        6_400,
+        7,
+    )
+    with pytest.raises(ValueError, match="different round ID"):
+        read_validated_chainlink_round(
+            w3,
+            settings.chainlink_zec_usd_arbitrum_address,
+            expected_chain_id=42161,
+            expected_decimals=18,
+            expected_description="ZEC / USD",
+            max_age_seconds=3600,
+            now=10_000,
+            round_id=6,
+        )
+
+
+def test_chainlink_reads_explicit_historical_round():
+    w3, feed = _chainlink_w3(updated=6_400)
+    feed.functions.getRoundData.return_value.call.return_value = (
+        6,
+        123 * 10**18,
+        6_399,
+        6_400,
+        6,
+    )
+    result = read_validated_chainlink_round(
+        w3,
+        settings.chainlink_zec_usd_arbitrum_address,
+        expected_chain_id=42161,
+        expected_decimals=18,
+        expected_description="ZEC / USD",
+        max_age_seconds=3600,
+        not_before=6_400,
+        now=10_000,
+        round_id=6,
+    )
+    assert result.round_id == 6
+    feed.functions.latestRoundData.assert_not_called()
+    feed.functions.getRoundData.assert_called_once_with(6)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
