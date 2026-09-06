@@ -322,6 +322,114 @@ ORACLE_ABI = [
         "stateMutability": "nonpayable",
         "type": "function",
     },
+    # setExpiryPriceAtRound(address asset, uint256 expiry, uint256 price, uint80 roundId).
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+            {"name": "_roundId", "type": "uint80"},
+        ],
+        "name": "setExpiryPriceAtRound",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # Tokenized-equity close path; Oracle revalidates an exact Chainlink round.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+            {"name": "_closeAt", "type": "uint256"},
+            {"name": "_nextSessionOpenAt", "type": "uint256"},
+        ],
+        "name": "setExpiryPriceFromClose",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # setExpiryPriceFromCloseAtRound(address asset, uint256 expiry, uint256 price,
+    # uint256 closeAt, uint256 nextSessionOpenAt, uint80 roundId) — operator.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_price", "type": "uint256"},
+            {"name": "_closeAt", "type": "uint256"},
+            {"name": "_nextSessionOpenAt", "type": "uint256"},
+            {"name": "_roundId", "type": "uint80"},
+        ],
+        "name": "setExpiryPriceFromCloseAtRound",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # setMarketHoursAsset(address asset, bool enabled) — owner-only activation.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_enabled", "type": "bool"},
+        ],
+        "name": "setMarketHoursAsset",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # marketHoursAsset(address asset) — read activation state.
+    {
+        "inputs": [{"name": "_asset", "type": "address"}],
+        "name": "marketHoursAsset",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # closeWindow(address asset, uint256 expiry) — read owner precommitment.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+        ],
+        "name": "closeWindow",
+        "outputs": [
+            {"name": "closeAt", "type": "uint256"},
+            {"name": "nextSessionOpenAt", "type": "uint256"},
+        ],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    # setCloseWindow(address asset, uint256 expiry, uint256 closeAt, uint256 nextSessionOpenAt).
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_expiry", "type": "uint256"},
+            {"name": "_closeAt", "type": "uint256"},
+            {"name": "_nextSessionOpenAt", "type": "uint256"},
+        ],
+        "name": "setCloseWindow",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # setLegacyPostExpiryAsset(address asset, bool enabled) — owner-only B1N-496 compatibility.
+    {
+        "inputs": [
+            {"name": "_asset", "type": "address"},
+            {"name": "_enabled", "type": "bool"},
+        ],
+        "name": "setLegacyPostExpiryAsset",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    # legacyPostExpiryAsset(address asset) — read explicit compatibility state.
+    {
+        "inputs": [{"name": "_asset", "type": "address"}],
+        "name": "legacyPostExpiryAsset",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
     # transferOwnership(address newOwner) — 2-step, step 1
     {
         "inputs": [{"name": "newOwner", "type": "address"}],
