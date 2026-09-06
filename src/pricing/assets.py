@@ -32,6 +32,10 @@ class Asset(str, Enum):
     # Base
     ETH = "eth"
     BTC = "btc"
+    NVDAC = "nvdac"
+    CBZEC = "cbzec"
+    CBHYPE = "cbhype"
+    VVV = "vvv"
     # Solana
     SOL = "sol"
     TSLAX = "tslax"
@@ -51,6 +55,7 @@ class AssetConfig:
     # Fallback annualized IV for assets without a Deribit listing.
     # Required when deribit_index is empty; ignored otherwise.
     proxy_iv: float | None = None
+    settlement_only: bool = False
 
     @property
     def has_deribit(self) -> bool:
@@ -67,6 +72,8 @@ class AssetConfig:
             return settings.chainlink_eth_usd_address
         if self.symbol == "BTC":
             return settings.chainlink_btc_usd_address
+        if self.symbol == "NVDAc":
+            return settings.chainlink_nvdac_usd_address
         raise ValueError(f"No Chainlink feed for {self.symbol}")
 
     @property
@@ -76,6 +83,9 @@ class AssetConfig:
             return settings.weth_address
         if self.symbol == "BTC":
             return settings.wbtc_address
+        settlement = BASE_SETTLEMENT_ASSETS.get(self.symbol.lower())
+        if settlement is not None:
+            return settlement.underlying_address
         if self.symbol == "SOL":
             return settings.solana_wsol_mint
         if self.symbol == "TSLAX":
@@ -157,6 +167,20 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         short_expiry_strike_step=500.0,
         num_strikes=5,
     ),
+    **{
+        asset: AssetConfig(
+            symbol=BASE_SETTLEMENT_ASSETS[asset.value].symbol,
+            chain=Chain.BASE,
+            decimals=BASE_SETTLEMENT_ASSETS[asset.value].decimals,
+            deribit_index="",
+            deribit_currency="",
+            strike_step=0,
+            short_expiry_strike_step=0,
+            num_strikes=0,
+            settlement_only=True,
+        )
+        for asset in (Asset.NVDAC, Asset.CBZEC, Asset.CBHYPE, Asset.VVV)
+    },
     # ── Solana ──
     Asset.SOL: AssetConfig(
         symbol="SOL",
@@ -194,7 +218,7 @@ if _missing_pyth:
 _missing_proxy = [
     a.value
     for a, c in ASSET_CONFIGS.items()
-    if not c.has_deribit and c.proxy_iv is None
+    if not c.has_deribit and c.proxy_iv is None and not c.settlement_only
 ]
 if _missing_proxy:
     raise RuntimeError(
@@ -217,7 +241,11 @@ def get_chain_for_asset(asset: Asset) -> Chain:
 
 
 def get_base_assets() -> list[Asset]:
-    return [a for a, c in ASSET_CONFIGS.items() if c.chain == Chain.BASE]
+    return [
+        a
+        for a, c in ASSET_CONFIGS.items()
+        if c.chain == Chain.BASE and not c.settlement_only
+    ]
 
 
 def get_solana_assets() -> list[Asset]:

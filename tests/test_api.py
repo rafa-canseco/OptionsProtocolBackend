@@ -247,9 +247,10 @@ def test_production_defaults_make_tslax_read_only(monkeypatch):
     assert data[0]["quote_id"] is None
 
 
-def test_invisible_asset_returns_404_on_spot(monkeypatch):
+@pytest.mark.parametrize("asset", ["tslax", "nvdac", "cbzec", "cbhype", "vvv"])
+def test_invisible_asset_returns_404_on_spot(monkeypatch, asset):
     monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,btc")
-    response = client.get("/spot?asset=tslax")
+    response = client.get(f"/spot?asset={asset}")
     assert response.status_code == 404
 
 

@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     chainlink_nvdac_usd_description: str = "Coinbase NVDA"
     chainlink_vvv_usd_address: str = "0xaABc55Ca55D70B034e4daA2551A224239890282F"
     chainlink_vvv_usd_description: str = "VVV / USD"
-    chainlink_hype_usd_arbitrum_address: str = (
-        "0xf9ce4fE2F0EcE0362cb416844AE179a49591D567"
+    chainlink_hype_usd_hyperevm_address: str = (
+        "0xa5a72eF19F82A579431186402425593a559ed352"
     )
     chainlink_zec_usd_arbitrum_address: str = (
         "0x21082CA28570f0ccfb089465bFaEfDc77b00D367"
@@ -41,6 +41,8 @@ class Settings(BaseSettings):
         "0xFdB631F5EE196F0ed6FAa767959853A9F217697D"
     )
     arbitrum_sequencer_grace_period_seconds: int = 3600
+    hyperevm_rpc_url: str = ""
+    hyperevm_chain_id: int = 999
 
     # Asset addresses (Base mainnet). Registry membership does not enable markets.
     weth_address: str = "0x4200000000000000000000000000000000000006"

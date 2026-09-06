@@ -114,13 +114,17 @@ class SettleRequest(BaseModel):
         description="Address of the oToken contract for this vault",
         examples=["0xDeF4560000000000000000000000000000000000"],
     )
+    mm_address: str = Field(
+        description="Address of the market maker receiving physical delivery",
+        examples=["0x1234560000000000000000000000000000000000"],
+    )
     force_itm: bool | None = Field(
         default=None,
         description="Force settlement outcome: null = real price, true = force ITM, false = force OTM",
         examples=[None],
     )
 
-    @field_validator("user_address", "otoken_address")
+    @field_validator("user_address", "otoken_address", "mm_address")
     @classmethod
     def validate_eth_address(cls, v: str) -> str:
         if not ETH_ADDRESS_RE.match(v):
@@ -420,6 +424,7 @@ async def _do_settle(body: SettleRequest) -> SettleResponse:
                 user,
                 short_amount,
                 slippage_param,
+                body.mm_address,
             )
             delivery_tx_hash = await asyncio.to_thread(
                 build_and_send_tx, tx_fn, account

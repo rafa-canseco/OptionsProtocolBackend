@@ -19,6 +19,7 @@ dependencies = [
     "anchorpy>=0.20.1",
     "solders>=0.24.0",
     "yfinance>=0.2.50",
+    "exchange-calendars==4.11.1",
 ]
 
 [dependency-groups]

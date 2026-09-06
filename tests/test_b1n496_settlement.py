@@ -7,7 +7,13 @@ from pydantic import ValidationError
 
 import src.api.demo as demo_module
 from src.config import Settings, settings
-from src.pricing.assets import get_base_settlement_asset, resolve_base_underlying
+from src.chains import Chain
+from src.pricing.assets import (
+    Asset,
+    get_base_settlement_asset,
+    get_chain_for_asset,
+    resolve_base_underlying,
+)
 from src.pricing.chainlink import (
     ValidatedChainlinkRound,
     normalize_to_8_decimals,
@@ -18,6 +24,8 @@ from src.settlement_routing import (
     _read_route,
     _read_sqrt_price_x96,
     _require_enabled,
+    _route_config,
+    _source_w3,
     _slippage_limit,
     _spot_quote,
     _validate_b20,
@@ -75,6 +83,107 @@ def test_oracle_max_age_configuration_cannot_exceed_one_hour():
         )
 
 
+@pytest.mark.parametrize(
+    ("asset", "token", "decimals", "pool", "venue", "fee", "spacing", "feed"),
+    [
+        (
+            "nvdac",
+            "0xb20000000000000000000078ee7ce2fE4908108C",
+            8,
+            "0x853F5f1B92b16714Fe6CDA67CAad0856B83C7ab9",
+            "aerodrome",
+            500,
+            10,
+            "0x04689a41629776563E6822F76f2e57D148d28513",
+        ),
+        (
+            "cbzec",
+            "0xB2000000000000000000008501b13360000cb2EC",
+            8,
+            "0x0Fc47C17AF86078d809358db1b4db2DeBC988566",
+            "aerodrome",
+            2000,
+            200,
+            "0x21082CA28570f0ccfb089465bFaEfDc77b00D367",
+        ),
+        (
+            "cbhype",
+            "0xB200000000000000000000451d033a5000cb479e",
+            18,
+            "0xD5Eaea9da564217EA101D1E369fDA168A3025686",
+            "aerodrome",
+            2000,
+            200,
+            "0xa5a72eF19F82A579431186402425593a559ed352",
+        ),
+        (
+            "vvv",
+            "0xacfE6019Ed1A7Dc6f7B508C02d1b04ec88cC21bf",
+            18,
+            "0x67A11022B7B6ed66f81233F6C8Ed6e48F7826530",
+            "uniswap",
+            3000,
+            60,
+            "0xaABc55Ca55D70B034e4daA2551A224239890282F",
+        ),
+    ],
+)
+def test_mainnet_settlement_asset_configuration_is_canonical(
+    asset, token, decimals, pool, venue, fee, spacing, feed
+):
+    cfg = get_base_settlement_asset(asset)
+    route = _route_config(asset)
+    assert cfg.underlying_address == token
+    assert cfg.decimals == decimals
+    assert route["pool"] == pool
+    assert route["venue"] == venue
+    assert route["fee"] == fee
+    assert route["spacing"] == spacing
+    assert route["feed"] == feed
+
+
+def test_foreign_oracle_routes_use_their_canonical_chains_and_feeds():
+    cbzec = _route_config("cbzec")
+    assert cbzec["source_chain"] == 42161
+    assert cbzec["feed"] == "0x21082CA28570f0ccfb089465bFaEfDc77b00D367"
+    assert cbzec["feed_decimals"] == 18
+
+    cbhype = _route_config("cbhype")
+    assert cbhype["source_chain"] == 999
+    assert cbhype["feed"] == "0xa5a72eF19F82A579431186402425593a559ed352"
+    assert cbhype["feed_decimals"] == 8
+
+    foreign_w3 = MagicMock()
+    with patch("src.settlement_routing.get_read_w3", return_value=foreign_w3) as read:
+        assert _source_w3(cbhype) == (foreign_w3, "")
+    read.assert_called_once_with(settings.hyperevm_rpc_url, 999)
+
+
+def test_new_assets_are_api_identifiers_but_remain_disabled_by_default():
+    for name in ("nvdac", "cbzec", "cbhype", "vvv"):
+        assert get_chain_for_asset(Asset(name)) == Chain.BASE
+        assert name not in settings.visible_assets.split(",")
+        assert (
+            settings.tradable_assets is None
+            or name not in settings.tradable_assets.split(",")
+        )
+
+
+def test_settlement_assets_are_excluded_from_publication_and_tradability():
+    from src.config import get_tradable_assets_allowlist
+    from src.pricing.assets import get_base_assets
+
+    published = {a.value for a in get_base_assets()}
+    assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(published)
+
+    with (
+        patch.object(settings, "app_env", "production"),
+        patch.object(settings, "tradable_assets", None),
+    ):
+        tradable = get_tradable_assets_allowlist()
+    assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(tradable)
+
+
 def test_new_assets_default_off_and_use_explicit_allowlist():
     with pytest.raises(ValueError, match="disabled for nvdac"):
         _require_enabled("nvdac")
@@ -117,6 +226,53 @@ def test_chainlink_exactly_normalizes_18_to_8_and_accepts_age_boundary():
     )
     assert result.answer_8dec == 123 * 10**8
     assert normalize_to_8_decimals(123456789, 6) == 12345678900
+
+
+def test_chainlink_rejects_different_returned_round_id():
+    w3, feed = _chainlink_w3(updated=6_400)
+    feed.functions.getRoundData.return_value.call.return_value = (
+        7,
+        123 * 10**18,
+        6_399,
+        6_400,
+        7,
+    )
+    with pytest.raises(ValueError, match="different round ID"):
+        read_validated_chainlink_round(
+            w3,
+            settings.chainlink_zec_usd_arbitrum_address,
+            expected_chain_id=42161,
+            expected_decimals=18,
+            expected_description="ZEC / USD",
+            max_age_seconds=3600,
+            now=10_000,
+            round_id=6,
+        )
+
+
+def test_chainlink_reads_explicit_historical_round():
+    w3, feed = _chainlink_w3(updated=6_400)
+    feed.functions.getRoundData.return_value.call.return_value = (
+        6,
+        123 * 10**18,
+        6_399,
+        6_400,
+        6,
+    )
+    result = read_validated_chainlink_round(
+        w3,
+        settings.chainlink_zec_usd_arbitrum_address,
+        expected_chain_id=42161,
+        expected_decimals=18,
+        expected_description="ZEC / USD",
+        max_age_seconds=3600,
+        not_before=6_400,
+        now=10_000,
+        round_id=6,
+    )
+    assert result.round_id == 6
+    feed.functions.latestRoundData.assert_not_called()
+    feed.functions.getRoundData.assert_called_once_with(6)
 
 
 @pytest.mark.parametrize(
@@ -569,10 +725,12 @@ def test_demo_eth_settlement_passes_validated_canonical_asset_to_slippage():
     db.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value.data = [
         {"id": "row"}
     ]
+    mm_address = "0x" + "55" * 20
     body = SimpleNamespace(
         user_address=user,
         vault_id=7,
         otoken_address=otoken_address,
+        mm_address=mm_address,
         force_itm=True,
     )
 
@@ -596,6 +754,23 @@ def test_demo_eth_settlement_passes_validated_canonical_asset_to_slippage():
 
     assert response.settlement_type == "physical"
     assert compute.call_args.args[0]["asset"] == "eth"
+    assert settler.functions.physicalRedeem.call_args.args == (
+        otoken_address,
+        user,
+        100_000_000,
+        1000,
+        mm_address,
+    )
+
+
+def test_demo_settlement_validates_market_maker_address():
+    with pytest.raises(ValidationError, match="mm_address"):
+        demo_module.SettleRequest(
+            user_address="0x" + "11" * 20,
+            vault_id=1,
+            otoken_address="0x" + "22" * 20,
+            mm_address="not-an-address",
+        )
 
 
 def test_impact_and_slippage_integer_boundaries():
