@@ -74,6 +74,8 @@ class AssetConfig:
             return settings.chainlink_btc_usd_address
         if self.symbol == "NVDAc":
             return settings.chainlink_nvdac_usd_address
+        if self.symbol == "VVV":
+            return settings.chainlink_vvv_usd_address
         raise ValueError(f"No Chainlink feed for {self.symbol}")
 
     @property
@@ -167,20 +169,52 @@ ASSET_CONFIGS: dict[Asset, AssetConfig] = {
         short_expiry_strike_step=500.0,
         num_strikes=5,
     ),
-    **{
-        asset: AssetConfig(
-            symbol=BASE_SETTLEMENT_ASSETS[asset.value].symbol,
-            chain=Chain.BASE,
-            decimals=BASE_SETTLEMENT_ASSETS[asset.value].decimals,
-            deribit_index="",
-            deribit_currency="",
-            strike_step=0,
-            short_expiry_strike_step=0,
-            num_strikes=0,
-            settlement_only=True,
-        )
-        for asset in (Asset.NVDAC, Asset.CBZEC, Asset.CBHYPE, Asset.VVV)
-    },
+    # No Deribit options exist for these underlyings. IV is sourced from
+    # Hyperliquid 30-day realized volatility with a bounded bootstrap fallback.
+    Asset.NVDAC: AssetConfig(
+        symbol="NVDAc",
+        chain=Chain.BASE,
+        decimals=8,
+        deribit_index="",
+        deribit_currency="",
+        strike_step=5.0,
+        short_expiry_strike_step=2.5,
+        num_strikes=5,
+        proxy_iv=0.35,
+    ),
+    Asset.CBZEC: AssetConfig(
+        symbol="cbZEC",
+        chain=Chain.BASE,
+        decimals=8,
+        deribit_index="",
+        deribit_currency="",
+        strike_step=50.0,
+        short_expiry_strike_step=25.0,
+        num_strikes=5,
+        proxy_iv=1.12,
+    ),
+    Asset.CBHYPE: AssetConfig(
+        symbol="cbHYPE",
+        chain=Chain.BASE,
+        decimals=18,
+        deribit_index="",
+        deribit_currency="",
+        strike_step=5.0,
+        short_expiry_strike_step=2.5,
+        num_strikes=5,
+        proxy_iv=0.84,
+    ),
+    Asset.VVV: AssetConfig(
+        symbol="VVV",
+        chain=Chain.BASE,
+        decimals=18,
+        deribit_index="",
+        deribit_currency="",
+        strike_step=1.0,
+        short_expiry_strike_step=0.5,
+        num_strikes=5,
+        proxy_iv=1.11,
+    ),
     # ── Solana ──
     Asset.SOL: AssetConfig(
         symbol="SOL",
@@ -218,7 +252,7 @@ if _missing_pyth:
 _missing_proxy = [
     a.value
     for a, c in ASSET_CONFIGS.items()
-    if not c.has_deribit and c.proxy_iv is None and not c.settlement_only
+    if not c.has_deribit and c.proxy_iv is None
 ]
 if _missing_proxy:
     raise RuntimeError(
@@ -240,11 +274,28 @@ def get_chain_for_asset(asset: Asset) -> Chain:
     return get_asset_config(asset).chain
 
 
+_ROUTED_ASSETS = frozenset((Asset.NVDAC, Asset.CBZEC, Asset.CBHYPE, Asset.VVV))
+
+
 def get_base_assets() -> list[Asset]:
+    routed_allowlist = {
+        name.strip().lower()
+        for name in settings.routed_settlement_assets.split(",")
+        if name.strip()
+    }
     return [
         a
         for a, c in ASSET_CONFIGS.items()
-        if c.chain == Chain.BASE and not c.settlement_only
+        if c.chain == Chain.BASE
+        and not c.settlement_only
+        and (
+            a not in _ROUTED_ASSETS
+            or (
+                settings.routed_settlement_enabled
+                and settings.routed_settlement_publishing_enabled
+                and a.value in routed_allowlist
+            )
+        )
     ]
 
 

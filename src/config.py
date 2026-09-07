@@ -176,6 +176,7 @@ class Settings(BaseSettings):
     # New Base settlement routes are fail-closed until explicitly configured/deployed.
     routed_settlement_enabled: bool = False
     routed_settlement_assets: str = ""
+    routed_settlement_publishing_enabled: bool = False
     pair_routing_swap_router_address: str = ""
     nvdac_settlement_adapter_address: str = ""
     cbzec_settlement_adapter_address: str = ""

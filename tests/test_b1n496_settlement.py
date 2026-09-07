@@ -159,29 +159,40 @@ def test_foreign_oracle_routes_use_their_canonical_chains_and_feeds():
     read.assert_called_once_with(settings.hyperevm_rpc_url, 999)
 
 
-def test_new_assets_are_api_identifiers_but_remain_disabled_by_default():
+def test_new_assets_have_pricing_registry_but_remain_disabled_by_default():
+    from src.pricing.assets import get_base_assets
+
     for name in ("nvdac", "cbzec", "cbhype", "vvv"):
         assert get_chain_for_asset(Asset(name)) == Chain.BASE
         assert name not in settings.visible_assets.split(",")
-        assert (
-            settings.tradable_assets is None
-            or name not in settings.tradable_assets.split(",")
+    assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(
+        {asset.value for asset in get_base_assets()}
+    )
+    with (
+        patch.object(settings, "routed_settlement_enabled", True),
+        patch.object(settings, "routed_settlement_assets", "nvdac,cbzec,cbhype,vvv"),
+    ):
+        assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(
+            {asset.value for asset in get_base_assets()}
+        )
+    with (
+        patch.object(settings, "routed_settlement_enabled", True),
+        patch.object(settings, "routed_settlement_publishing_enabled", True),
+        patch.object(settings, "routed_settlement_assets", "nvdac,cbzec,cbhype,vvv"),
+    ):
+        assert {"nvdac", "cbzec", "cbhype", "vvv"}.issubset(
+            {asset.value for asset in get_base_assets()}
         )
 
 
-def test_settlement_assets_are_excluded_from_publication_and_tradability():
+def test_new_assets_are_tradable_with_explicit_production_allowlist():
     from src.config import get_tradable_assets_allowlist
-    from src.pricing.assets import get_base_assets
-
-    published = {a.value for a in get_base_assets()}
-    assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(published)
 
     with (
         patch.object(settings, "app_env", "production"),
-        patch.object(settings, "tradable_assets", None),
+        patch.object(settings, "tradable_assets", "nvdac,cbzec,cbhype,vvv"),
     ):
-        tradable = get_tradable_assets_allowlist()
-    assert {"nvdac", "cbzec", "cbhype", "vvv"}.isdisjoint(tradable)
+        assert get_tradable_assets_allowlist() == {"nvdac", "cbzec", "cbhype", "vvv"}
 
 
 def test_new_assets_default_off_and_use_explicit_allowlist():
