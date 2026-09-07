@@ -141,24 +141,30 @@ def test_official_close_rejects_age_over_96_hours():
         get_finalized_close_window(int(expiry.timestamp()), now=int(expiry.timestamp()))
 
 
-def test_nvdac_raw_price_returns_chainlink_tuple_only_in_live_session():
-    result = ValidatedChainlinkRound(0, _ts(2026, 1, 6, 10), 8, 19_000_000_000)
+def test_nvdac_raw_price_uses_adjusted_routed_snapshot():
+    updated_at = _ts(2026, 1, 6, 10)
     now = _ts(2026, 1, 6, 10, 30)
-    with (
-        patch("src.pricing.chainlink.get_w3"),
-        patch(
-            "src.pricing.chainlink.read_validated_chainlink_round",
-            return_value=result,
-        ) as read,
-    ):
+    snapshot = SimpleNamespace(price_8=38_000_000_000, updated_at=updated_at)
+    with patch(
+        "src.settlement_routing.read_new_asset_price_snapshot",
+        return_value=snapshot,
+    ) as read:
         assert get_asset_price_raw(Asset.NVDAC, now=now) == (
-            19_000_000_000,
+            38_000_000_000,
             8,
-            result.updated_at,
+            updated_at,
         )
-    assert read.call_args.kwargs["max_age_seconds"] == 3600
+    read.assert_called_once_with("nvdac", now=now)
 
-    with pytest.raises(ValueError, match="outside session"):
+    with (
+        patch(
+            "src.settlement_routing.read_new_asset_price_snapshot",
+            side_effect=ValueError(
+                "NVDAc live Chainlink price unavailable outside session"
+            ),
+        ),
+        pytest.raises(ValueError, match="outside session"),
+    ):
         get_asset_price_raw(Asset.NVDAC, now=_ts(2026, 1, 6, 16))
 
 

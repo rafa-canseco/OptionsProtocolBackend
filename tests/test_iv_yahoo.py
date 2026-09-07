@@ -1,10 +1,11 @@
 """Tests for TSLAx live IV via Yahoo + proxy fallback."""
 
+import time
 from unittest.mock import patch
 
 import pytest
 
-from src.pricing import iv_yahoo
+from src.pricing import iv_proxy, iv_yahoo
 from src.pricing.assets import Asset
 from src.pricing.iv_proxy import get_proxy_iv
 
@@ -75,3 +76,63 @@ class TestGetProxyIVForTSLAX:
         ):
             iv = await get_proxy_iv(Asset.TSLAX)
             assert iv == 0.65
+
+
+class TestHyperliquidIV:
+    @pytest.fixture(autouse=True)
+    def _clear_hyperliquid_cache(self):
+        iv_proxy.clear_cache()
+        yield
+        iv_proxy.clear_cache()
+
+    @pytest.mark.asyncio
+    async def test_uses_hyperliquid_realized_vol_for_base_assets(self):
+        with patch(
+            "src.pricing.iv_proxy.fetch_hyperliquid_realized_iv",
+            return_value=1.1,
+        ) as fetch:
+            assert await get_proxy_iv(Asset.CBZEC) == 1.1
+            fetch.assert_awaited_once_with(Asset.CBZEC)
+
+    @pytest.mark.asyncio
+    async def test_calculates_realized_vol_from_fresh_data(self):
+        now_ms = int(time.time() * 1000)
+        rows = [
+            {
+                "t": now_ms - (500 - i) * 3_600_000,
+                "T": now_ms - (499 - i) * 3_600_000 - 1,
+                "s": "ZEC",
+                "i": "1h",
+                "c": str(100 + (i % 2)),
+            }
+            for i in range(500)
+        ]
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return rows
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, *_args, **_kwargs):
+                return FakeResponse()
+
+        with patch.object(iv_proxy.httpx, "AsyncClient", return_value=FakeClient()):
+            iv = await iv_proxy.fetch_hyperliquid_realized_iv(Asset.CBZEC)
+        assert 0.05 <= iv <= 3.0
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_registered_proxy_when_hyperliquid_is_down(self):
+        with patch(
+            "src.pricing.iv_proxy.fetch_hyperliquid_realized_iv",
+            side_effect=TimeoutError("Hyperliquid down"),
+        ):
+            assert await get_proxy_iv(Asset.CBZEC) == 1.12

@@ -83,6 +83,13 @@ class NvdacClosePrice:
     round_id: int = 0
 
 
+@dataclass(frozen=True)
+class LiveAssetPrice:
+    price_8: int
+    updated_at: int
+    round_id: int
+
+
 def _route_config(asset: str) -> dict[str, Any]:
     configs = {
         "nvdac": {
@@ -385,7 +392,7 @@ def read_nvdac_close_price_8(
     )
 
 
-def read_new_asset_price_8(
+def read_new_asset_price_snapshot(
     asset: str,
     *,
     not_before: int = 0,
@@ -393,13 +400,8 @@ def read_new_asset_price_8(
     participants: tuple[str, ...] = (),
     now: int | None = None,
     apply_multiplier: bool = True,
-) -> int:
-    """Read the approved live source for a routed asset.
-
-    NVDAc's finalized close is settlement-only and must be read through
-    ``read_nvdac_close_price_8`` by the expiry setter, never through this
-    live-quote path.
-    """
+) -> LiveAssetPrice:
+    """Read a routed asset price and its validated Chainlink timestamp."""
     now = now or int(datetime.now(timezone.utc).timestamp())
     if asset == "nvdac" and not is_us_regular_session(
         datetime.fromtimestamp(now, timezone.utc)
@@ -436,7 +438,27 @@ def read_new_asset_price_8(
     adjusted = normalize_to_8_decimals(adjusted_raw, result.source_decimals)
     if adjusted <= 0:
         raise ValueError(f"{asset} multiplier-adjusted oracle price is zero")
-    return adjusted
+    return LiveAssetPrice(adjusted, result.updated_at, result.round_id)
+
+
+def read_new_asset_price_8(
+    asset: str,
+    *,
+    not_before: int = 0,
+    not_after: int | None = None,
+    participants: tuple[str, ...] = (),
+    now: int | None = None,
+    apply_multiplier: bool = True,
+) -> int:
+    """Read the approved live source for a routed asset."""
+    return read_new_asset_price_snapshot(
+        asset,
+        not_before=not_before,
+        not_after=not_after,
+        participants=participants,
+        now=now,
+        apply_multiplier=apply_multiplier,
+    ).price_8
 
 
 def _read_route(
