@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from src.config import get_tokenized_fund_rpc_url, settings
+from src.config import get_tokenized_fund_rpc_url, settings, validate_rpc_url
 from src.fund_indexer.collector import (
     MAX_EVENT_BLOCK_RANGE,
     BlockHeader,
@@ -121,6 +121,7 @@ def main() -> None:
     rpc_url = get_tokenized_fund_rpc_url()
     if not rpc_url:
         raise RuntimeError("TOKENIZED_FUND_RPC_URL or RPC_URL is required")
+    validate_rpc_url("TOKENIZED_FUND_RPC_URL", rpc_url, {"http", "https"})
     coordinator = SupabaseCoordinator()
     rpc = Web3SnapshotRPC(rpc_url)
     # Explicit command only: no daemon loop and no automatic production activation.

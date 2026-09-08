@@ -6,7 +6,7 @@ from web3 import AsyncWeb3, Web3
 from web3.contract import Contract
 from eth_account import Account
 
-from src.config import settings
+from src.config import settings, validate_rpc_url
 from src.contracts.abis import (
     BATCH_SETTLER_ABI,
     OTOKEN_FACTORY_ABI,
@@ -46,14 +46,30 @@ class BroadcastCallbackError(RuntimeError):
         self.tx_hash = tx_hash
 
 
+def create_validated_backend_w3(
+    rpc_url: str,
+    expected_chain_id: int,
+    name: str = "RPC_URL",
+) -> Web3:
+    """Create a positively approved backend provider and verify its chain."""
+    validate_rpc_url(name, rpc_url.strip(), {"http", "https"})
+    if not rpc_url.strip():
+        raise ValueError(f"{name} is not configured")
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    try:
+        observed_chain_id = int(w3.eth.chain_id)
+    except Exception:
+        raise RuntimeError(f"{name} chain validation failed") from None
+    if observed_chain_id != expected_chain_id:
+        raise RuntimeError(f"{name} chain ID mismatch")
+    return w3
+
+
 def get_w3() -> Web3:
     global _w3, _w3_chain_validated
     if _w3 is None:
-        if not settings.rpc_url:
-            raise ValueError(
-                "rpc_url is not configured. Set RPC_URL to the private Base RPC endpoint."
-            )
-        _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
+        _w3 = create_validated_backend_w3(settings.rpc_url, settings.chain_id)
+        _w3_chain_validated = True
     if not _w3_chain_validated:
         try:
             observed_chain_id = int(_w3.eth.chain_id)

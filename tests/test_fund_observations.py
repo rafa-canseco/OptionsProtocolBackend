@@ -1,4 +1,5 @@
 from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 import pytest
 from eth_account import Account
@@ -176,18 +177,13 @@ def test_operational_ingestion_uses_selected_fund_rpc(
         trust_reason=None,
     )
 
-    class FakeWeb3:
-        @staticmethod
-        def HTTPProvider(url):
-            provider_urls.append(url)
-            return ("provider", url)
-
-        def __init__(self, provider):
-            self.provider = provider
+    def provider_factory(url, chain_id, name):
+        provider_urls.append((url, chain_id, name))
+        return SimpleNamespace(provider=("provider", url))
 
     monkeypatch.setattr(settings, "tokenized_fund_rpc_url", dedicated_rpc)
     monkeypatch.setattr(settings, "rpc_url", global_rpc)
-    monkeypatch.setattr(ingestion, "Web3", FakeWeb3)
+    monkeypatch.setattr(ingestion, "create_validated_backend_w3", provider_factory)
     monkeypatch.setattr(
         ingestion,
         "Web3ReporterGateway",
@@ -205,7 +201,7 @@ def test_operational_ingestion_uses_selected_fund_rpc(
     )
 
     assert observer == OBSERVER
-    assert provider_urls == [expected_rpc]
+    assert provider_urls == [(expected_rpc, fund.chain_id, "TOKENIZED_FUND_RPC_URL")]
 
 
 def test_operational_ingestion_rejects_untrusted_or_unknown_fund() -> None:

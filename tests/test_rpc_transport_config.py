@@ -13,6 +13,7 @@ def test_backend_rpc_config_accepts_private_http_and_wss(monkeypatch) -> None:
     monkeypatch.setattr(config.settings, "rpc_url", "https://private.example/rpc")
     monkeypatch.setattr(config.settings, "wss_rpc_url", "wss://private.example/ws")
     monkeypatch.setattr(config.settings, "tokenized_fund_rpc_url", "")
+    monkeypatch.setattr(config.settings, "rpc_approved_hosts", "private.example")
 
     config.validate_backend_rpc_config()
 
@@ -41,6 +42,8 @@ def test_backend_rpc_config_accepts_private_http_and_wss(monkeypatch) -> None:
         ("RPC_URL", "https://mainnet.base.org", ""),
         ("RPC_URL", "https://base-mainnet.g.alchemy.com/v2/key", ""),
         ("RPC_URL", "https://lb.drpc.live/base/key", ""),
+        ("RPC_URL", "https://rpc.ankr.com/base", ""),
+        ("RPC_URL", "https://base-rpc.publicnode.com", ""),
         ("RPC_URL", "https://baserpcgateway-production.up.railway.app.", ""),
         ("RPC_URL", "https://private.example:70000/rpc", ""),
     ],
@@ -51,6 +54,7 @@ def test_backend_rpc_config_rejects_unsafe_transport_without_leaking_url(
     monkeypatch.setattr(config.settings, "rpc_url", rpc_url)
     monkeypatch.setattr(config.settings, "wss_rpc_url", wss_rpc_url)
     monkeypatch.setattr(config.settings, "tokenized_fund_rpc_url", "")
+    monkeypatch.setattr(config.settings, "rpc_approved_hosts", "")
 
     with pytest.raises(ValueError) as error:
         config.validate_backend_rpc_config()
@@ -75,6 +79,7 @@ def test_tokenized_fund_override_rejects_public_gateway(monkeypatch) -> None:
         "tokenized_fund_rpc_url",
         "https://baserpcgateway-production.up.railway.app",
     )
+    monkeypatch.setattr(config.settings, "rpc_approved_hosts", "private.example")
 
     with pytest.raises(ValueError, match="TOKENIZED_FUND_RPC_URL"):
         config.validate_backend_rpc_config()
@@ -84,6 +89,24 @@ def test_websocket_provider_internal_endpoint_logging_is_disabled() -> None:
     provider_logger = logging.getLogger("web3.providers.WebSocketProvider")
 
     assert provider_logger.level >= logging.WARNING
+
+
+def test_tokenized_fund_factory_fails_closed_on_wrong_chain(monkeypatch) -> None:
+    class WrongChainWeb3:
+        HTTPProvider = staticmethod(lambda url: url)
+
+        def __init__(self, _provider):
+            self.eth = SimpleNamespace(chain_id=1)
+
+    monkeypatch.setattr(config.settings, "rpc_approved_hosts", "private.example")
+    monkeypatch.setattr(web3_client, "Web3", WrongChainWeb3)
+
+    with pytest.raises(RuntimeError, match="TOKENIZED_FUND_RPC_URL chain ID mismatch"):
+        web3_client.create_validated_backend_w3(
+            "https://private.example/rpc",
+            8453,
+            "TOKENIZED_FUND_RPC_URL",
+        )
 
 
 def test_global_rpc_fails_closed_on_wrong_chain(monkeypatch) -> None:
