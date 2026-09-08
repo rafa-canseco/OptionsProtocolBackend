@@ -21,7 +21,12 @@ from web3 import AsyncWeb3, Web3, WebSocketProvider
 
 from src.config import settings
 from src.db.database import get_client
-from src.contracts.web3_client import get_batch_settler, get_otoken, get_w3
+from src.contracts.web3_client import (
+    get_batch_settler,
+    get_otoken,
+    get_w3,
+    validate_async_rpc_chain,
+)
 from src.api.mm_ws import notify_mm_fill
 from src.pricing.chainlink import get_asset_price
 from src.pricing.assets import Asset, resolve_base_underlying
@@ -182,11 +187,12 @@ def _enrich_with_otoken_metadata(event_data: dict) -> dict | None:
     """
     try:
         metadata = _load_otoken_metadata(event_data["otoken_address"])
-    except Exception:
-        logger.exception(
-            "Could not read oToken metadata for %s. "
+    except Exception as exc:
+        logger.error(
+            "Could not read oToken metadata for %s (%s). "
             "Skipping storage until next rescan.",
             event_data["otoken_address"],
+            type(exc).__name__,
         )
         return None
     if metadata is None:
@@ -542,12 +548,13 @@ def _build_delivery_event_data(ev) -> dict | None:
                 underlying,
             )
             return None
-    except Exception:
-        logger.exception(
-            "Could not load oToken metadata for %s (tx=%s). "
+    except Exception as exc:
+        logger.error(
+            "Could not load oToken metadata for %s (tx=%s, error=%s). "
             "Skipping delivery update for this event.",
             otoken_addr,
             ev.transactionHash.hex(),
+            type(exc).__name__,
         )
         return None
 
@@ -672,12 +679,13 @@ async def index_once():
                     "Re-scan updated %d delivery events",
                     rescued_delivery,
                 )
-        except Exception:
-            logger.exception(
-                "Re-scan pass failed for blocks %d-%d. "
+        except Exception as exc:
+            logger.error(
+                "Re-scan pass failed for blocks %d-%d (%s). "
                 "Forward pass succeeded. Will retry re-scan on next cycle.",
                 rescan_from,
                 rescan_to,
+                type(exc).__name__,
             )
 
 
@@ -848,15 +856,17 @@ async def _subscription_loop() -> None:
         # Catchup: process any blocks missed while disconnected
         try:
             await index_once()
-        except Exception:
-            logger.exception(
-                "getLogs catchup failed before subscribe. "
+        except Exception as exc:
+            logger.error(
+                "getLogs catchup failed before subscribe (%s). "
                 "Events between last_indexed_block and now may be missed "
-                "until the next reconnect catchup cycle."
+                "until the next reconnect catchup cycle.",
+                type(exc).__name__,
             )
 
         try:
             async with AsyncWeb3(WebSocketProvider(wss_url)) as ws_w3:
+                await validate_async_rpc_chain(ws_w3, settings.chain_id)
                 sub_id = await ws_w3.eth.subscribe(
                     "logs",
                     {"address": settler_address},
@@ -878,18 +888,20 @@ async def _subscription_loop() -> None:
                         continue
                     try:
                         _process_subscription_log(settler, log)
-                    except Exception:
-                        logger.exception(
-                            "Failed to process subscription log: %s",
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to process subscription log %s (%s)",
                             log.get("transactionHash", "unknown"),
+                            type(exc).__name__,
                         )
 
         except asyncio.CancelledError:
             logger.info("Subscription loop cancelled, shutting down")
             return
-        except Exception:
-            logger.exception(
-                "WebSocket subscription error, reconnecting in %ds",
+        except Exception as exc:
+            logger.error(
+                "WebSocket subscription error (%s), reconnecting in %ds",
+                type(exc).__name__,
                 backoff,
             )
 
@@ -918,6 +930,6 @@ async def run():
         while True:
             try:
                 await index_once()
-            except Exception:
-                logger.exception("Event indexing failed")
+            except Exception as exc:
+                logger.error("Event indexing failed (%s)", type(exc).__name__)
             await asyncio.sleep(settings.event_poll_interval_seconds)

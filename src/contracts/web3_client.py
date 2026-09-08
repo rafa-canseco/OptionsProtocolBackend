@@ -2,7 +2,7 @@ import logging
 import threading
 from collections.abc import Callable
 
-from web3 import Web3
+from web3 import AsyncWeb3, Web3
 from web3.contract import Contract
 from eth_account import Account
 
@@ -28,8 +28,11 @@ from src.contracts.abis import (
 )
 
 logger = logging.getLogger(__name__)
+# Web3 logs credential-bearing WSS endpoint URIs at INFO during connect/retry.
+logging.getLogger("web3.providers.WebSocketProvider").setLevel(logging.WARNING)
 
 _w3: Web3 | None = None
+_w3_chain_validated = False
 _read_w3: dict[tuple[str, int], Web3] = {}
 _nonce_lock = threading.Lock()
 _local_nonce: dict[str, int] = {}  # address → next nonce (monotonic)
@@ -44,15 +47,32 @@ class BroadcastCallbackError(RuntimeError):
 
 
 def get_w3() -> Web3:
-    global _w3
+    global _w3, _w3_chain_validated
     if _w3 is None:
         if not settings.rpc_url:
             raise ValueError(
-                "rpc_url is not configured. Set the RPC_URL environment variable "
-                "to a Base mainnet HTTP endpoint (e.g. from Alchemy or Infura)."
+                "rpc_url is not configured. Set RPC_URL to the private Base RPC endpoint."
             )
         _w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
+    if not _w3_chain_validated:
+        try:
+            observed_chain_id = int(_w3.eth.chain_id)
+        except Exception:
+            raise RuntimeError("Configured Base RPC chain validation failed") from None
+        if observed_chain_id != settings.chain_id:
+            raise RuntimeError("Configured Base RPC chain ID mismatch")
+        _w3_chain_validated = True
     return _w3
+
+
+async def validate_async_rpc_chain(w3: AsyncWeb3, expected_chain_id: int) -> None:
+    """Fail closed before subscribing through a wrong-chain WSS provider."""
+    try:
+        observed_chain_id = int(await w3.eth.chain_id)
+    except Exception:
+        raise RuntimeError("Configured Base WSS chain validation failed") from None
+    if observed_chain_id != expected_chain_id:
+        raise RuntimeError("Configured Base WSS chain ID mismatch")
 
 
 def get_read_w3(rpc_url: str, expected_chain_id: int) -> Web3:
@@ -285,8 +305,13 @@ def _sign_send_and_confirm(
                     )
                     continue
                 logger.error(
-                    f"send_raw_transaction failed: nonce={nonce}, maxFee={max_fee}, "
-                    f"attempt={attempt + 1}/{max_retries}, error={e}"
+                    "send_raw_transaction failed: nonce=%s, maxFee=%s, "
+                    "attempt=%s/%s, error=%s",
+                    nonce,
+                    max_fee,
+                    attempt + 1,
+                    max_retries,
+                    type(e).__name__,
                 )
                 raise
         if on_broadcast is not None:
@@ -357,7 +382,11 @@ def build_and_send_tx(
     try:
         gas_estimate = contract_fn.estimate_gas({"from": account.address})
     except Exception as e:
-        logger.error(f"Gas estimation failed for tx from {account.address}: {e}")
+        logger.error(
+            "Gas estimation failed for tx from %s: %s",
+            account.address,
+            type(e).__name__,
+        )
         raise
     gas_limit = int(gas_estimate * 2)
 
