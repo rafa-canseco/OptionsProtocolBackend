@@ -3,9 +3,8 @@
 from collections.abc import Callable
 from typing import Any
 
-from web3 import Web3
-
 from src.config import get_tokenized_fund_rpc_url
+from src.contracts.web3_client import create_validated_backend_w3
 from src.fund_nav.observations import ObservationIngestor, OptionObservation
 from src.fund_nav.runtime import (
     IdempotentObservationStore,
@@ -45,7 +44,11 @@ def ingest_observation_document(
         rpc_url = get_tokenized_fund_rpc_url()
         if not rpc_url:
             raise RuntimeError("TOKENIZED_FUND_RPC_URL_OR_RPC_URL_REQUIRED")
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        w3 = create_validated_backend_w3(
+            rpc_url,
+            fund.chain_id,
+            "TOKENIZED_FUND_RPC_URL",
+        )
 
         def build_gateway(selected: TrustedFund) -> Web3ReporterGateway:
             return Web3ReporterGateway(w3, selected, repository)

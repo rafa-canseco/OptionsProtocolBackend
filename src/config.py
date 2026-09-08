@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     rpc_url: str = ""
     tokenized_fund_rpc_url: str = ""
     wss_rpc_url: str = ""  # WSS RPC — enables eth_subscribe when set
+    rpc_approved_hosts: str = ""
     chainlink_eth_usd_address: str = (
         "0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70"  # Base mainnet
     )
@@ -319,7 +320,7 @@ _PUBLIC_BASE_RPC_HOSTS = {
     "baserpcgateway-production.up.railway.app",
     "mainnet.base.org",
 }
-_PUBLIC_RPC_SUFFIXES = (".alchemy.com", ".alchemyapi.io", ".drpc.live")
+_LOCAL_RPC_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def validate_rpc_url(name: str, value: str, schemes: set[str]) -> None:
@@ -340,8 +341,23 @@ def validate_rpc_url(name: str, value: str, schemes: set[str]) -> None:
         hostname = ""
     if not valid:
         raise ValueError(f"{name} must be a valid {'/'.join(sorted(schemes))} URL")
-    if hostname in _PUBLIC_BASE_RPC_HOSTS or hostname.endswith(_PUBLIC_RPC_SUFFIXES):
+    if hostname in _PUBLIC_BASE_RPC_HOSTS:
         raise ValueError(f"{name} must use the private authenticated Base RPC route")
+    approved_hosts = {
+        item.strip().rstrip(".").lower()
+        for item in settings.rpc_approved_hosts.split(",")
+        if item.strip()
+    }
+    reserved_test_host = hostname.endswith(".example") and settings.app_env.lower() in {
+        "dev",
+        "test",
+    }
+    if (
+        hostname not in _LOCAL_RPC_HOSTS
+        and hostname not in approved_hosts
+        and not reserved_test_host
+    ):
+        raise ValueError(f"{name} host is not approved for backend RPC use")
 
 
 def validate_backend_rpc_config() -> None:

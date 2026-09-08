@@ -241,6 +241,11 @@ async def test_slow_fund_does_not_delay_peer_and_worker_clients_close(
         "get_tokenized_fund_rpc_url",
         lambda: "https://fund-rpc.example",
     )
+    monkeypatch.setattr(
+        indexer,
+        "create_validated_backend_w3",
+        lambda *_args: object(),
+    )
     monkeypatch.setattr(indexer, "_create_worker_client", create_client)
     monkeypatch.setattr(
         indexer,
@@ -301,6 +306,11 @@ async def test_fund_worker_error_does_not_stop_peer(monkeypatch, registry) -> No
     )
     monkeypatch.setattr(
         indexer,
+        "create_validated_backend_w3",
+        lambda *_args: object(),
+    )
+    monkeypatch.setattr(
+        indexer,
         "_create_worker_client",
         ClosableWorkerClient,
     )
@@ -331,14 +341,9 @@ async def test_workers_construct_provider_from_selected_fund_rpc(
     cycle_ran = asyncio.Event()
     loop = asyncio.get_running_loop()
 
-    class FakeWeb3:
-        @staticmethod
-        def HTTPProvider(url):
-            provider_urls.append(url)
-            return ("provider", url)
-
-        def __init__(self, provider):
-            self.provider = provider
+    def provider_factory(url, chain_id, name):
+        provider_urls.append((url, chain_id, name))
+        return SimpleNamespace(provider=("provider", url))
 
     def index_cycle(w3, *_args):
         assert w3.provider == ("provider", "https://fund-rpc.example")
@@ -349,7 +354,7 @@ async def test_workers_construct_provider_from_selected_fund_rpc(
         "get_tokenized_fund_rpc_url",
         lambda: "https://fund-rpc.example",
     )
-    monkeypatch.setattr(indexer, "Web3", FakeWeb3)
+    monkeypatch.setattr(indexer, "create_validated_backend_w3", provider_factory)
     monkeypatch.setattr(
         indexer,
         "_create_worker_client",
@@ -371,7 +376,9 @@ async def test_workers_construct_provider_from_selected_fund_rpc(
     task.cancel()
     await task
 
-    assert provider_urls == ["https://fund-rpc.example"]
+    assert provider_urls == [
+        ("https://fund-rpc.example", registry.chain_id, "TOKENIZED_FUND_RPC_URL")
+    ]
 
 
 @pytest.mark.asyncio
@@ -394,6 +401,7 @@ async def test_indexer_worker_failure_backoff_caps_and_resets(
             raise asyncio.CancelledError
 
     monkeypatch.setattr(indexer, "_create_worker_client", ClosableWorkerClient)
+    monkeypatch.setattr(indexer, "create_validated_backend_w3", lambda *_args: object())
     monkeypatch.setattr(indexer, "_index_registry_once", index_once)
     monkeypatch.setattr(
         indexer.settings, "tokenized_fund_indexer_poll_interval_seconds", 200
@@ -426,6 +434,7 @@ async def test_indexer_worker_refreshes_only_on_bounded_interval(
             raise asyncio.CancelledError
 
     monkeypatch.setattr(indexer, "_create_worker_client", ClosableWorkerClient)
+    monkeypatch.setattr(indexer, "create_validated_backend_w3", lambda *_args: object())
     monkeypatch.setattr(indexer, "_monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(indexer, "_load_registry_identity", refresh)
     monkeypatch.setattr(

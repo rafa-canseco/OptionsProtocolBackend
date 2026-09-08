@@ -123,14 +123,9 @@ def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
     built_gateway = object()
     built_reporter = SimpleNamespace(run_once=lambda: ReportRun(status="confirmed"))
 
-    class FakeWeb3:
-        @staticmethod
-        def HTTPProvider(url):
-            provider_urls.append(url)
-            return ("provider", url)
-
-        def __init__(self, provider):
-            self.provider = provider
+    def provider_factory(url, chain_id, name):
+        provider_urls.append((url, chain_id, name))
+        return SimpleNamespace(provider=("provider", url))
 
     fund = TrustedFund(
         registry={
@@ -147,7 +142,7 @@ def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
         "get_tokenized_fund_rpc_url",
         lambda: "https://fund-rpc.example",
     )
-    monkeypatch.setattr(runtime, "Web3", FakeWeb3)
+    monkeypatch.setattr(runtime, "create_validated_backend_w3", provider_factory)
     monkeypatch.setattr(
         runtime,
         "Web3ReporterGateway",
@@ -181,7 +176,9 @@ def test_runtime_reporter_constructs_provider_from_selected_fund_rpc(
     reporter = runtime._build_fund_reporter(Repository(), fund)
 
     assert reporter.reporter is built_reporter
-    assert provider_urls == ["https://fund-rpc.example"]
+    assert provider_urls == [
+        ("https://fund-rpc.example", fund.chain_id, "TOKENIZED_FUND_RPC_URL")
+    ]
 
 
 def test_meta_wheel_reporting_gate_accepts_only_canonical_accounting_operator() -> None:
@@ -457,15 +454,11 @@ def test_meta_wheel_reporter_uses_only_wheel_credentials(monkeypatch) -> None:
     monkeypatch.setattr(runtime, "meta_wheel_producer_gate_reason", lambda *_: None)
     monkeypatch.setattr(runtime, "get_tokenized_fund_rpc_url", lambda: "http://rpc")
 
-    class FakeWeb3:
-        @staticmethod
-        def HTTPProvider(url):
-            return url
-
-        def __init__(self, provider):
-            self.provider = provider
-
-    monkeypatch.setattr(runtime, "Web3", FakeWeb3)
+    monkeypatch.setattr(
+        runtime,
+        "create_validated_backend_w3",
+        lambda url, *_args: SimpleNamespace(provider=url),
+    )
     monkeypatch.setattr(
         runtime,
         "get_meta_wheel_observer_private_keys",

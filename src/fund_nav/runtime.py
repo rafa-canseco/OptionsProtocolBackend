@@ -30,6 +30,7 @@ from src.config import (
     settings,
     validate_meta_wheel_credential_topology,
 )
+from src.contracts.web3_client import create_validated_backend_w3
 from src.db.database import get_client
 from src.fund_nav.abis import (
     ACCESS_ABI,
@@ -2239,7 +2240,11 @@ def _build_fund_reporter(repository, fund):
     gate_reason = gate_reason or meta_wheel_producer_gate_reason(fund.registry)
     if gate_reason:
         return BlockedReporter(repository, fund, gate_reason)
-    w3 = Web3(Web3.HTTPProvider(get_tokenized_fund_rpc_url()))
+    w3 = create_validated_backend_w3(
+        get_tokenized_fund_rpc_url(),
+        fund.chain_id,
+        "TOKENIZED_FUND_RPC_URL",
+    )
     is_csp = strategy_kind == "csp"
     wheel_contexts: dict[str, ValuationContext] = {}
     if strategy_kind == "meta_wheel":
