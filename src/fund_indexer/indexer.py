@@ -11,6 +11,7 @@ from web3 import Web3
 from web3._utils.events import get_event_data
 
 from src.config import get_tokenized_fund_rpc_url, settings
+from src.contracts.web3_client import create_validated_backend_w3
 from src.db.database import get_client
 from src.fund_indexer.abis import EVENTS_BY_TOPIC
 from src.fund_indexer.models import FundEvent, normalize_address
@@ -995,7 +996,11 @@ async def _run_registry_worker(
     chain_id = bootstrap_registry.chain_id
     fund_address = bootstrap_registry.fund_address
     client = _create_worker_client()
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3 = create_validated_backend_w3(
+        rpc_url,
+        chain_id,
+        "TOKENIZED_FUND_RPC_URL",
+    )
     executor = ThreadPoolExecutor(
         max_workers=1,
         thread_name_prefix=f"fund-index-{fund_address[-6:]}",

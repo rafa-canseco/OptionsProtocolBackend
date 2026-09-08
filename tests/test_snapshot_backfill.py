@@ -1,5 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
+
+from src.fund_indexer import backfill
 from src.fund_indexer.backfill import run_once
 
 
@@ -93,6 +96,22 @@ class RPC:
         assert traffic_class == "backfill_rpc"
         self.log_calls += 1
         return []
+
+
+def test_standalone_backfill_rejects_public_rpc_before_db_access(monkeypatch) -> None:
+    monkeypatch.setattr(
+        backfill,
+        "get_tokenized_fund_rpc_url",
+        lambda: "https://baserpcgateway-production.up.railway.app",
+    )
+    monkeypatch.setattr(
+        backfill,
+        "SupabaseCoordinator",
+        lambda: pytest.fail("DB accessed before RPC policy validation"),
+    )
+
+    with pytest.raises(ValueError, match="private authenticated Base RPC"):
+        backfill.main()
 
 
 def test_backfill_wrong_chain_fails_before_work_claim() -> None:
