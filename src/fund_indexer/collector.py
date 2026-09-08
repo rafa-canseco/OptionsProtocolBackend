@@ -17,7 +17,7 @@ import httpx
 from hexbytes import HexBytes
 from web3 import Web3
 
-from src.config import get_tokenized_fund_rpc_url, settings
+from src.config import get_tokenized_fund_rpc_url, settings, validate_rpc_url
 from src.db.database import get_client
 from src.fund_indexer.abis import EVENTS_BY_TOPIC
 from src.fund_indexer.indexer import (
@@ -1231,6 +1231,7 @@ def create_validated_rpc(
     environment: str, chain_id: int, rpc_url: str | None = None
 ) -> Web3SnapshotRPC:
     resolved_url = rpc_url or get_tokenized_fund_rpc_url()
+    validate_rpc_url("TOKENIZED_FUND_RPC_URL", resolved_url, {"http", "https"})
     if not resolved_url:
         _set_startup_health(environment, chain_id, False)
         raise RuntimeError(
