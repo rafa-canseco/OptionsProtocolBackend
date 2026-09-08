@@ -19,6 +19,7 @@ from src.contracts.web3_client import (
     get_controller_yield,
     get_margin_pool,
     get_w3,
+    validate_async_rpc_chain,
 )
 from src.db.database import get_client
 
@@ -225,9 +226,11 @@ def _fetch_and_process_logs(from_block: int, to_block: int) -> int:
     for log_entry in all_logs:
         try:
             _process_log(log_entry)
-        except Exception:
-            logger.exception(
-                "Failed to process yield log at block %d", log_entry["blockNumber"]
+        except Exception as exc:
+            logger.error(
+                "Failed to process yield log at block %d (%s)",
+                log_entry["blockNumber"],
+                type(exc).__name__,
             )
 
     return len(all_logs)
@@ -242,6 +245,7 @@ async def _subscribe_wss() -> None:
     while True:
         try:
             async with AsyncWeb3(WebSocketProvider(settings.wss_rpc_url)) as w3:
+                await validate_async_rpc_chain(w3, settings.chain_id)
                 controller_sub = await w3.eth.subscribe(
                     "logs",
                     {
@@ -277,11 +281,18 @@ async def _subscribe_wss() -> None:
                         _process_log(msg["result"])
                         block_num = msg["result"]["blockNumber"]
                         _set_last_indexed_block(block_num)
-                    except Exception:
-                        logger.exception("Failed to process WSS yield log")
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to process WSS yield log (%s)",
+                            type(exc).__name__,
+                        )
 
-        except Exception:
-            logger.exception("Yield WSS connection failed, reconnecting in %ds", delay)
+        except Exception as exc:
+            logger.error(
+                "Yield WSS connection failed (%s), reconnecting in %ds",
+                type(exc).__name__,
+                delay,
+            )
             await asyncio.sleep(delay)
             delay = min(delay * 2, MAX_RECONNECT_DELAY)
 
@@ -331,5 +342,8 @@ async def run() -> None:
                     _fetch_and_process_logs(current_block + 1, new_block)
                     _set_last_indexed_block(new_block)
                     current_block = new_block
-            except Exception:
-                logger.exception("Yield poll cycle failed, retrying next interval")
+            except Exception as exc:
+                logger.error(
+                    "Yield poll cycle failed (%s), retrying next interval",
+                    type(exc).__name__,
+                )

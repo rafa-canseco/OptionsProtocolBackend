@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,13 +32,55 @@ from src.config import (
     has_bridge_config,
     has_enabled_solana_bots,
     is_solana_bot_enabled,
+    validate_backend_rpc_config,
     validate_meta_wheel_credential_topology,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+_LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+
+
+class _RpcEndpointRedactingFormatter(logging.Formatter):
+    def __init__(self, *args, endpoints: tuple[str | None, ...], **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        sensitive_parts: list[str] = []
+        for endpoint in endpoints:
+            if not endpoint:
+                continue
+            parsed = urlsplit(endpoint)
+            sensitive_parts.append(endpoint)
+            if parsed.netloc:
+                sensitive_parts.append(parsed.netloc)
+            if parsed.hostname:
+                sensitive_parts.append(parsed.hostname)
+            if parsed.path not in ("", "/"):
+                sensitive_parts.append(parsed.path)
+            if parsed.query:
+                sensitive_parts.append(f"?{parsed.query}")
+        self.sensitive_parts = tuple(
+            sorted(set(sensitive_parts), key=len, reverse=True)
+        )
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        for endpoint in self.sensitive_parts:
+            rendered = rendered.replace(endpoint, "[REDACTED_RPC_ENDPOINT]")
+        return rendered
+
+
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT)
+_formatter = _RpcEndpointRedactingFormatter(
+    _LOG_FORMAT,
+    endpoints=(
+        settings.rpc_url,
+        settings.wss_rpc_url,
+        settings.tokenized_fund_rpc_url,
+        settings.solana_rpc_url,
+        settings.solana_wss_rpc_url,
+    ),
 )
+for _handler in logging.getLogger().handlers:
+    _handler.setFormatter(_formatter)
+
 logger = logging.getLogger(__name__)
 
 SUPPORTED_LAZY_OTOKEN_CHAIN_IDS = {8453, 84532}
@@ -329,6 +372,11 @@ async def lifespan(app: FastAPI):
             "CORS is configured to allow all origins ('*'). "
             "Set ALLOWED_ORIGINS to your production domain(s) before deploying to mainnet."
         )
+
+    try:
+        validate_backend_rpc_config()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from None
 
     if not settings.background_workers_enabled:
         logger.warning(

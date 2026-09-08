@@ -1,5 +1,6 @@
 import functools
 from typing import Optional
+from urllib.parse import urlsplit
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -312,6 +313,46 @@ def get_protocol_fee_bps(chain: str) -> int:
 def get_tokenized_fund_rpc_url() -> str:
     """Return the isolated fund RPC when configured, otherwise the global RPC."""
     return settings.tokenized_fund_rpc_url.strip() or settings.rpc_url.strip()
+
+
+_PUBLIC_BASE_RPC_HOSTS = {
+    "baserpcgateway-production.up.railway.app",
+    "mainnet.base.org",
+}
+_PUBLIC_RPC_SUFFIXES = (".alchemy.com", ".alchemyapi.io", ".drpc.live")
+
+
+def validate_rpc_url(name: str, value: str, schemes: set[str]) -> None:
+    """Reject malformed or public Base endpoints without echoing secrets."""
+    if not value:
+        return
+    try:
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        port = parsed.port
+        valid = (
+            parsed.scheme.lower() in schemes
+            and bool(hostname)
+            and (port is None or 1 <= port <= 65_535)
+        )
+    except ValueError:
+        valid = False
+        hostname = ""
+    if not valid:
+        raise ValueError(f"{name} must be a valid {'/'.join(sorted(schemes))} URL")
+    if hostname in _PUBLIC_BASE_RPC_HOSTS or hostname.endswith(_PUBLIC_RPC_SUFFIXES):
+        raise ValueError(f"{name} must use the private authenticated Base RPC route")
+
+
+def validate_backend_rpc_config() -> None:
+    """Validate backend transports without exposing endpoint values in errors."""
+    validate_rpc_url("RPC_URL", settings.rpc_url.strip(), {"http", "https"})
+    validate_rpc_url("WSS_RPC_URL", settings.wss_rpc_url.strip(), {"ws", "wss"})
+    validate_rpc_url(
+        "TOKENIZED_FUND_RPC_URL",
+        settings.tokenized_fund_rpc_url.strip(),
+        {"http", "https"},
+    )
 
 
 def get_fund_nav_reporter_private_keys() -> tuple[str, ...]:
