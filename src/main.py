@@ -30,8 +30,6 @@ from src.config import (
     settings,
     has_solana_config,
     has_bridge_config,
-    has_enabled_solana_bots,
-    is_solana_bot_enabled,
     validate_backend_rpc_config,
     validate_meta_wheel_credential_topology,
 )
@@ -510,33 +508,52 @@ async def lifespan(app: FastAPI):
     tasks = []
 
     configured_series_mode = settings.otoken_series_mode.strip().lower()
-    validate_lazy_otoken_config(configured_series_mode)
-    validate_lazy_otoken_chain_config(configured_series_mode)
+    if settings.base_otoken_manager_enabled:
+        validate_lazy_otoken_config(configured_series_mode)
+        validate_lazy_otoken_chain_config(configured_series_mode)
 
     has_on_chain_config = (
         settings.batch_settler_address
         and settings.operator_private_key
         and settings.otoken_factory_address
     )
-    if has_on_chain_config:
-        from src.bots.otoken_manager import get_otoken_series_mode
-
-        get_otoken_series_mode()
-        from src.bots import (
-            otoken_manager,
-            event_indexer,
-            expiry_settler,
-            circuit_breaker_bot,
+    requested_base_workers = any(
+        (
+            settings.base_otoken_manager_enabled,
+            settings.base_event_indexer_enabled,
+            settings.base_expiry_settler_enabled,
+            settings.base_circuit_breaker_enabled,
         )
+    )
+    if has_on_chain_config:
+        started_base_workers = []
+        if settings.base_otoken_manager_enabled:
+            from src.bots import otoken_manager
+            from src.bots.otoken_manager import get_otoken_series_mode
 
-        tasks.append(asyncio.create_task(otoken_manager.run()))
-        tasks.append(asyncio.create_task(event_indexer.run()))
-        tasks.append(asyncio.create_task(expiry_settler.run()))
-        tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
-        logger.info("Started %d on-chain bots", len(tasks))
-    else:
+            get_otoken_series_mode()
+            tasks.append(asyncio.create_task(otoken_manager.run()))
+            started_base_workers.append("oToken manager")
+        if settings.base_event_indexer_enabled:
+            from src.bots import event_indexer
+
+            tasks.append(asyncio.create_task(event_indexer.run()))
+            started_base_workers.append("event indexer")
+        if settings.base_expiry_settler_enabled:
+            from src.bots import expiry_settler
+
+            tasks.append(asyncio.create_task(expiry_settler.run()))
+            started_base_workers.append("expiry settler")
+        if settings.base_circuit_breaker_enabled:
+            from src.bots import circuit_breaker_bot
+
+            tasks.append(asyncio.create_task(circuit_breaker_bot.run()))
+            started_base_workers.append("circuit breaker")
+        if started_base_workers:
+            logger.info("Base workers started: %s", ", ".join(started_base_workers))
+    elif requested_base_workers:
         logger.info(
-            "On-chain bots not started: contract addresses or operator key not configured"
+            "Base workers not started: contract addresses or operator key not configured"
         )
 
     if settings.tokenized_fund_indexer_enabled:
@@ -563,7 +580,11 @@ async def lifespan(app: FastAPI):
         logger.info("Fund NAV reporter started")
 
     # Yield indexer needs controller + margin pool addresses
-    if settings.controller_address and settings.margin_pool_address:
+    if (
+        settings.yield_indexer_enabled
+        and settings.controller_address
+        and settings.margin_pool_address
+    ):
         from src.bots import yield_indexer
 
         tasks.append(asyncio.create_task(yield_indexer.run()))
@@ -577,66 +598,29 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(weekly_aggregator.run()))
         logger.info("Legacy Agora v1 weekly aggregator started")
 
-    # ── Solana bots ──
-    if has_solana_config() and has_enabled_solana_bots():
-        from src.bots import (
-            solana_circuit_breaker_bot,
-            solana_event_indexer,
-            solana_expiry_settler,
-            solana_otoken_manager,
-        )
-
-        started_solana_bots = []
-        if is_solana_bot_enabled("circuit_breaker"):
-            tasks.append(asyncio.create_task(solana_circuit_breaker_bot.run()))
-            started_solana_bots.append("circuit breaker")
-        if is_solana_bot_enabled("event_indexer"):
-            tasks.append(asyncio.create_task(solana_event_indexer.run()))
-            started_solana_bots.append("event indexer")
-        if is_solana_bot_enabled("expiry_settler"):
-            tasks.append(asyncio.create_task(solana_expiry_settler.run()))
-            started_solana_bots.append("expiry settler")
-        if is_solana_bot_enabled("otoken_manager"):
-            tasks.append(asyncio.create_task(solana_otoken_manager.run()))
-            started_solana_bots.append("otoken manager")
-
-        if started_solana_bots:
-            logger.info(
-                "Solana bots started (cluster=%s): %s",
-                settings.solana_cluster,
-                ", ".join(started_solana_bots),
-            )
-        else:
-            logger.info("Solana runtime enabled but no Solana bots selected by flags")
-    elif has_solana_config():
-        logger.info(
-            "Solana bots not started: runtime disabled for env=%s (set SOLANA_BOTS_ENABLED=true or enable an individual bot flag to opt in)",
-            settings.app_env,
-        )
-    else:
-        logger.info(
-            "Solana bots not started: SOLANA_RPC_URL or program IDs not configured"
-        )
+    logger.info("Solana background workers disabled: Base-only runtime")
 
     # ── Bridge relayer ──
-    if has_bridge_config():
-        from src.bridge import relayer as bridge_relayer
+    if settings.bridge_relayer_enabled:
+        if has_bridge_config():
+            from src.bridge import relayer as bridge_relayer
 
-        tasks.append(asyncio.create_task(bridge_relayer.run()))
-        logger.info("Bridge relayer started")
-    else:
-        logger.info(
-            "Bridge relayer not started: CCTP addresses or relayer keys not configured"
-        )
+            tasks.append(asyncio.create_task(bridge_relayer.run()))
+            logger.info("Bridge relayer started")
+        else:
+            logger.info(
+                "Bridge relayer not started: CCTP addresses or relayer keys not configured"
+            )
 
     # Notification bot only needs Resend API key, not on-chain config
-    if settings.resend_api_key:
-        from src.bots import notification_bot
+    if settings.notification_bot_enabled:
+        if settings.resend_api_key:
+            from src.bots import notification_bot
 
-        tasks.append(asyncio.create_task(notification_bot.run()))
-        logger.info("Notification bot started")
-    else:
-        logger.info("Notification bot not started: RESEND_API_KEY not configured")
+            tasks.append(asyncio.create_task(notification_bot.run()))
+            logger.info("Notification bot started")
+        else:
+            logger.info("Notification bot not started: RESEND_API_KEY not configured")
 
     yield
 
