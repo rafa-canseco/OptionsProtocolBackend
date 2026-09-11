@@ -9,6 +9,13 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_env: str = "dev"
     background_workers_enabled: bool = True
+    base_otoken_manager_enabled: bool = False
+    base_event_indexer_enabled: bool = False
+    base_expiry_settler_enabled: bool = False
+    base_circuit_breaker_enabled: bool = False
+    yield_indexer_enabled: bool = False
+    bridge_relayer_enabled: bool = False
+    notification_bot_enabled: bool = False
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
