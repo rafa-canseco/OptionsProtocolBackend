@@ -42,6 +42,7 @@ router = APIRouter()
 
 USDC_DECIMALS = 6
 OTOKEN_DECIMALS = 8
+_ROUTED_SETTLEMENT_ASSETS = frozenset({"nvdac", "cbzec", "cbhype", "vvv"})
 
 # --- Caches (per asset) ---
 _PRICES_TTL = 15  # seconds
@@ -579,6 +580,11 @@ async def get_prices(
     Capacity status is served separately via ``GET /capacity``.
     """
     _ensure_asset_visible(asset)
+    if (
+        asset.value in _ROUTED_SETTLEMENT_ASSETS
+        and not settings.routed_settlement_publishing_enabled
+    ):
+        return []
     tradable = is_asset_tradable(asset.value)
 
     # Fetch spot early so we can self-heal a paused circuit breaker.

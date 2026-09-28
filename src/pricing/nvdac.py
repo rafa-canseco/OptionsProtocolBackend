@@ -28,6 +28,36 @@ def _schedule(start: datetime, end: datetime):
     ).schedule
 
 
+def is_nvdac_24x5_session(at: datetime | None = None) -> bool:
+    """Return whether ``at`` is in an approved NVDAc 24/5 session window.
+
+    Each XNYS session day runs from 20:00 ET on the previous calendar day
+    through 20:00 ET on the session day. Missing, duplicate, or unavailable
+    calendar data fails closed.
+    """
+    at = at or datetime.now(timezone.utc)
+    if at.tzinfo is None:
+        raise ValueError("Market-session timestamp must be timezone-aware")
+    try:
+        local = at.astimezone(_EASTERN)
+        session_day = local.date() + (
+            timedelta(days=1) if local.hour >= 20 else timedelta()
+        )
+        schedule = _schedule(at - timedelta(days=2), at + timedelta(days=2))
+        rows = schedule[schedule.index.date == session_day]
+        if len(rows) != 1 or schedule.index.has_duplicates:
+            return False
+        opens_at = datetime.combine(
+            session_day - timedelta(days=1), datetime.min.time(), _EASTERN
+        ).replace(hour=20)
+        closes_at = datetime.combine(
+            session_day, datetime.min.time(), _EASTERN
+        ).replace(hour=20)
+        return opens_at <= local < closes_at
+    except Exception:
+        return False
+
+
 def is_us_regular_session(at: datetime | None = None) -> bool:
     at = at or datetime.now(timezone.utc)
     if at.tzinfo is None:

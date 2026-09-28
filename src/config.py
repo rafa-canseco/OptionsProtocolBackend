@@ -41,6 +41,8 @@ class Settings(BaseSettings):
         "0x21082CA28570f0ccfb089465bFaEfDc77b00D367"
     )
     chainlink_oracle_max_age_seconds: int = Field(default=3600, gt=0, le=3600)
+    chainlink_nvdac_heartbeat_seconds: int = Field(default=86400, ge=86400, le=86400)
+    chainlink_nvdac_grace_seconds: int = Field(default=300, ge=300, le=300)
     base_sequencer_uptime_feed_address: str = (
         "0xBCF85224fc0756B9Fa45aA7892530B47e10b6433"
     )

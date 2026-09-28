@@ -24,7 +24,7 @@ from src.pricing.assets import BaseSettlementAssetConfig, get_base_settlement_as
 from src.pricing.nvdac import (
     CloseWindow,
     get_finalized_close_window,
-    is_us_regular_session,
+    is_nvdac_24x5_session,
 )
 from src.pricing.chainlink import (
     AGGREGATOR_V3_ABI,
@@ -77,7 +77,6 @@ class RouteQuote:
 @dataclass(frozen=True)
 class NvdacClosePrice:
     price_8: int
-    adjusted_price_8: int
     close_at: int
     next_session_open_at: int
     round_id: int = 0
@@ -369,7 +368,7 @@ def read_nvdac_close_price_8(
 ) -> NvdacClosePrice:
     """Read the exact Chainlink close answer and its exchange-calendar window."""
     cfg, route = _require_enabled("nvdac")
-    multiplier = _validate_b20(cfg, route, participants)
+    _validate_b20(cfg, route, participants)
     now = now or int(datetime.now(timezone.utc).timestamp())
     window = get_finalized_close_window(expiry, now=now)
     w3, sequencer = _source_w3(route)
@@ -380,12 +379,10 @@ def read_nvdac_close_price_8(
         > window.reference_price_8 * ORACLE_DEVIATION_BPS
     ):
         raise ValueError("NVDA Yahoo-vs-Chainlink close deviation exceeds 100 bps")
-    adjusted = price_8 * multiplier // WAD
-    if price_8 <= 0 or adjusted <= 0:
-        raise ValueError("nvdac Chainlink close or multiplier-adjusted price is zero")
+    if price_8 <= 0:
+        raise ValueError("nvdac Chainlink close price is zero")
     return NvdacClosePrice(
         price_8,
-        adjusted,
         window.close_at,
         window.next_session_open_at,
         result.round_id,
@@ -403,16 +400,19 @@ def read_new_asset_price_snapshot(
 ) -> LiveAssetPrice:
     """Read a routed asset price and its validated Chainlink timestamp."""
     now = now or int(datetime.now(timezone.utc).timestamp())
-    if asset == "nvdac" and not is_us_regular_session(
+    if asset == "nvdac" and not is_nvdac_24x5_session(
         datetime.fromtimestamp(now, timezone.utc)
     ):
-        raise ValueError("NVDAc live Chainlink price unavailable outside session")
+        raise ValueError("NVDAc live Chainlink price unavailable outside 24/5 session")
 
     cfg, route = _require_enabled(asset)
     multiplier = _validate_b20(cfg, route, participants)
     w3, sequencer = _source_w3(route)
-    max_age_seconds = min(
-        settings.chainlink_oracle_max_age_seconds, MAX_ORACLE_AGE_SECONDS
+    max_age_seconds = (
+        settings.chainlink_nvdac_heartbeat_seconds
+        + settings.chainlink_nvdac_grace_seconds
+        if asset == "nvdac"
+        else min(settings.chainlink_oracle_max_age_seconds, MAX_ORACLE_AGE_SECONDS)
     )
     if not_before:
         expiry_window_end = not_before + MAX_ORACLE_AGE_SECONDS
@@ -432,8 +432,12 @@ def read_new_asset_price_snapshot(
         sequencer_feed_address=sequencer,
         sequencer_grace_seconds=settings.arbitrum_sequencer_grace_period_seconds,
     )
+    # The NVDAc Chainlink answer is already a total-return price. The B20
+    # multiplier is validated above for pause/equality/policy safety, not reapplied.
     adjusted_raw = (
-        result.raw_answer * multiplier // WAD if apply_multiplier else result.raw_answer
+        result.raw_answer * multiplier // WAD
+        if apply_multiplier and asset != "nvdac"
+        else result.raw_answer
     )
     adjusted = normalize_to_8_decimals(adjusted_raw, result.source_decimals)
     if adjusted <= 0:
@@ -566,6 +570,14 @@ def _validate_adapter_and_pool(asset: str, route: dict[str, Any]) -> int:
         ):
             raise ValueError(f"{asset} Uniswap adapter immutable identity mismatch")
 
+    underlying = get_b20_contract(cfg.underlying_address)
+    usdc = get_b20_contract(settings.usdc_address)
+    if (
+        int(underlying.functions.decimals().call()) != cfg.decimals
+        or int(usdc.functions.decimals().call()) != 6
+    ):
+        raise ValueError(f"{asset} pool token decimals mismatch")
+
     pool = get_settlement_pool(route["pool"])
     if (
         pool.functions.token0().call().lower() != settings.usdc_address.lower()
@@ -588,6 +600,17 @@ def _spot_quote(sqrt_price_x96: int, amount: int, is_put: bool) -> int:
     if is_put:  # exact asset output -> expected USDC input, rounded up
         return (amount * Q192 + ratio - 1) // ratio
     return amount * Q192 // ratio  # exact asset input -> expected USDC output
+
+
+def validate_live_price_against_pool(asset: str, price_8: int) -> None:
+    """Fail closed unless canonical Base pool spot is within 100 bps of oracle."""
+    cfg, route = _require_enabled(asset)
+    sqrt_price = _validate_adapter_and_pool(asset, route)
+    one_token = 10**cfg.decimals
+    pool_spot = _spot_quote(sqrt_price, one_token, False)
+    oracle_spot = _oracle_quote(price_8, one_token, cfg.decimals, False)
+    if not _within_bps(pool_spot, oracle_spot, ORACLE_DEVIATION_BPS):
+        raise ValueError(f"{asset} oracle-vs-pool deviation exceeds 100 bps")
 
 
 def _slippage_limit(quote: int, is_put: bool) -> int:

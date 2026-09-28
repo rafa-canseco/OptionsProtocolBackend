@@ -9,10 +9,15 @@ import pytest
 from src.bots.expiry_settler import _ensure_expiry_prices_set
 from src.config import settings
 from src.pricing.assets import Asset, get_base_settlement_asset
-from src.pricing.chainlink import ValidatedChainlinkRound, get_asset_price_raw
+from src.pricing.chainlink import (
+    ValidatedChainlinkRound,
+    get_asset_price_raw,
+    read_validated_chainlink_round,
+)
 from src.pricing.nvdac import (
     CloseWindow,
     get_finalized_close_window,
+    is_nvdac_24x5_session,
     is_us_regular_session,
 )
 from src.settlement_routing import (
@@ -53,6 +58,27 @@ def _ts(year, month, day, hour, minute=0):
 )
 def test_us_regular_session_boundaries_weekend_holiday_and_early_close(at, expected):
     assert is_us_regular_session(at) is expected
+
+
+@pytest.mark.parametrize(
+    ("at", "expected"),
+    [
+        (datetime(2026, 1, 4, 19, 59, tzinfo=_ET), False),  # Sunday
+        (datetime(2026, 1, 4, 20, 0, tzinfo=_ET), True),
+        (datetime(2026, 1, 5, 2, 0, tzinfo=_ET), True),  # weekday overnight
+        (datetime(2026, 1, 9, 19, 59, tzinfo=_ET), True),
+        (datetime(2026, 1, 9, 20, 0, tzinfo=_ET), False),  # weekend
+        (datetime(2026, 1, 18, 20, 0, tzinfo=_ET), False),  # MLK session
+        (datetime(2026, 1, 19, 20, 0, tzinfo=_ET), True),
+    ],
+)
+def test_nvdac_24x5_session_boundaries(at, expected):
+    assert is_nvdac_24x5_session(at) is expected
+
+
+def test_nvdac_24x5_session_calendar_error_fails_closed():
+    with patch("src.pricing.nvdac._schedule", side_effect=RuntimeError("calendar")):
+        assert not is_nvdac_24x5_session(datetime(2026, 1, 5, 12, tzinfo=_ET))
 
 
 def _history(*dates_and_closes):
@@ -145,16 +171,20 @@ def test_nvdac_raw_price_uses_adjusted_routed_snapshot():
     updated_at = _ts(2026, 1, 6, 10)
     now = _ts(2026, 1, 6, 10, 30)
     snapshot = SimpleNamespace(price_8=38_000_000_000, updated_at=updated_at)
-    with patch(
-        "src.settlement_routing.read_new_asset_price_snapshot",
-        return_value=snapshot,
-    ) as read:
+    with (
+        patch(
+            "src.settlement_routing.read_new_asset_price_snapshot",
+            return_value=snapshot,
+        ) as read,
+        patch("src.settlement_routing.validate_live_price_against_pool") as pool,
+    ):
         assert get_asset_price_raw(Asset.NVDAC, now=now) == (
             38_000_000_000,
             8,
             updated_at,
         )
     read.assert_called_once_with("nvdac", now=now)
+    pool.assert_called_once_with("nvdac", 38_000_000_000)
 
     with (
         patch(
@@ -166,6 +196,47 @@ def test_nvdac_raw_price_uses_adjusted_routed_snapshot():
         pytest.raises(ValueError, match="outside session"),
     ):
         get_asset_price_raw(Asset.NVDAC, now=_ts(2026, 1, 6, 16))
+
+
+@pytest.mark.parametrize(("age", "accepted"), [(86_700, True), (86_701, False)])
+def test_nvdac_oracle_age_boundary(age, accepted):
+    now = 100_000
+    updated_at = now - age
+    w3 = MagicMock()
+    w3.eth.chain_id = settings.chain_id
+    feed = MagicMock()
+    feed.functions.decimals.return_value.call.return_value = 8
+    feed.functions.description.return_value.call.return_value = (
+        settings.chainlink_nvdac_usd_description
+    )
+    feed.functions.latestRoundData.return_value.call.return_value = (
+        7,
+        123 * 10**8,
+        updated_at,
+        updated_at,
+        7,
+    )
+    w3.eth.contract.return_value = feed
+
+    def call():
+        return read_validated_chainlink_round(
+            w3,
+            settings.chainlink_nvdac_usd_address,
+            expected_chain_id=settings.chain_id,
+            expected_decimals=8,
+            expected_description=settings.chainlink_nvdac_usd_description,
+            max_age_seconds=(
+                settings.chainlink_nvdac_heartbeat_seconds
+                + settings.chainlink_nvdac_grace_seconds
+            ),
+            now=now,
+        )
+
+    if accepted:
+        assert call().updated_at == updated_at
+    else:
+        with pytest.raises(ValueError, match="stale"):
+            call()
 
 
 def test_crypto_raw_price_path_remains_unchanged_by_market_hours():
@@ -184,7 +255,7 @@ def test_crypto_raw_price_path_remains_unchanged_by_market_hours():
         assert get_asset_price_raw(Asset.ETH) == (250_000_000_000, 8, 1)
 
 
-def test_live_nvdac_expiry_price_can_skip_multiplier_for_oracle_units():
+def test_live_nvdac_total_return_price_is_never_multiplied_twice():
     cfg = get_base_settlement_asset("nvdac")
     route = {
         "source_chain": settings.chain_id,
@@ -196,16 +267,19 @@ def test_live_nvdac_expiry_price_can_skip_multiplier_for_oracle_units():
     with (
         patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
         patch("src.settlement_routing._validate_b20", return_value=2 * 10**18),
-        patch("src.settlement_routing.is_us_regular_session", return_value=True),
+        patch("src.settlement_routing.is_nvdac_24x5_session", return_value=True),
         patch("src.settlement_routing._source_w3", return_value=(MagicMock(), "")),
         patch(
             "src.settlement_routing.read_validated_chainlink_round", return_value=result
-        ),
+        ) as read_round,
     ):
         assert (
             read_new_asset_price_8("nvdac", now=10_000, apply_multiplier=False) == 123
         )
-        assert read_new_asset_price_8("nvdac", now=10_000) == 246
+        assert read_new_asset_price_8("nvdac", now=10_000) == 123
+    assert all(
+        call.kwargs["max_age_seconds"] == 86_700 for call in read_round.call_args_list
+    )
 
 
 def test_close_price_uses_exact_chainlink_answer_and_one_hour_close_window():
@@ -232,7 +306,7 @@ def test_close_price_uses_exact_chainlink_answer_and_one_hour_close_window():
     ):
         result = read_nvdac_close_price_8(expiry, now=_ts(2026, 1, 11, 13))
     assert result == NvdacClosePrice(
-        123, 246, window.close_at, window.next_session_open_at, 321
+        123, window.close_at, window.next_session_open_at, 321
     )
     assert "not_before" not in read.call_args_list[0].kwargs
     assert "not_after" not in read.call_args_list[0].kwargs
@@ -350,10 +424,10 @@ def test_close_price_rejects_yahoo_chainlink_deviation_over_100_bps():
         read_nvdac_close_price_8(5_000, now=6_000)
 
 
-def test_outside_session_close_is_settlement_only():
+def test_outside_24x5_session_close_is_settlement_only():
     now = _ts(2026, 1, 11, 13)
-    with patch("src.settlement_routing.is_us_regular_session", return_value=False):
-        with pytest.raises(ValueError, match="unavailable outside session"):
+    with patch("src.settlement_routing.is_nvdac_24x5_session", return_value=False):
+        with pytest.raises(ValueError, match="outside 24/5 session"):
             read_new_asset_price_8("nvdac", now=now)
 
 
@@ -402,7 +476,7 @@ def test_expiry_setter_passes_nvdac_expiry_to_close_policy():
         patch("src.bots.expiry_settler.is_us_regular_session", return_value=False),
         patch(
             "src.bots.expiry_settler.read_nvdac_close_price_8",
-            return_value=NvdacClosePrice(123, 246, expiry - 3600, expiry + 3600, 321),
+            return_value=NvdacClosePrice(123, expiry - 3600, expiry + 3600, 321),
         ) as read_close,
         patch("src.bots.expiry_settler.build_and_send_tx", return_value="0xtx"),
     ):

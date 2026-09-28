@@ -111,6 +111,29 @@ def test_get_prices():
         assert isinstance(data, list)
 
 
+def test_get_prices_hides_routed_quotes_when_publishing_disabled(monkeypatch):
+    monkeypatch.setattr(routes_module.settings, "visible_assets", "eth,nvdac")
+    monkeypatch.setattr(
+        routes_module.settings, "routed_settlement_publishing_enabled", False
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "_fetch_active_quotes",
+        lambda asset: pytest.fail("disabled routed quotes must not be fetched"),
+    )
+    monkeypatch.setattr(
+        routes_module,
+        "get_asset_price",
+        lambda asset: pytest.fail("disabled routed spot must not be fetched"),
+        raising=False,
+    )
+
+    response = client.get("/prices?asset=nvdac")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 def test_get_tslax_spot_uses_solana_oracle():
     with pytest.MonkeyPatch.context() as mp:
         from src.chains.solana import oracle
