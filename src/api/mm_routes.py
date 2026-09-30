@@ -46,7 +46,7 @@ from src.models.mm import (
     QuoteSubmission,
 )
 from src.models.snapshot import SnapshotEnvelope
-from src.pricing.assets import Asset, get_chain_for_asset
+from src.pricing.assets import Asset, get_chain_for_asset, resolve_base_underlying
 from src.pricing.chainlink import get_asset_price
 from src.pricing.deribit import get_iv
 from src.pricing.utils import get_expiries
@@ -187,6 +187,61 @@ def _resolve_nonce(
         return mm_address.lower(), market_maker.maker_nonce
 
 
+def _validate_routed_quote_preflight(body: QuoteBatchRequest) -> None:
+    """Revalidate routed markets and bind quote metadata before publication."""
+    quotes = [
+        quote
+        for quote in body.quotes
+        if quote.chain == "base" and quote.asset in {"nvdac", "cbzec", "cbhype", "vvv"}
+    ]
+    if not quotes:
+        return
+    if not settings.routed_settlement_publishing_enabled:
+        raise HTTPException(503, "Routed quote publishing is disabled")
+
+    for asset in sorted({quote.asset for quote in quotes}):
+        try:
+            get_asset_price(Asset(asset))
+        except Exception as exc:
+            logger.warning("Routed quote preflight failed for %s", asset)
+            raise HTTPException(
+                503, f"{asset.upper()} market preflight failed"
+            ) from exc
+
+    try:
+        result = (
+            get_client()
+            .table("available_otokens")
+            .select("otoken_address,underlying,strike_price,expiry,is_put")
+            .in_("otoken_address", [quote.otoken_address for quote in quotes])
+            .execute()
+        )
+        if result.data is None:
+            raise RuntimeError("available_otokens identity query returned no payload")
+        identities = {str(row["otoken_address"]).lower(): row for row in result.data}
+    except Exception as exc:
+        logger.warning("Routed quote identity lookup failed")
+        raise HTTPException(503, "Routed quote identity unavailable") from exc
+
+    for quote in quotes:
+        row = identities.get(quote.otoken_address.lower())
+        try:
+            identity_matches = (
+                row is not None
+                and resolve_base_underlying(str(row["underlying"])).asset == quote.asset
+                and quote.strike_price is not None
+                and float(row["strike_price"]) == quote.strike_price
+                and quote.expiry is not None
+                and int(row["expiry"]) == quote.expiry
+                and quote.is_put is not None
+                and bool(row["is_put"]) == quote.is_put
+            )
+        except (KeyError, TypeError, ValueError):
+            identity_matches = False
+        if not identity_matches:
+            raise HTTPException(400, "Quote metadata does not match registered oToken")
+
+
 def _prune_stale_quotes_for_mm(db, mm_id: str, chain: str, now_ts: int) -> None:
     """Delete quotes that can no longer be served or executed.
 
@@ -227,6 +282,7 @@ async def submit_quotes(
         )
     chain = chains_in_batch.pop()
 
+    _validate_routed_quote_preflight(body)
     mm_id, current_nonce = _resolve_nonce(chain, body, mm_address)
 
     rows_to_upsert = []

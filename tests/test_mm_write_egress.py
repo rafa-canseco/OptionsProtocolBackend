@@ -2,7 +2,10 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from postgrest.types import CountMethod, ReturnMethod
+from pydantic import ValidationError
 
 from src.api.mm_routes import (
     _prune_stale_quotes_for_mm,
@@ -31,6 +34,91 @@ def _base_quote() -> QuoteSubmission:
         expiry=3_000,
         is_put=True,
     )
+
+
+@pytest.mark.parametrize("asset", ("nvdac", "cbzec", "cbhype", "vvv"))
+def test_routed_assets_are_valid_quote_and_capacity_models(asset: str) -> None:
+    quote = QuoteSubmission(**{**_base_quote().model_dump(), "asset": asset})
+    capacity = CapacityUpdateRequest(
+        asset=asset,
+        capacity_eth=1,
+        capacity_usd=100,
+        status="active",
+    )
+    assert quote.asset == asset
+    assert capacity.asset == asset
+
+
+def test_unknown_assets_remain_rejected() -> None:
+    with pytest.raises(ValidationError, match="asset must be one of"):
+        QuoteSubmission(**{**_base_quote().model_dump(), "asset": "unknown"})
+    with pytest.raises(ValidationError, match="asset must be one of"):
+        CapacityUpdateRequest(
+            asset="unknown",
+            capacity_eth=1,
+            capacity_usd=100,
+            status="active",
+        )
+
+
+def test_routed_quote_publish_fails_closed_when_publishing_disabled() -> None:
+    quote = QuoteSubmission(**{**_base_quote().model_dump(), "asset": "nvdac"})
+    body = QuoteBatchRequest(quotes=[quote])
+    with (
+        patch("src.api.mm_routes.settings.routed_settlement_publishing_enabled", False),
+        patch("src.api.mm_routes.get_asset_price") as price,
+        patch("src.api.mm_routes._resolve_nonce") as nonce,
+        patch("src.api.mm_routes.get_client") as db,
+        pytest.raises(HTTPException) as exc,
+    ):
+        asyncio.run(submit_quotes(body=body, mm_address=MM_ADDRESS))
+    assert exc.value.status_code == 503
+    price.assert_not_called()
+    nonce.assert_not_called()
+    db.assert_not_called()
+
+
+def test_routed_quote_publish_fails_closed_on_market_preflight() -> None:
+    quote = QuoteSubmission(**{**_base_quote().model_dump(), "asset": "nvdac"})
+    body = QuoteBatchRequest(quotes=[quote])
+    with (
+        patch("src.api.mm_routes.settings.routed_settlement_publishing_enabled", True),
+        patch("src.api.mm_routes.get_asset_price", side_effect=ValueError("stale")),
+        patch("src.api.mm_routes._resolve_nonce") as nonce,
+        patch("src.api.mm_routes.get_client") as db,
+        pytest.raises(HTTPException) as exc,
+    ):
+        asyncio.run(submit_quotes(body=body, mm_address=MM_ADDRESS))
+    assert exc.value.status_code == 503
+    nonce.assert_not_called()
+    db.assert_not_called()
+
+
+def test_routed_quote_metadata_must_match_registered_otoken() -> None:
+    quote = QuoteSubmission(**{**_base_quote().model_dump(), "asset": "nvdac"})
+    body = QuoteBatchRequest(quotes=[quote])
+    identity_db = MagicMock()
+    identity_db.table.return_value.select.return_value.in_.return_value.execute.return_value = SimpleNamespace(
+        data=[
+            {
+                "otoken_address": quote.otoken_address,
+                "underlying": "0xB2000000000000000000008501b13360000cb2EC",
+                "strike_price": quote.strike_price,
+                "expiry": quote.expiry,
+                "is_put": quote.is_put,
+            }
+        ]
+    )
+    with (
+        patch("src.api.mm_routes.settings.routed_settlement_publishing_enabled", True),
+        patch("src.api.mm_routes.get_asset_price", return_value=(100.0, 1_000)),
+        patch("src.api.mm_routes.get_client", return_value=identity_db),
+        patch("src.api.mm_routes._resolve_nonce") as nonce,
+        pytest.raises(HTTPException) as exc,
+    ):
+        asyncio.run(submit_quotes(body=body, mm_address=MM_ADDRESS))
+    assert exc.value.status_code == 400
+    nonce.assert_not_called()
 
 
 def test_submit_quotes_discards_all_write_representations() -> None:

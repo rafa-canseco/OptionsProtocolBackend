@@ -33,6 +33,7 @@ from src.settlement_routing import (
     assert_route_unchanged,
     build_route_quote,
     read_new_asset_price_8,
+    validate_live_price_against_pool,
 )
 
 
@@ -70,6 +71,28 @@ def test_base_underlying_resolution_is_address_based(setting, asset):
 def test_base_underlying_resolution_fails_closed(address):
     with pytest.raises(ValueError):
         resolve_base_underlying(address)  # type: ignore[arg-type]
+
+
+def test_nvdac_oracle_age_policy_is_fixed_and_cannot_be_widened():
+    configured = Settings(
+        _env_file=None,
+        supabase_url="https://example.invalid",
+        supabase_anon_key="test-anon",
+        supabase_service_role_key="test-service",
+    )
+    assert (
+        configured.chainlink_nvdac_heartbeat_seconds
+        + configured.chainlink_nvdac_grace_seconds
+        == 86_700
+    )
+    with pytest.raises(ValidationError, match="chainlink_nvdac_grace_seconds"):
+        Settings(
+            _env_file=None,
+            supabase_url="https://example.invalid",
+            supabase_anon_key="test-anon",
+            supabase_service_role_key="test-service",
+            chainlink_nvdac_grace_seconds=301,
+        )
 
 
 def test_oracle_max_age_configuration_cannot_exceed_one_hour():
@@ -521,6 +544,26 @@ def test_routed_oracle_caps_age_and_expiry_window_if_runtime_setting_is_widened(
 
     assert read_round.call_args.kwargs["max_age_seconds"] == 3600
     assert read_round.call_args.kwargs["not_after"] == 11_600
+
+
+@pytest.mark.parametrize(
+    ("pool_spot", "accepted"), [(101_000_000, True), (101_000_001, False)]
+)
+def test_live_pool_deviation_boundary_is_inclusive_at_100_bps(pool_spot, accepted):
+    cfg = get_base_settlement_asset("nvdac")
+    route = _nvdac_route()
+    with (
+        patch("src.settlement_routing._require_enabled", return_value=(cfg, route)),
+        patch(
+            "src.settlement_routing._validate_adapter_and_pool", return_value=1 << 96
+        ),
+        patch("src.settlement_routing._spot_quote", return_value=pool_spot),
+    ):
+        if accepted:
+            validate_live_price_against_pool("nvdac", 100 * 10**8)
+        else:
+            with pytest.raises(ValueError, match="deviation exceeds 100 bps"):
+                validate_live_price_against_pool("nvdac", 100 * 10**8)
 
 
 def test_multiplier_applies_before_18_to_8_normalization():
