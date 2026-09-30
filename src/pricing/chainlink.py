@@ -214,19 +214,17 @@ def get_asset_price_raw(
 ) -> tuple[int, int, int]:
     """Read raw price from Chainlink for any supported asset.
 
-    Returns (raw_answer, decimals, updated_at_timestamp). NVDAc is available
-    only during the US regular session and must be at most one hour old.
+    Returns (raw_answer, decimals, updated_at_timestamp). Routed assets also
+    require their canonical Base pool spot to remain within 100 bps.
     """
-    if asset == Asset.NVDAC:
-        from src.settlement_routing import read_new_asset_price_snapshot
+    if asset in (Asset.NVDAC, Asset.CBZEC, Asset.CBHYPE, Asset.VVV):
+        from src.settlement_routing import (
+            read_new_asset_price_snapshot,
+            validate_live_price_against_pool,
+        )
 
         snapshot = read_new_asset_price_snapshot(asset.value, now=now)
-        return snapshot.price_8, 8, snapshot.updated_at
-
-    if asset in (Asset.CBZEC, Asset.CBHYPE, Asset.VVV):
-        from src.settlement_routing import read_new_asset_price_snapshot
-
-        snapshot = read_new_asset_price_snapshot(asset.value, now=now)
+        validate_live_price_against_pool(asset.value, snapshot.price_8)
         return snapshot.price_8, 8, snapshot.updated_at
 
     feed = _get_feed(asset)
